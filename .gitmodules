@@ -1,0 +1,3 @@
+[submodule "deps/BlobBoards.jl"]
+	path = deps/BlobBoards.jl
+	url = git@github.com:prittjam/BlobBoards.jl.git

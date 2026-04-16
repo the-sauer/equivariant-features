@@ -1,0 +1,6 @@
+torch >= 2.11, < 3
+torchvision >= 0.26, < 1
+kornia >= 0.8, < 1
+juliacall >= 0.9, < 1
+git+https://github.com/the-sauer/sesn
+-e./deps/BlobBoards.jl/python
