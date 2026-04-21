@@ -14,26 +14,13 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import juliacall    # Must be imported before PyTorch
 
 import blobboards
 import kornia
-import sesn
 import torch
 
-from transforms import random_affine
-
-
-def NeuralScaleSpace(in_channels, factor=2.0, num_scales=4, min_scale=1.0) -> torch.nn.Module:
-    q = factor ** (1 / (num_scales - 1))
-    scales = [min_scale * q**i for i in range(num_scales)]
-    return torch.nn.Sequential(
-        sesn.SESConv_Z2_H(in_channels, 8, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H(8, 16, 5, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H(16, 32, 5, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H_1x1(32, 1, num_scales=len(scales)),
-        sesn.SESArgMaxProjection(scales)
-    )
+from ..data.blobboards import BlobBoardData
+from ..models.scale import NeuralScaleSpace
 
 
 def compute_scale(H, size):
@@ -86,7 +73,7 @@ def compute_scale(H, size):
     return scale.view(N, 1, size[0], size[1])
 
 
-def train_scale(model, n_boards, pattern_size=(256, 256), batch_size=100):
+def train_scale(model, dataset, pattern_size=(256, 256), batch_size=100):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = model.to(device)
@@ -95,24 +82,8 @@ def train_scale(model, n_boards, pattern_size=(256, 256), batch_size=100):
 
     loss_func = torch.nn.MSELoss()
 
-    boards = torch.stack([
-        torch.Tensor(blobboards.blob_pattern(*pattern_size).pattern).unsqueeze(0) for _ in range(n_boards)]
-    )
-
-    transforms = random_affine(n=n_boards)
-    transforms_inv = torch.linalg.inv(transforms)
-
-    boards_transformed = kornia.geometry.transform.warp_perspective(
-        boards.expand(-1, 3, -1, -1),
-        transforms,
-        pattern_size,
-        padding_mode="fill",
-        fill_value=torch.ones((3,))
-    )[:, :1, ...]
-
-    assert boards.size() == boards_transformed.size()
     training_loader = torch.utils.data.DataLoader(
-        list(zip(boards, boards_transformed, transforms, transforms_inv)),
+        dataset,
         batch_size=batch_size,
         shuffle=True
     )
@@ -132,4 +103,6 @@ def train_scale(model, n_boards, pattern_size=(256, 256), batch_size=100):
         print(f"loss {loss.item()}", flush=True)
 
 
-train_scale(NeuralScaleSpace(1), 500, batch_size=20)
+if __name__ == "__main__":
+    model = NeuralScaleSpace(1)
+    train_scale(model, 100, batch_size=10)
