@@ -1,6 +1,9 @@
+python-dotenv
+pytorch-metric-learning >= 1.2, < 2
 torch >= 2.11, < 3
 torchvision >= 0.26, < 1
 kornia >= 0.8, < 1
 juliacall >= 0.9, < 1
 git+https://github.com/the-sauer/sesn
+asel[rbf] @ git+https://github.com/the-sauer/EquivarLayer
 -e./deps/BlobBoards.jl/python
