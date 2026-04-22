@@ -1,0 +1,3 @@
+name: "affine_feature_net_one"
+params:
+  feature_size: 128

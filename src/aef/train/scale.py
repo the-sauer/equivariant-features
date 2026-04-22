@@ -15,12 +15,14 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-import blobboards
+import os
+
 import kornia
+import omegaconf
 import torch
 
-from ..data.blobboards import BlobBoardData
 from ..models.scale import NeuralScaleSpace
+from ..train import LOSSES, OPTIMIZERS
 
 
 def compute_scale(H, size):
@@ -73,36 +75,42 @@ def compute_scale(H, size):
     return scale.view(N, 1, size[0], size[1])
 
 
-def train_scale(model, dataset, pattern_size=(256, 256), batch_size=100):
+def train_scale(model, dataset, cfg, experiment_name="default"):
+    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
+    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
+        f.write(omegaconf.OmegaConf.to_yaml(cfg))
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
 
-    loss_func = torch.nn.MSELoss()
+    criterion = LOSSES[cfg.training.loss]()
 
     training_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=cfg.training.batch_size,
         shuffle=True
     )
+    batch_counter = 0
     for data in training_loader:
         b, b_t, H, H_inv = map(lambda x: x.to(device), data)
-        gt = compute_scale(H, pattern_size)
+        gt = compute_scale(H, b.shape[2:])
         optimizer.zero_grad()
 
         o = model(b)
         o_t = model(b_t)
-        o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, pattern_size)
+        o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
 
-        loss = loss_func(o_t / o, gt)
+        loss = criterion(o_t / o, gt)
         loss.backward()
         optimizer.step()
 
         print(f"loss {loss.item()}", flush=True)
 
-
-if __name__ == "__main__":
-    model = NeuralScaleSpace(1)
-    train_scale(model, 100, batch_size=10)
+        batch_counter += 1
+        if batch_counter % cfg.logging.interval == 0:
+            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"batch_{batch_counter:06d}.pth"))

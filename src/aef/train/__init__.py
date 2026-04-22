@@ -13,3 +13,20 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+from pytorch_metric_learning import losses
+import torch
+
+
+OPTIMIZERS = {
+    "adam": torch.optim.Adam,
+    "sgd": torch.optim.SGD
+}
+
+LOSSES = {
+    "triplet_margin": losses.TripletMarginLoss,
+    "npairs": losses.NPairsLoss,
+    "supcon": losses.SupConLoss,
+    "mse": torch.nn.MSELoss
+}

@@ -16,12 +16,15 @@
 
 from enum import Enum
 import logging
-from typing import Iterable, Union
+import os
+from typing import Iterable
 
 import kornia
-from pytorch_metric_learning import losses
+import omegaconf
 import torch
 from torchvision.transforms import v2
+
+from ..train import OPTIMIZERS, LOSSES
 
 
 class Detector(Enum):
@@ -56,77 +59,97 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
     return map(coordinate_map, zip(H, detections))
 
 
-def train(model, dataset, batch_size=100, feature_choice: Union[str, int] = 10):
+def train(model, dataset, cfg, experiment_name="default"):
+    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
+    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
+        f.write(omegaconf.OmegaConf.to_yaml(cfg))
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = model.to(device)
-
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
     train_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=cfg.training.batch_size,
         shuffle=True
     )
-    criterion = losses.TripletMarginLoss()
+
+    criterion = LOSSES[cfg.training.loss]()
 
     augmentation = v2.Compose([
-        v2.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
-        v2.GaussianBlur(kernel_size=3),
-        v2.GaussianNoise(),
+        v2.ColorJitter(**cfg.training.augmentation.color_jitter),
+        v2.GaussianBlur(
+            cfg.training.augmentation.gaussian_blur.kernel_size,
+            sigma=cfg.training.augmentation.gaussian_blur.sigma
+        ),
+        v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
     ])
+    for epoch in range(cfg.training.num_epochs):
+        batch_counter = 0
+        for (img, img_t, H, H_inv) in train_loader:
+            img = img.to(device)
+            img_t = augmentation(img_t.to(device))
+            optimizer.zero_grad()
 
-    for (img, img_t, H, H_inv) in train_loader:
-        img = img.to(device)
-        img_t = augmentation(img_t.to(device))
-        optimizer.zero_grad()
+            feature_map = model(img)
+            feature_map_t = model(img_t)
 
-        feature_map = model(img)
-        feature_map_t = model(img_t)
+            if "detector" in cfg.training.feature_sampling:
+                # TODO: Fix this
+                H = H.to(device)
+                detections = detect(img)
+                detections_t = warp_detections(detections, H)
 
-        if isinstance(feature_choice, str):
-            # TODO: Fix this
-            H = H.to(device)
-            detections = detect(img)
-            detections_t = warp_detections(detections, H)
+                valid_detections = map(
+                    lambda ds:
+                        (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
+                        & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
+                    detections_t
+                )
 
-            valid_detections = map(
-                lambda ds:
-                    (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
-                    & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
-                detections_t
-            )
+                detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
+                detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
+                features = torch.empty(sum(map(len, detections)), model.feature_size)
+                features_t = torch.empty(sum(map(len, detections)), model.feature_size)
 
-            detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
-            detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
-            features = torch.empty(sum(map(len, detections)), model.feature_size)
-            features_t = torch.empty(sum(map(len, detections)), model.feature_size)
+                i = 0
+                for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
+                    for d, d_t in zip(ds, ds_t):
+                        features[i, :] = feature_map[j, :, *d].squeeze()
+                        features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
+                        i += 1
 
-            i = 0
-            for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
-                for d, d_t in zip(ds, ds_t):
-                    features[i, :] = feature_map[j, :, *d].squeeze()
-                    features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
-                    i += 1
+                y = torch.cat((features, features_t))
+                labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+            else:
+                if "stride" in cfg.training.feature_sampling:
+                    feature_stride = cfg.training.feature_sampling.stride
+                elif "num_features" in cfg.training.feature_sampling:
+                    feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
+                else:
+                    raise ValueError("No valid feature sampling method")
 
-            y = torch.cat((features, features_t))
-            labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
-        else:
-            feature_stride = feature_map.size(2) // feature_choice
-            H_inv = H_inv.to(device)
-            feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
+                H_inv = H_inv.to(device)
+                feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
 
-            y = torch.cat((
-                feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :],
-                feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
-            ))
-            assert y.size(0) % 2 == 0
-            labels = torch.cat((
-                torch.arange(y.size(0) // 2),
-                torch.arange(y.size(0) // 2)
-            )).to(device)
+                y = torch.cat((
+                    feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :],
+                    feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+                ))
+                assert y.size(0) % 2 == 0
+                labels = torch.cat((
+                    torch.arange(y.size(0) // 2),
+                    torch.arange(y.size(0) // 2)
+                )).to(device)
 
-        loss = criterion(y, labels)
+            loss = criterion(y, labels)
 
-        logging.info(f"Loss: {loss.item()}")
-        loss.backward()
-        optimizer.step()
+            logging.info(f"Loss: {loss.item()}")
+            loss.backward()
+            optimizer.step()
+            batch_counter += 1
+            if batch_counter % cfg.logging.interval == 0:
+                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"))  
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))

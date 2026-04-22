@@ -24,15 +24,15 @@ from .scale import NeuralScaleSpace
 
 
 class AffineFeatureNetOne(torch.nn.Module):
-    def __init__(self, in_channels=1):
+    def __init__(self, in_channels=1, feature_size=128):
         super(AffineFeatureNetOne, self).__init__()
         self.scale_space = NeuralScaleSpace(in_channels)
         self.feature_net = torch.nn.Sequential(
             asel.affine.BasicBlock(in_channels+1, 8, option="B"),
             asel.affine.BasicBlock(8, 16, option="B"),
-            asel.affine.BasicBlock(16, 32, option="B"),
+            asel.affine.BasicBlock(16, feature_size, option="B"),
         )
-        self.feature_size = 32
+        self.feature_size = feature_size
 
     def forward(self, x):
         channel_dim = 1

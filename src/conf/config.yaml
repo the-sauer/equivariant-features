@@ -1,0 +1,32 @@
+defaults:
+  - model: affine_feature_net_one
+training:
+  batch_size: 16
+  num_epochs: 100
+  optimizer:
+    name: "adam"
+    params:
+      lr: 0.001
+  loss: "npairs"
+  feature_sampling:
+    num_features: 100
+    # stride: 12
+    # detector: "harris"
+  dataset:
+    name: "image-matching-challenge-2025"
+    data_dir: "/home/hendrik/affine-equivariant-features/data/image-matching-challenge-2025"
+  augmentation:
+    color_jitter:
+      brightness: 0.5
+      contrast: 0.5
+      saturation: 0.5
+      hue: 0.5
+    gaussian_blur:
+      kernel_size: 5
+      sigma: 1.0
+    gaussian_noise:
+      mean: 0.0
+      sigma: 0.1
+logging:
+  dir: "/data/affine-equivariant-features"
+  interval: 100
