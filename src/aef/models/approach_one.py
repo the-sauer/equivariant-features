@@ -19,7 +19,6 @@ import juliacall
 import asel
 import torch
 from torch import nn
-import torchvision
 
 from .scale import NeuralScaleSpace
 
@@ -41,22 +40,3 @@ class AffineFeatureNetOne(torch.nn.Module):
         x = torch.concat((x, scale_field), dim=channel_dim)
         x = nn.functional.normalize(x, dim=channel_dim)
         return self.feature_net(x)
-
-
-def train(model):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print(sum(p.numel() for p in model.parameters()))
-
-    model = model.to(device)
-    img = torchvision.io.decode_image(
-        "/home/hendrik/blobinator/log-polar-descriptors/data/backgrounds/NotreDame/images/_rom__112625421.jpg"
-    ).to(torch.float32).unsqueeze(0).to(device) / 255
-    print(img.dtype, img.size())
-
-    out = model(img)
-    print(out.size())
-
-
-if __name__ == "__main__":
-    train(AffineFeatureNetOne(3))
