@@ -16,12 +16,11 @@
 
 from enum import Enum
 import logging
-from typing import Iterable
+from typing import Iterable, Union
 
 import kornia
 from pytorch_metric_learning import losses
 import torch
-import torchvision
 from torchvision.transforms import v2
 
 
@@ -57,7 +56,7 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
     return map(coordinate_map, zip(H, detections))
 
 
-def train(model, dataset, batch_size=100):
+def train(model, dataset, batch_size=100, feature_choice: Union[str, int] = 10):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = model.to(device)
@@ -76,29 +75,56 @@ def train(model, dataset, batch_size=100):
         v2.GaussianNoise(),
     ])
 
-    for (img, img_t, H, _) in train_loader:
+    for (img, img_t, H, H_inv) in train_loader:
         img = img.to(device)
         img_t = augmentation(img_t.to(device))
-        H = H.to(device)
         optimizer.zero_grad()
 
-        detections = detect(img)
-        detections_t = warp_detections(detections, H)
-        # TODO: Filter out of bounds detections
         feature_map = model(img)
         feature_map_t = model(img_t)
 
-        features = torch.empty(sum(map(len, detections)), model.feature_size)
-        features_t = torch.empty(sum(map(len, detections)), model.feature_size)
+        if isinstance(feature_choice, str):
+            # TODO: Fix this
+            H = H.to(device)
+            detections = detect(img)
+            detections_t = warp_detections(detections, H)
 
-        i = 0
-        for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
-            for d, d_t in zip(ds, ds_t):
-                features[i, :] = feature_map[j, :, *d].squeeze()
-                features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
-                i += 1
-        y = torch.cat((features, features_t))
-        labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+            valid_detections = map(
+                lambda ds:
+                    (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
+                    & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
+                detections_t
+            )
+
+            detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
+            detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
+            features = torch.empty(sum(map(len, detections)), model.feature_size)
+            features_t = torch.empty(sum(map(len, detections)), model.feature_size)
+
+            i = 0
+            for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
+                for d, d_t in zip(ds, ds_t):
+                    features[i, :] = feature_map[j, :, *d].squeeze()
+                    features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
+                    i += 1
+
+            y = torch.cat((features, features_t))
+            labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+        else:
+            feature_stride = feature_map.size(2) // feature_choice
+            H_inv = H_inv.to(device)
+            feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
+
+            y = torch.cat((
+                feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :],
+                feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+            ))
+            assert y.size(0) % 2 == 0
+            labels = torch.cat((
+                torch.arange(y.size(0) // 2),
+                torch.arange(y.size(0) // 2)
+            )).to(device)
+
         loss = criterion(y, labels)
 
         logging.info(f"Loss: {loss.item()}")
