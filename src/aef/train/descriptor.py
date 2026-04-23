@@ -23,7 +23,9 @@ import kornia
 import omegaconf
 import torch
 from torchvision.transforms import v2
+from tqdm import tqdm
 
+from ..evaluate import fpr
 from ..train import OPTIMIZERS, LOSSES
 
 
@@ -59,10 +61,13 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
     return map(coordinate_map, zip(H, detections))
 
 
-def train(model, dataset, cfg, experiment_name="default"):
+def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
     checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
+    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
+    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+
     with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
         f.write(omegaconf.OmegaConf.to_yaml(cfg))
 
@@ -71,8 +76,13 @@ def train(model, dataset, cfg, experiment_name="default"):
     model = model.to(device)
     optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
     train_loader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         batch_size=cfg.training.batch_size,
+        shuffle=True
+    )
+    validation_loader = torch.utils.data.DataLoader(
+        validation_dataset,
+        batch_size=cfg.validation.batch_size,
         shuffle=True
     )
 
@@ -88,7 +98,11 @@ def train(model, dataset, cfg, experiment_name="default"):
     ])
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
-        for (img, img_t, H, H_inv) in train_loader:
+        loop = tqdm(train_loader, leave=True)
+        loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
+        cumulative_loss = 0.0
+        model.train()
+        for (img, img_t, H, H_inv) in loop:
             img = img.to(device)
             img_t = augmentation(img_t.to(device))
             optimizer.zero_grad()
@@ -134,10 +148,9 @@ def train(model, dataset, cfg, experiment_name="default"):
                 H_inv = H_inv.to(device)
                 feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
 
-                y = torch.cat((
-                    feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :],
-                    feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
-                ))
+                features = feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
+                features_t = feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+                y = torch.cat((features, features_t))
                 assert y.size(0) % 2 == 0
                 labels = torch.cat((
                     torch.arange(y.size(0) // 2),
@@ -146,10 +159,40 @@ def train(model, dataset, cfg, experiment_name="default"):
 
             loss = criterion(y, labels)
 
-            logging.info(f"Loss: {loss.item()}")
+            distances = torch.cdist(features, features_t)
+            ll = torch.eye(features.size(0), device=device)
+            fpr95 = fpr(-distances.flatten(), ll.flatten(), target_recall=0.95)
+
+            loop.set_postfix(loss=loss.item(), fpr95=fpr95)
+            cumulative_loss += loss.item() * img.size(0)
             loss.backward()
             optimizer.step()
             batch_counter += 1
             if batch_counter % cfg.logging.interval == 0:
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"))  
+                checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
+                logging.info(f"epoch {epoch}, loss: {loss.item()}, fpr95: {fpr95}, saved_model to: {checkpoint_name}")
+                torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+
+        loop = tqdm(validation_loader, leave=True)
+        loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
+        fpr_sum = 0.0
+        fpr_num = 0
+        for (img, img_t, H, H_inv) in loop:
+            img = img.to(device)
+            img_t = augmentation(img_t.to(device))
+            H_inv = H_inv.to(device)
+            feature_map = model(img)
+            feature_map_t = model(img_t)
+            feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
+
+            features = feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
+            features_t = feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+
+            distances = torch.cdist(features, features_t)
+            ll = torch.eye(features.size(0), device=device)
+            fpr95 = fpr(-distances.flatten(), ll.flatten(), target_recall=0.95)
+            fpr_sum += fpr95 * features.size(0)
+            fpr_num += features.size(0)
+            loop.set_postfix(fpr95=fpr95)
+        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_loader)}, validation fpr95: {fpr_sum / fpr_num}")
