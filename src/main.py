@@ -23,32 +23,23 @@ from typing import Any
 import dotenv
 import hydra
 import kagglehub
-import omegaconf 
+import omegaconf
 
 from aef.data import HomographyData
 from aef.data.blobboards import BlobBoardData
-from aef.models.approach_one import AffineFeatureNetOne
-from aef.models.scale import NeuralScaleSpace
-from aef.train.descriptor import train as train_descriptor
-from aef.train.scale import train_scale
-
-
-MODELS = {
-    "scale_space_sesn": (NeuralScaleSpace, train_scale),
-    "affine_feature_net_one": (AffineFeatureNetOne, train_descriptor),
-}
+from aef.models import MODELS
 
 
 def experiment_name_from_cfg(cfg):
     # print(json.dumps(omegaconf.OmegaConf.to_container(cfg, resolve=True), sort_keys=True))
-    date = datetime.today().strftime('%Y_%m_%d')
+    date = datetime.today().strftime('%Y_%m_%d_%H_%M_%S')
     # config_hash = hash(json.dumps(omegaconf.OmegaConf.to_container(cfg, resolve=True), sort_keys=True))
-    return f"{date}_{cfg.model.name}_{cfg.training.dataset.name}_{cfg.training.loss}"
+    return f"{cfg.model.name}_{cfg.training.dataset.name}_{cfg.training.loss}_{date}"
 
 
 def get_dataset(dataset_cfg):
     if dataset_cfg.name == "blobboards":
-        return BlobBoardData(dataset_cfg.num_boards)
+        return BlobBoardData(**dataset_cfg.params)
     else:
         data_dir = os.path.join("/home/hendrik/affine-equivariant-features/data", dataset_cfg.name)
         if not os.path.exists(data_dir):

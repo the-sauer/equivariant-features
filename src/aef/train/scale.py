@@ -15,13 +15,14 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
+import logging
 import os
 
 import kornia
 import omegaconf
 import torch
+from tqdm import tqdm
 
-from ..models.scale import NeuralScaleSpace
 from ..train import LOSSES, OPTIMIZERS
 
 
@@ -75,12 +76,14 @@ def compute_scale(H, size):
     return scale.view(N, 1, size[0], size[1])
 
 
-def train_scale(model, dataset, cfg, experiment_name="default"):
+def train_scale(model, dataset, validation_dataset, cfg, experiment_name="default"):
     os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
     checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
     with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
         f.write(omegaconf.OmegaConf.to_yaml(cfg))
+    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
+    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -95,22 +98,30 @@ def train_scale(model, dataset, cfg, experiment_name="default"):
         batch_size=cfg.training.batch_size,
         shuffle=True
     )
-    batch_counter = 0
-    for data in training_loader:
-        b, b_t, H, H_inv = map(lambda x: x.to(device), data)
-        gt = compute_scale(H, b.shape[2:])
-        optimizer.zero_grad()
+    for epoch in range(cfg.training.num_epochs):
+        batch_counter = 0
+        loop = tqdm(training_loader, leave=True)
+        cumulative_loss = 0.0
+        for data in loop:
+            b, b_t, H, H_inv = map(lambda x: x.to(device), data)
+            gt = compute_scale(H, b.shape[2:])
+            optimizer.zero_grad()
 
-        o = model(b)
-        o_t = model(b_t)
-        o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
+            o = model(b)
+            o_t = model(b_t)
+            o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
 
-        loss = criterion(o_t / o, gt)
-        loss.backward()
-        optimizer.step()
+            loss = criterion(o_t / o, gt)
+            loss.backward()
+            optimizer.step()
+            cumulative_loss += loss.item() * b.size(0)
 
-        print(f"loss {loss.item()}", flush=True)
+            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
+            loop.set_postfix(loss=loss.item())
 
-        batch_counter += 1
-        if batch_counter % cfg.logging.interval == 0:
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"batch_{batch_counter:06d}.pth"))
+            batch_counter += 1
+            if batch_counter % cfg.logging.interval == 0:
+                logging.info(f"epoch {epoch}, loss: {loss.item()}")
+                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}_batch_{batch_counter:06d}.pth"))
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
+        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(dataset)}")

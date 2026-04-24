@@ -1,0 +1,20 @@
+defaults:
+  - config
+  - override model: scale_space_sesn
+  - _self_
+
+training:
+  dataset:
+    name: blobboards
+    params:
+      image_size: [256, 256]
+      num_boards: 120
+  loss: "rel"
+validation:
+  dataset:
+    name: blobboards
+    params:
+      image_size: [256, 256]
+      num_boards: 12
+logging:
+  interval: 1

@@ -15,8 +15,18 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-from pytorch_metric_learning import losses
+from pytorch_metric_learning import losses as pml_losses
 import torch
+
+from .losses.geodesic_loss import GeodesicLoss
+
+
+class RELScaleLoss(torch.nn.Module):
+    def __init__(self):
+        super(RELScaleLoss, self).__init__()
+
+    def forward(self, pred, gt):
+        return torch.mean(torch.abs(pred - gt) / (gt + 1e-8))
 
 
 OPTIMIZERS = {
@@ -24,9 +34,12 @@ OPTIMIZERS = {
     "sgd": torch.optim.SGD
 }
 
+
 LOSSES = {
-    "triplet_margin": losses.TripletMarginLoss,
-    "npairs": losses.NPairsLoss,
-    "supcon": losses.SupConLoss,
-    "mse": torch.nn.MSELoss
+    "triplet_margin": pml_losses.TripletMarginLoss,
+    "npairs": pml_losses.NPairsLoss,
+    "supcon": pml_losses.SupConLoss,
+    "mse": torch.nn.MSELoss,
+    "rel": RELScaleLoss,
+    "geodesic": GeodesicLoss
 }

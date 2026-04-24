@@ -147,9 +147,9 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
 
                 H_inv = H_inv.to(device)
                 feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
-
-                features = feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
-                features_t = feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+                mask = kornia.geometry.transform.warp_perspective(torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()), H_inv, dsize=feature_map.shape[2:]) > 0.5
+                features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
+                features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
                 y = torch.cat((features, features_t))
                 assert y.size(0) % 2 == 0
                 labels = torch.cat((

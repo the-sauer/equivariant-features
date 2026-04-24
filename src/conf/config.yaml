@@ -20,6 +20,10 @@ training:
     params:
       image_size: [256, 256]
       in_memory: false
+      transform_params:
+        scale: false
+        translate: true
+        rotate: true
   augmentation:
     color_jitter:
       brightness: 0.5

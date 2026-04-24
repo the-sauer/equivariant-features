@@ -1,4 +1,4 @@
-# AffEquivarFeatures.jl
+# affine-equivariant-features
 
 Affine Equivariant Features, the main implementation of my master thesis.
 
