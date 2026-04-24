@@ -23,6 +23,7 @@ import sesn
 import torch
 
 from aef.train.descriptor import train as train_descriptor
+from aef.train.detector import train as train_detector
 from aef.train.scale import train_scale
 
 
@@ -76,8 +77,42 @@ class AffineFeatureNetOne(torch.nn.Module):
         scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
         scale_field = self.scale_gain(scale_field)
         x = torch.concat((x, scale_field), dim=channel_dim)
+        x = self.feature_net(x)
         x = torch.nn.functional.normalize(x, dim=channel_dim)
-        return self.feature_net(x)
+        return x
+
+
+class AffineFeatureNetCanonicalOne(torch.nn.Module):
+    def __init__(self, in_channels=1, conv_depths=[8, 16, 32, 64], scale_space=None, basic_block_params=None):
+        super(AffineFeatureNetCanonicalOne, self).__init__()
+        if scale_space is None:
+            scale_space = {"name": "scale_space_sesn", "params": {}}
+        if basic_block_params is None:
+            basic_block_params = {}
+        scale_space["params"]["in_channels"] = 1
+        self.scale_space = MODELS[scale_space["name"]][0](**scale_space["params"])
+        if "pretrained" in scale_space:
+            self.scale_space.load_state_dict(torch.load(scale_space["pretrained"]))
+            if scale_space["freeze"]:
+                for param in self.scale_space.parameters():
+                    param.requires_grad = False
+        self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
+        self.feature_net = torch.nn.Sequential(
+            asel.affine.BasicBlock(in_channels + 1, conv_depths[0], **basic_block_params),
+            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
+        )
+        self.canonicalization_layer = asel.affine.EquivarLayer(conv_depths[-1] + 1, 4, type=["0", "c"])
+
+    def forward(self, x):
+        channel_dim = 1
+        scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
+        scale_field = self.scale_gain(scale_field)
+        x = torch.concat((x, scale_field), dim=channel_dim)
+        x = self.feature_net(x)
+        x = torch.nn.functional.normalize(x, dim=channel_dim)
+        x = torch.concat((x, scale_field), dim=channel_dim)
+        x = self.canonicalization_layer(x)
+        return x
 
 
 """"
@@ -86,4 +121,5 @@ All model definition with their respective training functions are collected in t
 MODELS = {
     "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
     "affine_feature_net_one": (AffineFeatureNetOne, train_descriptor),
+    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_detector),
 }

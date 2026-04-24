@@ -1,0 +1,20 @@
+defaults:
+  - config
+  - override model: affine_feature_net_canonical_one
+  - _self_
+
+training:
+  dataset:
+    name: blobboards
+    params:
+      image_size: [256, 256]
+      num_boards: 120
+  loss: "geodesic"
+validation:
+  dataset:
+    name: blobboards
+    params:
+      image_size: [256, 256]
+      num_boards: 12
+logging:
+  interval: 1
