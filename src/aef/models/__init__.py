@@ -66,7 +66,7 @@ class AffineFeatureNetOne(torch.nn.Module):
                     param.requires_grad = False
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
         self.feature_net = torch.nn.Sequential(
-            asel.affine.BasicBlock(in_channels, conv_depths[0], **basic_block_params),
+            asel.affine.BasicBlock(in_channels + 1, conv_depths[0], **basic_block_params),
             *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
             asel.affine.BasicBlock(conv_depths[-1], feature_size, **basic_block_params),
         )
