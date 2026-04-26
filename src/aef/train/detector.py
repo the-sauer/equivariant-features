@@ -17,13 +17,26 @@
 import logging
 import os
 
-import kornia                        
-import omegaconf                     
-import torch                         
+import kornia
+import omegaconf
+import torch
 from torchvision.transforms import v2
-from tqdm import tqdm                
+from tqdm import tqdm
 
 from ..train import OPTIMIZERS, LOSSES
+
+
+def homogenize(A, b=None):
+    B, H, W = A.size()
+    batch_dim, height_dim, width_dim = 0, 1, 2
+    if b is None:
+        b = torch.zeros(1, 1, dtype=A.dtype, device=A.device).expand(B, H)
+    assert b.size() == (B, H)
+
+    return torch.cat((
+        torch.cat((A, torch.zeros(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, W)), dim=height_dim),
+        torch.cat((b.unsqueeze(-1), torch.ones(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, 1)), dim=height_dim),
+    ), dim=width_dim)
 
 
 def linearize_homography(H, shape):
@@ -125,7 +138,7 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
 
             gt = linearize_homography(H, feature_map.shape[-2:]).reshape(-1, 2, 2)[::feature_stride, :, :][non_singular_mask]
 
-            loss = criterion(rel_t, gt)
+            loss = criterion(homogenize(rel_t), homogenize(gt))
 
             loop.set_postfix(loss=loss.item())
             cumulative_loss += loss.item() * img.size(0)
@@ -138,7 +151,4 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
 
-        loop = tqdm(validation_loader, leave=True)
-        loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
-
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_loader)}")
+        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")

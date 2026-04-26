@@ -19,6 +19,7 @@ from pytorch_metric_learning import losses as pml_losses
 import torch
 
 from .losses.geodesic_loss import GeodesicLoss
+from .losses.reprojection_loss import HomographyReprojectionLoss
 
 
 class RELScaleLoss(torch.nn.Module):
@@ -41,5 +42,6 @@ LOSSES = {
     "supcon": pml_losses.SupConLoss,
     "mse": torch.nn.MSELoss,
     "rel": RELScaleLoss,
-    "geodesic": GeodesicLoss
+    "geodesic": GeodesicLoss,
+    "reprojection": HomographyReprojectionLoss
 }

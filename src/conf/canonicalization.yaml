@@ -9,7 +9,7 @@ training:
     params:
       image_size: [256, 256]
       num_boards: 120
-  loss: "geodesic"
+  loss: "reprojection"
 validation:
   dataset:
     name: blobboards
