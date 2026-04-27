@@ -218,5 +218,6 @@ __marimo__/
 **/.CondaPkg
 
 data
+!src/aef/data
 
 outputs
