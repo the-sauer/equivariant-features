@@ -23,7 +23,7 @@ import torch
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from ..train import OPTIMIZERS, LOSSES
+from ..train import OPTIMIZERS, LOSSES, GeodesicLoss, HomographyReprojectionLoss
 
 
 def homogenize(A, b=None):
@@ -140,7 +140,10 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
 
             loss = criterion(homogenize(rel_t), homogenize(gt))
 
-            loop.set_postfix(loss=loss.item())
+            reprojection_loss = HomographyReprojectionLoss()(homogenize(rel_t), homogenize(gt))
+            geodesic_loss = GeodesicLoss()(rel_t, gt)
+
+            loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
             cumulative_loss += loss.item() * img.size(0)
             loss.backward()
             optimizer.step()
@@ -150,5 +153,50 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
                 logging.info(f"epoch {epoch}, loss: {loss.item()}, saved_model to: {checkpoint_name}")
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+
+        loop = tqdm(validation_loader, leave=True)
+        loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
+        model.eval()
+        for (img, img_t, H, H_inv) in loop:
+            img = img.to(device)
+            img_t = augmentation(img_t.to(device))
+            H = H.to(device)
+            H_inv = H_inv.to(device)
+
+            feature_map = model(img)
+            feature_map_t = model(img_t)
+
+            if "stride" in cfg.validation.feature_sampling:
+                feature_stride = cfg.validation.feature_sampling.stride
+            elif "num_features" in cfg.validation.feature_sampling:
+                feature_stride = img.size(2) * img.size(3) // cfg.validation.feature_sampling.num_features
+            else:
+                raise ValueError("No valid feature sampling method")
+
+            H_inv = H_inv.to(device)
+            feature_map_t = kornia.geometry.transform.warp_perspective(
+                torch.flatten(feature_map, start_dim=1, end_dim=2),
+                H_inv,
+                dsize=feature_map.shape[-2:]
+            ).reshape(feature_map.shape)
+            mask = (kornia.geometry.transform.warp_perspective(
+                torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
+                H_inv,
+                dsize=feature_map.shape[-2:]
+            ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
+            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, :, :]
+            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, : ,:]
+
+            non_singular_mask = torch.linalg.det(features) > 1e-6
+            rel_t = features_t[non_singular_mask] @ torch.linalg.inv(features[non_singular_mask])   # use linalg.solve
+
+            gt = linearize_homography(H, feature_map.shape[-2:]).reshape(-1, 2, 2)[::feature_stride, :, :][non_singular_mask]
+
+            loss = criterion(homogenize(rel_t), homogenize(gt))
+
+            reprojection_loss = HomographyReprojectionLoss()(homogenize(rel_t), homogenize(gt))
+            geodesic_loss = GeodesicLoss()(rel_t, gt)
+
+            loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
 
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")

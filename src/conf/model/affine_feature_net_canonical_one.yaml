@@ -1,11 +1,11 @@
 name: "affine_feature_net_canonical_one"
 params:
-  conv_depths: [8, 16, 32, 64]
+  conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
   basic_block_params:
     option: "B"
   scale_space:
     name: "scale_space_sesn"
     params:
       num_scales: 5
-    pretrained: data/logs/scale_space_sesn_blobboards_rel_2026_04_23_15_40_57/checkpoints/epoch_0028.pth
+    # pretrained: data/logs/scale_space_sesn_blobboards_rel_2026_04_23_15_40_57/checkpoints/epoch_0028.pth
     freeze: false
