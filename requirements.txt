@@ -1,5 +1,5 @@
 hydra-core >= 1.3, < 2
-kaggelhub >= 1.0, < 2
+kagglehub >= 1.0, < 2
 kornia >= 0.8, < 1
 python-dotenv
 pytorch-metric-learning >= 1.2, < 2
