@@ -66,18 +66,17 @@ class AffineFeatureNetOne(torch.nn.Module):
                     param.requires_grad = False
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
         self.feature_net = torch.nn.Sequential(
-            asel.affine.BasicBlock(in_channels + 1, conv_depths[0], **basic_block_params),
+            asel.affine.BasicBlock(in_channels, conv_depths[0], **basic_block_params),
             *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
             asel.affine.BasicBlock(conv_depths[-1], feature_size, **basic_block_params),
         )
         self.feature_size = feature_size
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         channel_dim = 1
         scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
         scale_field = self.scale_gain(scale_field)
-        x = torch.concat((x, scale_field), dim=channel_dim)
-        x = self.feature_net(x)
+        x, _ = self.feature_net((x, scale_field))
         x = torch.nn.functional.normalize(x, dim=channel_dim)
         return x
 
@@ -98,19 +97,17 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
                     param.requires_grad = False
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
         self.feature_net = torch.nn.Sequential(
-            asel.affine.BasicBlock(in_channels + 1, conv_depths[0], **basic_block_params),
+            asel.affine.BasicBlock(in_channels, conv_depths[0], **basic_block_params),
             *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
         )
-        self.canonicalization_layer = asel.affine.EquivarLayer(conv_depths[-1] + 1, 4, type=["0", "c"])
+        self.canonicalization_layer = asel.affine.EquivarLayer(conv_depths[-1], 4, type=["0", "c"])
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         channel_dim = 1
         scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
         scale_field = self.scale_gain(scale_field)
-        x = torch.concat((x, scale_field), dim=channel_dim)
-        x = self.feature_net(x)
+        x, _ = self.feature_net((x, scale_field))
         x = torch.nn.functional.normalize(x, dim=channel_dim)
-        x = torch.concat((x, scale_field), dim=channel_dim)
         x = self.canonicalization_layer(x)
         return x
 
