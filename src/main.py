@@ -25,6 +25,7 @@ import hydra
 import kagglehub
 import omegaconf
 
+from aef.configuration import Config
 from aef.data import HomographyData
 from aef.data.blobboards import BlobBoardData
 from aef.models import MODELS
@@ -59,8 +60,8 @@ def train(cfg):
     train_func(model, train_dataset, validation_dataset, cfg, experiment_name=experiment_name_from_cfg(cfg))
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg):
+@hydra.main(version_base=None, config_path="conf", config_name="canonicalization")
+def main(cfg: Config):
     dotenv.load_dotenv()
 
     experiment_name = experiment_name_from_cfg(cfg)
