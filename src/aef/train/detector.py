@@ -50,11 +50,12 @@ def linearize_homography(H, shape):
         ),
         dim=2
     )
-    proj = H @ coords.unsqueeze(0).unsqueeze(4)
+    coords = coords.unsqueeze(0).unsqueeze(4)
+    H = H.unsqueeze(1).unsqueeze(2)
+    proj = H @ coords
     x = proj[..., 0, 0]
     y = proj[..., 1, 0]
     w = proj[..., 2, 0]
-    H = H.unsqueeze(1).unsqueeze(2)
     return torch.stack((
         torch.stack(((H[..., 0, 0] * w - H[..., 2, 0] * x) / w ** 2, (H[..., 1, 0] * w - H[..., 2, 0] * y) / w ** 2), dim=2),
         torch.stack(((H[..., 0, 1] * w - H[..., 2, 1] * x) / w ** 2, (H[..., 1, 1] * w - H[..., 2, 1] * y) / w ** 2), dim=2)
