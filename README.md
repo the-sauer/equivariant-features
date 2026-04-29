@@ -18,6 +18,14 @@ install the python dependencies.
 pip install -r requirements.txt
 ```
 
+## Gotchas
+
+If `juliacall` chooses an incompatible version for `BlobBoards.jl` (for example 1.11) set
+```sh
+export PYTHON_JULIACALL_EXE=/path/to/julia-1.12.6+0.x64.linux.gnu/bin/julia
+export PYTHON_JULIACALL_PROJECT=/path/to/BlobBoards.jl
+```
+
 ## License
 
 This project is licensed under [AGPLv3](./LICENSE.md).
