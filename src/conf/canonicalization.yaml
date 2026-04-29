@@ -9,6 +9,8 @@ training:
     params:
       image_size: [256, 256]
       num_boards: 120
+      blobboard_params:
+        cutoff: 2.0
   loss:
     - name: "reprojection"
       params:
@@ -41,5 +43,7 @@ validation:
     params:
       image_size: [256, 256]
       num_boards: 12
+      blobboard_params:
+        cutoff: 2.0
 logging:
   interval: 1

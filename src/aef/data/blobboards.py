@@ -21,10 +21,12 @@ from ..data import HomographyData
 
 
 class BlobBoardData(HomographyData):
-    def __init__(self, num_boards, image_size=(128, 128), **kwargs):
+    def __init__(self, num_boards, blobboard_params=None, image_size=(128, 128), **kwargs):
+        if blobboard_params is None:
+            blobboard_params = {}
         kwargs["in_memory"] = True
         super().__init__(
-            torch.stack([torch.Tensor(blobboards.blob_pattern(*image_size).pattern).unsqueeze(0) for _ in range(num_boards)]),
+            torch.stack([torch.Tensor(blobboards.blob_pattern(*image_size, **blobboard_params).pattern).unsqueeze(0) for _ in range(num_boards)]),
             image_size=image_size,
             **kwargs
         )
