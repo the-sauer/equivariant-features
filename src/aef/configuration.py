@@ -15,7 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 
 @dataclass
@@ -68,9 +68,16 @@ class ComponentConfig:
 
 
 @dataclass
+class LossConfig:
+    name: str
+    params: Optional[dict[str, Any]]
+    weight: Optional[float]
+
+
+@dataclass
 class TrainingConfig(TrainValConfig):
     augmentation: Optional[AugmentationConfig]
-    loss: Union[str, ComponentConfig]
+    loss: str | LossConfig | list[str | LossConfig]
     optimizer: ComponentConfig
 
 

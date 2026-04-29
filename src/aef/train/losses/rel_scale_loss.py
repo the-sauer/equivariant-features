@@ -17,8 +17,9 @@
 import torch
 
 
-OPTIMIZERS = {
-    "adam": torch.optim.Adam,
-    "sgd": torch.optim.SGD
-}
+class RELScaleLoss(torch.nn.Module):
+    def __init__(self):
+        super(RELScaleLoss, self).__init__()
 
+    def forward(self, pred, gt):
+        return torch.mean(torch.abs(pred - gt) / (gt + 1e-8))

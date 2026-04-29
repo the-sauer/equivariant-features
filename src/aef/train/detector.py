@@ -23,7 +23,10 @@ import torch
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from ..train import OPTIMIZERS, LOSSES, GeodesicLoss, HomographyReprojectionLoss
+from .losses import Loss
+from .losses.geodesic_loss import GeodesicLoss
+from .losses.reprojection_loss import HomographyReprojectionLoss
+from ..train import OPTIMIZERS
 
 
 def homogenize(A, b=None):
@@ -87,7 +90,7 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
         shuffle=True
     )
 
-    criterion = LOSSES[cfg.training.loss]()
+    criterion = Loss(cfg.training.loss)
 
     augmentation = v2.Compose([
         v2.ColorJitter(**cfg.training.augmentation.color_jitter),
@@ -152,7 +155,7 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             if batch_counter % cfg.logging.interval == 0:
                 checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
                 logging.info(f"epoch {epoch}, loss: {loss.item()}, saved_model to: {checkpoint_name}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
+                # torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
 
         loop = tqdm(validation_loader, leave=True)

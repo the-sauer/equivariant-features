@@ -31,12 +31,17 @@ from aef.data.blobboards import BlobBoardData
 from aef.models import MODELS
 
 
-def experiment_name_from_cfg(cfg):
+def experiment_name_from_cfg(cfg: Config) -> str:
     # print(json.dumps(omegaconf.OmegaConf.to_container(cfg, resolve=True), sort_keys=True))
     date = datetime.today().strftime('%Y_%m_%d_%H_%M_%S')
     # config_hash = hash(json.dumps(omegaconf.OmegaConf.to_container(cfg, resolve=True), sort_keys=True))
-    return f"{cfg.model.name}_{cfg.training.dataset.name}_{cfg.training.loss}_{date}"
-
+    if isinstance(cfg.training.loss, str):
+        loss_name = cfg.training.loss
+    elif isinstance(cfg.training.loss, omegaconf.ListConfig):
+        loss_name: str = "_".join(loss_cfg if isinstance(loss_cfg, str) else loss_cfg.name for loss_cfg in cfg.training.loss)
+    else:   # isinstance(cfg.training.loss, omegaconf.DictConfig):
+        loss_name = cfg.training.loss.name
+    return f"{cfg.model.name}_{cfg.training.dataset.name}_{loss_name}_{date}"
 
 def get_dataset(dataset_cfg):
     if dataset_cfg.name == "blobboards":
@@ -50,7 +55,7 @@ def get_dataset(dataset_cfg):
         return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
 
 
-def train(cfg):
+def train(cfg) -> None:
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
     validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True)     # type: ignore

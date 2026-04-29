@@ -25,8 +25,10 @@ import torch
 from torchvision.transforms import v2
 from tqdm import tqdm
 
+from .losses import Loss
+
 from ..evaluate import fpr
-from ..train import OPTIMIZERS, LOSSES
+from ..train import OPTIMIZERS
 
 
 class Detector(Enum):
@@ -86,7 +88,7 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
         shuffle=True
     )
 
-    criterion = LOSSES[cfg.training.loss]()
+    criterion = Loss(cfg.training.loss)
 
     augmentation = v2.Compose([
         v2.ColorJitter(**cfg.training.augmentation.color_jitter),

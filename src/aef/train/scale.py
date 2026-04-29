@@ -23,7 +23,8 @@ import omegaconf
 import torch
 from tqdm import tqdm
 
-from ..train import LOSSES, OPTIMIZERS
+from .losses import Loss
+from ..train import OPTIMIZERS
 
 
 def compute_scale(H, size):
@@ -91,7 +92,7 @@ def train_scale(model, dataset, validation_dataset, cfg, experiment_name="defaul
 
     optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
 
-    criterion = LOSSES[cfg.training.loss]()
+    criterion = Loss(cfg.training.loss)
 
     training_loader = torch.utils.data.DataLoader(
         dataset,
