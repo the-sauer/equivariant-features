@@ -2,23 +2,16 @@ defaults:
   - _self_
   - model: affine_feature_net_one
 training:
-  batch_size: 16
+  batch_size: 1
   num_epochs: 100
   feature_sampling:
     num_features: 100
     # stride: 12
     # detector: "harris"
   dataset:
-    name: "image-matching-challenge-2025"
-    data_dir: "/data/affine-equivariant-features/data/image-matching-challenge-2025"
     suffix: "train"
     params:
       image_size: [256, 256]
-      in_memory: false
-      transform_params:
-        scale: false
-        translate: true
-        rotate: true
   augmentation:
     color_jitter:
       brightness: 0.5
@@ -32,16 +25,13 @@ training:
       mean: 0.0
       sigma: 0.1
 validation:
-  batch_size: 16
+  batch_size: 1
   dataset:
-    name: "image-matching-challenge-2025"
-    data_dir: "/data/affine-equivariant-features/data/image-matching-challenge-2025"
     suffix: "test"
     params:
       image_size: [256, 256]
-      in_memory: false
   feature_sampling:
     num_features: 10
 logging:
-  dir: "/data/affine-equivariant-features"
+  dir: "./data/logs"
   interval: 100

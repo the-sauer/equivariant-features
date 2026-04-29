@@ -5,7 +5,7 @@ defaults:
 
 training:
   dataset:
-    name: blobboards
+    name: blobboards_homographic
     params:
       image_size: [256, 256]
       num_boards: 120
@@ -39,7 +39,7 @@ training:
           T_max: 50   
 validation:
   dataset:
-    name: blobboards
+    name: blobboards_homographic
     params:
       image_size: [256, 256]
       num_boards: 12

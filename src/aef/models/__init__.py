@@ -24,7 +24,7 @@ import torch
 
 from aef.train.descriptor import train as train_descriptor
 from aef.train.detector import train as train_detector
-from aef.train.scale import train_scale
+from aef.train.scale import train as train_scale
 
 
 def NeuralScaleSpaceSESN(in_channels=1, factor=2.0, num_scales=4, min_scale=1.0) -> torch.nn.Module:

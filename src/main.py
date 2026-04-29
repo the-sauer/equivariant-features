@@ -27,7 +27,7 @@ import omegaconf
 
 from aef.configuration import Config
 from aef.data import HomographyData
-from aef.data.blobboards import BlobBoardData
+from aef.data.blobboards import BlobBoardAbsoluteScaleData, BlobBoardHomographyData
 from aef.models import MODELS
 
 
@@ -44,8 +44,10 @@ def experiment_name_from_cfg(cfg: Config) -> str:
     return f"{cfg.model.name}_{cfg.training.dataset.name}_{loss_name}_{date}"
 
 def get_dataset(dataset_cfg):
-    if dataset_cfg.name == "blobboards":
-        return BlobBoardData(**dataset_cfg.params)
+    if dataset_cfg.name == "blobboards_homographic":
+        return BlobBoardHomographyData(**dataset_cfg.params)
+    elif dataset_cfg.name == "blobboards_absolute_scale":
+        return BlobBoardAbsoluteScaleData(**dataset_cfg.params)
     else:
         data_dir = os.path.join("/home/hendrik/affine-equivariant-features/data", dataset_cfg.name)
         if not os.path.exists(data_dir):
@@ -62,10 +64,10 @@ def train(cfg) -> None:
     model_kwargs["in_channels"] = train_dataset.c
     Model, train_func = MODELS[cfg.model.name]
     model = Model(**model_kwargs)
-    train_func(model, train_dataset, validation_dataset, cfg, experiment_name=experiment_name_from_cfg(cfg))
+    train_func(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=experiment_name_from_cfg(cfg))
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="canonicalization")
+@hydra.main(version_base=None, config_path="conf", config_name="scale")
 def main(cfg: Config):
     dotenv.load_dotenv()
 

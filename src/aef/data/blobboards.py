@@ -20,7 +20,7 @@ import torch
 from ..data import HomographyData
 
 
-class BlobBoardData(HomographyData):
+class BlobBoardHomographyData(HomographyData):
     def __init__(self, num_boards, blobboard_params=None, image_size=(128, 128), **kwargs):
         if blobboard_params is None:
             blobboard_params = {}
@@ -30,3 +30,20 @@ class BlobBoardData(HomographyData):
             image_size=image_size,
             **kwargs
         )
+
+
+class BlobBoardAbsoluteScaleData(torch.utils.data.Dataset):
+    def __init__(self, num_boards, blobboard_params=None, image_size=(128, 128)):
+        super().__init__()
+        if blobboard_params is None:
+            blobboard_params = {}
+        boards = [blobboards.blob_pattern(*image_size, **blobboard_params) for _ in range(num_boards)]
+        self.data = torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards])
+        self.blobs = [torch.Tensor(board.blobs) for board in boards]
+        self.c = self.data.size(1)
+
+    def __getitem__(self, index):
+        return self.data[index], self.blobs[index]
+
+    def __len__(self):
+        return self.data.shape[0]
