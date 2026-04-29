@@ -19,6 +19,14 @@ import torch
 
 OPTIMIZERS = {
     "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
     "sgd": torch.optim.SGD
 }
 
+
+SCHEDULERS = {
+    "step": torch.optim.lr_scheduler.StepLR,
+    "mulistep": torch.optim.lr_scheduler.MultiStepLR,
+    "exponential": torch.optim.lr_scheduler.ExponentialLR,
+    "cosine": torch.optim.lr_scheduler.CosineAnnealingLR
+}

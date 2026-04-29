@@ -4,11 +4,6 @@ defaults:
 training:
   batch_size: 16
   num_epochs: 100
-  optimizer:
-    name: "adam"
-    params:
-      lr: 0.001
-  loss: "npairs"
   feature_sampling:
     num_features: 100
     # stride: 12

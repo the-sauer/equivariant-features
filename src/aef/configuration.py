@@ -75,10 +75,17 @@ class LossConfig:
 
 
 @dataclass
+class OptimizerConfig:
+    name: str
+    params: dict[str, Any]
+    scheduler: Optional[ComponentConfig]
+
+
+@dataclass
 class TrainingConfig(TrainValConfig):
     augmentation: Optional[AugmentationConfig]
     loss: str | LossConfig | list[str | LossConfig]
-    optimizer: ComponentConfig
+    optimizer: str | OptimizerConfig | dict[str, OptimizerConfig]
 
 
 @dataclass

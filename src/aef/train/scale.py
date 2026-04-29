@@ -24,7 +24,7 @@ import torch
 from tqdm import tqdm
 
 from .losses import Loss
-from ..train import OPTIMIZERS
+from ..train import OPTIMIZERS, SCHEDULERS
 
 
 def compute_scale(H, size):
@@ -91,6 +91,11 @@ def train_scale(model, dataset, validation_dataset, cfg, experiment_name="defaul
     model = model.to(device)
 
     optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
+    if "scheduler" in cfg.training.optimizer:
+        sched_cfg = cfg.training.optimizer.scheduler
+        scheduler = SCHEDULERS[sched_cfg.name](optimizer, **sched_cfg.params)
+    else:
+        scheduler = None
 
     criterion = Loss(cfg.training.loss)
 
@@ -126,3 +131,6 @@ def train_scale(model, dataset, validation_dataset, cfg, experiment_name="defaul
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}_batch_{batch_counter:06d}.pth"))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(dataset)}")
+
+        if scheduler is not None:
+            scheduler.step()

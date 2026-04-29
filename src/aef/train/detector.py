@@ -26,7 +26,7 @@ from tqdm import tqdm
 from .losses import Loss
 from .losses.geodesic_loss import GeodesicLoss
 from .losses.reprojection_loss import HomographyReprojectionLoss
-from ..train import OPTIMIZERS
+from ..train import OPTIMIZERS, SCHEDULERS
 
 
 def homogenize(A, b=None):
@@ -78,7 +78,32 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = model.to(device)
-    optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
+
+    opt_cfg = cfg.training.optimizer
+    if "name" in opt_cfg:
+        optimizer = [OPTIMIZERS[opt_cfg.name](model.scale_space.parameters(), **opt_cfg.get("params", {}))]
+        if "scheduler" in opt_cfg:
+            sched_cfg = opt_cfg.scheduler
+            scheduler = [SCHEDULERS[sched_cfg.name](optimizer[0], **sched_cfg.get("params", {}))]
+        else:
+            scheduler = []
+    else:
+        optimizer = [
+            OPTIMIZERS[opt_cfg.scale_space.name](model.scale_space.parameters(), **opt_cfg.scale_space.get("params", {})),
+            OPTIMIZERS[opt_cfg.feature_net.name](model.feature_net.parameters(), **opt_cfg.feature_net.get("params", {}))
+        ]
+        scheduler = []
+        if "scheduler" in opt_cfg.scale_space:
+            scheduler_kwargs = opt_cfg.scale_space.scheduler.get("params", {})
+            scheduler.append(
+                SCHEDULERS[opt_cfg.scale_space.scheduler.name](optimizer[0], **scheduler_kwargs)
+            )
+        if "scheduler" in opt_cfg.feature_net:
+            scheduler_kwargs = opt_cfg.feature_net.scheduler.get("params", {})
+            scheduler.append(
+                SCHEDULERS[opt_cfg.feature_net.scheduler.name](optimizer[1], **scheduler_kwargs)
+            )
+
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
@@ -111,7 +136,8 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             img_t = augmentation(img_t.to(device))
             H = H.to(device)
             H_inv = H_inv.to(device)
-            optimizer.zero_grad()
+            for opt in optimizer:
+                opt.zero_grad()
 
             feature_map = model(img)
             feature_map_t = model(img_t)
@@ -150,7 +176,8 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
             cumulative_loss += loss.item() * img.size(0)
             loss.backward()
-            optimizer.step()
+            for opt in optimizer:
+                opt.step()
             batch_counter += 1
             if batch_counter % cfg.logging.interval == 0:
                 checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
@@ -204,3 +231,6 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
 
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
+
+        for sch in scheduler:
+            sch.step()
