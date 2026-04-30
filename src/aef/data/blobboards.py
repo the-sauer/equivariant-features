@@ -50,11 +50,14 @@ class BlobBoardAbsoluteScaleData(torch.utils.data.Dataset):
             blobboard_params = {}
         boards = [blobboards.blob_pattern(*image_size, seed=s, **blobboard_params) for s in get_seeds(num_boards, split=split)]
         self.data = torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards])
-        self.blobs = [torch.Tensor(board.blobs) for board in boards]
+        self.num_blobs = torch.Tensor([len(board.blobs) for board in boards]).to(torch.int32)
+        self.blobs = torch.empty(len(boards), torch.max(self.num_blobs).item(), 3, dtype=torch.float32)
+        for i, board in enumerate(boards):
+            self.blobs[i, :len(board.blobs)] = torch.Tensor(board.blobs)
         self.c = self.data.size(1)
 
     def __getitem__(self, index):
-        return self.data[index], self.blobs[index]
+        return self.data[index], self.blobs[index], self.num_blobs[index]
 
     def __len__(self):
         return self.data.shape[0]

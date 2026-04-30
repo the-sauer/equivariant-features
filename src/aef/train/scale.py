@@ -133,17 +133,24 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
         batch_counter = 0
         loop = tqdm(train_loader, leave=True)
         cumulative_loss = 0.0
-        for b, gt in loop:
-            b = b.to(device)
-            gt = gt.to(device)
+        for b, gt, num_blobs in loop:
+            b: torch.Tensor = b.to(device)
+            gt: torch.Tensor = gt.to(device)
+            num_blobs: torch.Tensor = num_blobs.to(device)
+            B = b.size(0)
 
             for opt in optimizer:
                 opt.zero_grad()
-            b = augmentation(b)
-            o = model(b)
-            o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].reshape(b.size(0), -1)  # only compute loss for blob positions
 
-            loss = criterion(o, gt[..., 2])
+            b = augmentation(b)
+            scale_field: torch.Tensor = model(b)
+            out = []
+            for i in range(b.size(0)):
+                out.append(scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()])
+            out = torch.cat(out, dim=0).flatten()
+            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
+
+            loss = criterion(out, gt)
             loss.backward()
             for opt in optimizer:
                 opt.step()
@@ -160,20 +167,20 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
 
         loop = tqdm(validation_loader, leave=True)
         cumulative_loss = 0.0
-        for b, gt in loop:
+        for b, gt, num_blobs in loop:
             b = b.to(device)
             gt = gt.to(device)
+            num_blobs = num_blobs.to(device)
 
-            for opt in optimizer:
-                opt.zero_grad()
-            b = augmentation(b)
-            o = model(b)
-            o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].reshape(b.size(0), -1)  # only compute loss for blob positions
+            scale_field: torch.Tensor = model(b)
+            out = []
+            for i in range(b.size(0)):
+                out.append(scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()])
+            out = torch.cat(out, dim=0).flatten()
+            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
 
-            loss = criterion(o, gt[..., 2])
-            loss.backward()
-            for opt in optimizer:
-                opt.step()
+            loss = criterion(out, gt)
+
             cumulative_loss += loss.item() * b.size(0)
 
             loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
