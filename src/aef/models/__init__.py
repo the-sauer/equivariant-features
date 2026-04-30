@@ -18,6 +18,8 @@
 This module contains the implementations of the models used in this thesis.
 """
 
+from math import ceil
+
 import asel
 import sesn
 import torch
@@ -27,17 +29,24 @@ from aef.train.detector import train as train_detector
 from aef.train.scale import train as train_scale
 
 
-def NeuralScaleSpaceSESN(in_channels=1, factor=2.0, num_scales=4, min_scale=1.0) -> torch.nn.Module:
+def NeuralScaleSpaceSESN(in_channels:int=1, factor:float=2.0, num_scales:int=4, min_scale:float=1.0, effective_size:int=5, scale_size:int=5) -> torch.nn.Module:
     """
     Neural Scale Field based on Scale-Equivariant Steerable Networks (SESN).
     """
+    if min_scale < 1:
+        raise ValueError("min_scale must be at least 1.")
     q = factor ** (1 / (num_scales - 1))
     scales = [min_scale * q**i for i in range(num_scales)]
+    kernel_size= ceil(effective_size * max(scales))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    padding = kernel_size // 2
+    layer_kwargs = {"effective_size": effective_size, "kernel_size": kernel_size, "scales": scales, "padding": padding}
     return torch.nn.Sequential(
-        sesn.SESConv_Z2_H(in_channels, 8, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H(8, 16, 5, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H(16, 32, 5, 11, 7, scales, padding=5),
-        sesn.SESConv_H_H_1x1(32, 1, num_scales=len(scales)),
+        sesn.SESConv_Z2_H(in_channels, 8, **layer_kwargs),
+        sesn.SESConv_H_H(8, 16, scale_size, **layer_kwargs),
+        sesn.SESConv_H_H(16, 32, scale_size, **layer_kwargs),
+        sesn.SESConv_H_H_1x1(32, 1, num_scales=num_scales),
         sesn.SESArgMaxProjection(scales)
     )
 

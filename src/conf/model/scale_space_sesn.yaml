@@ -1,3 +1,0 @@
-name: "scale_space_sesn"
-params:
-  num_scales: 5

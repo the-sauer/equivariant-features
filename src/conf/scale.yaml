@@ -1,8 +1,14 @@
 defaults:
   - config
-  - override model: scale_space_sesn
   - _self_
 
+model:
+  name: scale_space_sesn
+  params:
+    factor: 10.0
+    num_scales: 10
+    min_scale: 1.0
+    effective_size: 5
 training:
   dataset:
     name: blobboards_absolute_scale

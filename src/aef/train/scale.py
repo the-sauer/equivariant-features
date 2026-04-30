@@ -30,7 +30,7 @@ from .losses import Loss
 from ..train import OPTIMIZERS, SCHEDULERS
 
 
-def compute_scale(H, size):
+def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
     N = H.shape[0]
     device = H.device
 
@@ -148,7 +148,7 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
             scheduler.step()
 
 
-def train_scale_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
+def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data.Dataset, validation_dataset: torch.utils.data.Dataset, cfg, experiment_name="default"):
     os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
     checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -180,12 +180,12 @@ def train_scale_absolute(model, train_dataset, validation_dataset, cfg, experime
         loop = tqdm(training_loader, leave=True)
         cumulative_loss = 0.0
         for b, gt in loop:
-            b = b.to(device)
-            gt = gt.to(device)
+            b: torch.Tensor = b.to(device)
+            gt: torch.Tensor = gt.to(device)
 
             optimizer.zero_grad()
-            o = model(b)
-            o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].squeeze()  # only compute loss for blob positions
+            o: torch.Tensor = model(b)
+            o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].reshape(b.size(0), -1)  # only compute loss for blob positions
 
             loss = criterion(o, gt[..., 2])
             loss.backward()
