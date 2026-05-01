@@ -23,3 +23,11 @@ class RELScaleLoss(torch.nn.Module):
 
     def forward(self, pred, gt):
         return torch.mean(torch.abs(pred - gt) / (gt + 1e-8))
+
+
+class RELScaleLossSquared(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, gt):
+        return torch.mean(((pred - gt) / (gt + 1e-8)) ** 2)

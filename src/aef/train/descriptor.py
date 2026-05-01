@@ -28,7 +28,7 @@ from tqdm import tqdm
 from .losses import Loss
 
 from ..evaluate import fpr
-from ..train import OPTIMIZERS, SCHEDULERS
+from ..train import OPTIMIZERS, SCHEDULERS, prepare_training
 
 
 class Detector(Enum):
@@ -64,65 +64,8 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
 
 
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
-    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
-    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
-        f.write(omegaconf.OmegaConf.to_yaml(cfg))
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = model.to(device)
-    
-    opt_cfg = cfg.training.optimizer
-    if "name" in opt_cfg:
-        optimizer = [OPTIMIZERS[opt_cfg.name](model.scale_space.parameters(), **opt_cfg.get("params", {}))]
-        if "scheduler" in opt_cfg:
-            sched_cfg = opt_cfg.scheduler
-            scheduler = [SCHEDULERS[sched_cfg.name](optimizer[0], **sched_cfg.get("params", {}))]
-        else:
-            scheduler = []
-    else:
-        optimizer = [
-            OPTIMIZERS[opt_cfg.scale_space.name](model.scale_space.parameters(), **opt_cfg.scale_space.get("params", {})),
-            OPTIMIZERS[opt_cfg.feature_net.name](model.feature_net.parameters(), **opt_cfg.feature_net.get("params", {}))
-        ]
-        scheduler = []
-        if "scheduler" in opt_cfg.scale_space:
-            scheduler_kwargs = opt_cfg.scale_space.scheduler.get("params", {})
-            scheduler.append(
-                SCHEDULERS[opt_cfg.scale_space.scheduler.name](optimizer[0], **scheduler_kwargs)
-            )
-        if "scheduler" in opt_cfg.feature_net:
-            scheduler_kwargs = opt_cfg.feature_net.scheduler.get("params", {})
-            scheduler.append(
-                SCHEDULERS[opt_cfg.feature_net.scheduler.name](optimizer[1], **scheduler_kwargs)
-            )
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True
-    )
-    validation_loader = torch.utils.data.DataLoader(
-        validation_dataset,
-        batch_size=cfg.validation.batch_size,
-        shuffle=True
-    )
-
-    criterion = Loss(cfg.training.loss)
-
-    augmentation = v2.Compose([
-        v2.ColorJitter(**cfg.training.augmentation.color_jitter),
-        v2.GaussianBlur(
-            cfg.training.augmentation.gaussian_blur.kernel_size,
-            sigma=cfg.training.augmentation.gaussian_blur.sigma
-        ),
-        v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
-    ])
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
         loop = tqdm(train_loader, leave=True)
@@ -225,3 +168,5 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             fpr_num += features.size(0)
             loop.set_postfix(fpr95=fpr95)
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_loader)}, validation fpr95: {fpr_sum / fpr_num}")
+        for sch in scheduler:
+            sch.step()

@@ -4,9 +4,10 @@ training:
   feature_sampling:
     num_features: 100
     # stride: 12
-    # detector: "harris"
+    # detector: harris
   dataset:
-    suffix: "train"
+    suffix: train
+    data_dir: ./data/datasets
     params:
       image_size: [256, 256]
   augmentation:
@@ -24,11 +25,12 @@ training:
 validation:
   batch_size: 1
   dataset:
-    suffix: "test"
+    suffix: test
+    data_dir: ./data/datasets
     params:
       image_size: [256, 256]
   feature_sampling:
     num_features: 10
 logging:
-  dir: "./data/logs"
+  dir: ./data/logs
   interval: 100

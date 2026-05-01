@@ -19,7 +19,7 @@ import omegaconf
 import torch
 
 from .geodesic_loss import GeodesicLoss
-from .rel_scale_loss import RELScaleLoss
+from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import HomographyReprojectionLoss
 
 
@@ -29,6 +29,7 @@ _LOSSES = {
     "supcon": pml_losses.SupConLoss,
     "mse": torch.nn.MSELoss,
     "rel": RELScaleLoss,
+    "rel_squared": RELScaleLossSquared,
     "geodesic": GeodesicLoss,
     "reprojection": HomographyReprojectionLoss
 }

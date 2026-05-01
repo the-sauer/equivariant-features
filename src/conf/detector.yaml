@@ -1,8 +1,17 @@
 defaults:
   - config
-  - override model: affine_feature_net_canonical_one
   - _self_
 
+model:
+  name: affine_feature_net_canonical_one
+  params:
+    conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
+    basic_block_params:
+      option: B
+    scale_space:
+      name: scale_space_sesn
+      params:
+        num_scales: 5
 training:
   dataset:
     name: blobboards_homographic
@@ -12,31 +21,31 @@ training:
       blobboard_params:
         cutoff: 2.0
   loss:
-    - name: "reprojection"
+    - name: reprojection
       params:
-        distance_metric: "euclidean"
+        distance_metric: euclidean
       weight: 1
     - name: geodesic
       weight: 1
   optimizer:
     scale_space:
-      name: "adam"
+      name: adam
       params:
         lr: 1e-3
         weight_decay: 5e-5
       scheduler:
-        name: "mulistep"
+        name: mulistep
         params:
           milestones: [20, 40]
           gamma: 0.1
     feature_net:
-      name: "adamw"
+      name: adamw
       params:
         lr: 2e-3
       scheduler:
-        name: "cosine"
+        name: cosine
         params:
-          T_max: 50   
+          T_max: 50
 validation:
   dataset:
     name: blobboards_homographic

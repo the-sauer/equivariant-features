@@ -23,11 +23,11 @@ import omegaconf
 import torch
 from tqdm import tqdm
 
-from aef.data import HomographyData
-from aef.data.blobboards import BlobBoardHomographyData, BlobBoardAbsoluteScaleData
+from ..data import HomographyData
+from ..data.blobboards import BlobBoardAbsoluteScaleData
 
 from .losses import Loss
-from ..train import OPTIMIZERS, SCHEDULERS
+from ..train import OPTIMIZERS, SCHEDULERS, prepare_training
 
 
 def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
@@ -90,32 +90,8 @@ def train(model, train_dataset, *args, **kwargs):
 
 
 def train_scale_homographic(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
-        f.write(omegaconf.OmegaConf.to_yaml(cfg))
-    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
-    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+    model, optimizer, scheduler, criterion, training_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = model.to(device)
-
-    optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
-    if "scheduler" in cfg.training.optimizer:
-        sched_cfg = cfg.training.optimizer.scheduler
-        scheduler = SCHEDULERS[sched_cfg.name](optimizer, **sched_cfg.params)
-    else:
-        scheduler = None
-
-    criterion = Loss(cfg.training.loss)
-
-    training_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True
-    )
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
         loop = tqdm(training_loader, leave=True)
@@ -123,7 +99,8 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
         for data in loop:
             b, b_t, H, H_inv = map(lambda x: x.to(device), data)
             gt = compute_scale(H, b.shape[2:])
-            optimizer.zero_grad()
+            for opt in optimizer:
+                opt.zero_grad()
 
             o = model(b)
             o_t = model(b_t)
@@ -131,7 +108,8 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
 
             loss = criterion(o_t / o, gt)
             loss.backward()
-            optimizer.step()
+            for opt in optimizer:
+                opt.step()
             cumulative_loss += loss.item() * b.size(0)
 
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
@@ -144,52 +122,31 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
 
-        if scheduler is not None:
-            scheduler.step()
+        for sch in scheduler:
+            sch.step()
 
 
 def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data.Dataset, validation_dataset: torch.utils.data.Dataset, cfg, experiment_name="default"):
-    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w") as f:
-        f.write(omegaconf.OmegaConf.to_yaml(cfg))
-    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
-    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = model.to(device)
-
-    optimizer = OPTIMIZERS[cfg.training.optimizer.name](model.parameters(), **cfg.training.optimizer.params)
-    if "scheduler" in cfg.training.optimizer:
-        sched_cfg = cfg.training.optimizer.scheduler
-        scheduler = SCHEDULERS[sched_cfg.name](optimizer, **sched_cfg.params)
-    else:
-        scheduler = None
-
-    criterion = Loss(cfg.training.loss)
-
-    training_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=True
-    )
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
-        loop = tqdm(training_loader, leave=True)
+        loop = tqdm(train_loader, leave=True)
         cumulative_loss = 0.0
         for b, gt in loop:
-            b: torch.Tensor = b.to(device)
-            gt: torch.Tensor = gt.to(device)
+            b = b.to(device)
+            gt = gt.to(device)
 
-            optimizer.zero_grad()
-            o: torch.Tensor = model(b)
+            for opt in optimizer:
+                opt.zero_grad()
+            b = augmentation(b)
+            o = model(b)
             o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].reshape(b.size(0), -1)  # only compute loss for blob positions
 
             loss = criterion(o, gt[..., 2])
             loss.backward()
-            optimizer.step()
+            for opt in optimizer:
+                opt.step()
             cumulative_loss += loss.item() * b.size(0)
 
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
@@ -200,7 +157,29 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
                 logging.info(f"epoch {epoch}, loss: {loss.item()}")
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}_batch_{batch_counter:06d}.pth"))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
 
-        if scheduler is not None:
-            scheduler.step()
+        loop = tqdm(validation_loader, leave=True)
+        cumulative_loss = 0.0
+        for b, gt in loop:
+            b = b.to(device)
+            gt = gt.to(device)
+
+            for opt in optimizer:
+                opt.zero_grad()
+            b = augmentation(b)
+            o = model(b)
+            o = o[..., gt[..., 0].round().int(), gt[..., 1].round().int()].reshape(b.size(0), -1)  # only compute loss for blob positions
+
+            loss = criterion(o, gt[..., 2])
+            loss.backward()
+            for opt in optimizer:
+                opt.step()
+            cumulative_loss += loss.item() * b.size(0)
+
+            loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
+            loop.set_postfix(loss=loss.item())
+
+        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_dataset)}")
+
+        for sch in scheduler:
+            sch.step()

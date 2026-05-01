@@ -25,12 +25,12 @@ training:
       params:
         milestones: [20, 40]
         gamma: 0.1
-  loss: "mse"
+  loss: "rel_squared"
 validation:
   dataset:
     name: blobboards_absolute_scale
     params:
-      image_size: [256, 256]
+      image_size: [64, 64]
       num_boards: 12
 logging:
   interval: 1

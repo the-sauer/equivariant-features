@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import juliacall
+import juliacall    # Must be imported before pytorch  # noqa: F401
 
 from datetime import datetime
 import os
@@ -49,9 +49,9 @@ def get_dataset(dataset_cfg):
     elif dataset_cfg.name == "blobboards_absolute_scale":
         return BlobBoardAbsoluteScaleData(**dataset_cfg.params)
     else:
-        data_dir = os.path.join("/home/hendrik/affine-equivariant-features/data", dataset_cfg.name)
-        if not os.path.exists(data_dir):
-            dataset_path = kagglehub.competition_download(dataset_cfg.name, output_dir=data_dir)
+        data_dir = os.path.join(dataset_cfg.data_dir, dataset_cfg.name)
+        if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{dataset_cfg.name}.archive")):
+            dataset_path = kagglehub.competition_download(dataset_cfg.name, output_dir=data_dir, force_download=True)
         else:
             dataset_path = data_dir
         return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
@@ -60,7 +60,7 @@ def get_dataset(dataset_cfg):
 def train(cfg) -> None:
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
     validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
-    model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True)     # type: ignore
+    model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
     model_kwargs["in_channels"] = train_dataset.c
     Model, train_func = MODELS[cfg.model.name]
     model = Model(**model_kwargs)

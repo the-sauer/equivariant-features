@@ -1,26 +1,44 @@
 defaults:
   - config
-  - override model: affine_feature_net_one
   - _self_
 
+model:
+  name: affine_feature_net_one
+  params:
+    conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
+    basic_block_params:
+      option: B
+    scale_space:
+      name: scale_space_sesn
+      params:
+        num_scales: 5
 training:
+  dataset:
+    name: image-matching-challenge-2025
+    params:
+      in_memory: false
   optimizer:
     scale_space:
-      name: "adam"
+      name: adam
       params:
         lr: 1e-3
-        decay: 5e-5
-        momentum: 0.9
-        weight_decay: 1e-4
+        weight_decay: 5e-5
       scheduler:
-        name: "mulistep"
+        name: mulistep
         params:
           milestones: [20, 40]
           gamma: 0.1
     feature_net:
-      name: "adamw"
+      name: adamw
       params:
         lr: 2e-3
       scheduler:
-        name: "cosine"
+        name: cosine
+        params:
+          T_max: 50
   loss: npairs
+validation:
+  dataset:
+    name: image-matching-challenge-2025
+    params:
+      in_memory: false
