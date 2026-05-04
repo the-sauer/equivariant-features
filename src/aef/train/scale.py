@@ -19,15 +19,13 @@ import logging
 import os
 
 import kornia
-import omegaconf
 import torch
 from tqdm import tqdm
 
 from ..data import HomographyData
 from ..data.blobboards import BlobBoardAbsoluteScaleData
 
-from .losses import Loss
-from ..train import OPTIMIZERS, SCHEDULERS, prepare_training
+from ..train import prepare_training
 
 
 def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
@@ -82,7 +80,7 @@ def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
 
 def train(model, train_dataset, *args, **kwargs):
     if isinstance(train_dataset, HomographyData):
-        train_scale_homographic(*args, train_dataset=train_dataset, **kwargs)
+        train_scale_homographic(model, train_dataset, *args, **kwargs)
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
         train_scale_absolute(model, *args, train_dataset=train_dataset, **kwargs)
     else:
