@@ -34,7 +34,7 @@ training:
         lr: 1e-3
         weight_decay: 5e-5
       scheduler:
-        name: mulistep
+        name: multistep
         params:
           milestones: [20, 40]
           gamma: 0.1

@@ -33,7 +33,7 @@ OPTIMIZERS = {
 
 SCHEDULERS = {
     "step": torch.optim.lr_scheduler.StepLR,
-    "mulistep": torch.optim.lr_scheduler.MultiStepLR,
+    "multistep": torch.optim.lr_scheduler.MultiStepLR,
     "exponential": torch.optim.lr_scheduler.ExponentialLR,
     "cosine": torch.optim.lr_scheduler.CosineAnnealingLR
 }
