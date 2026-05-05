@@ -22,7 +22,8 @@ import kornia
 import torch
 import torchvision
 
-from ..transforms import random_affine
+from ..transforms.affine import random_affine
+from ..transforms.homography import sample_homography
 
 
 def flip(f):
@@ -89,7 +90,8 @@ class HomographyData(torch.utils.data.Dataset):
                 self.resize = torchvision.transforms.Resize(image_size)
                 self.c = torchvision.io.decode_image(self.images[0]).size(0)
 
-        self.transforms = random_affine(len(self.images), image_size=image_size, **transform_params)
+        # self.transforms = random_affine(len(self.images), image_size=image_size, **transform_params)
+        self.transforms = torch.stack([torch.Tensor(sample_homography(image_size)) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
         if in_memory:
             if self.images.size(1) == 1:
