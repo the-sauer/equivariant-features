@@ -91,7 +91,6 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
     model, optimizer, scheduler, criterion, training_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
-        batch_counter = 0
         loop = tqdm(training_loader, leave=True)
         cumulative_loss = 0.0
         for data in loop:
@@ -113,10 +112,6 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             loop.set_postfix(loss=loss.item())
 
-            batch_counter += 1
-            if batch_counter % cfg.logging.interval == 0:
-                logging.info(f"epoch {epoch}, loss: {loss.item()}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}_batch_{batch_counter:06d}.pth"))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
         logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
 
