@@ -128,7 +128,6 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
     model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
-        batch_counter = 0
         loop = tqdm(train_loader, leave=True)
         cumulative_loss = 0.0
         for b, gt, num_blobs in loop:
@@ -157,10 +156,6 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             loop.set_postfix(loss=loss.item())
 
-            batch_counter += 1
-            if batch_counter % cfg.logging.interval == 0:
-                logging.info(f"epoch {epoch}, loss: {loss.item()}")
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}_batch_{batch_counter:06d}.pth"))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
 
         loop = tqdm(validation_loader, leave=True)
