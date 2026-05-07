@@ -5,7 +5,7 @@ defaults:
 model:
   name: scale_space_sesn
   params:
-    factor: 6.5
+    factor: 13.0
     num_scales: 8
     min_scale: 2.0
     effective_size: 5

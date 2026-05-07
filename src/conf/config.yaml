@@ -1,6 +1,6 @@
 training:
   batch_size: 1
-  num_epochs: 100
+  num_epochs: 60
   feature_sampling:
     num_features: 100
     # stride: 12
