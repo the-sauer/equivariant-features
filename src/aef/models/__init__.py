@@ -112,20 +112,53 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
         self.canonicalization_layer = asel.affine.EquivarLayer(conv_depths[-1], 4, type=["0", "c"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        channel_dim = 1
-        scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
+        scale_field = self.scale_space(torch.mean(x, dim=1, keepdim=True))
         scale_field = self.scale_gain(scale_field)
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
+        assert x.size(1) == 1
         x, _ = self.feature_net((x, scale_field))
-        x = torch.nn.functional.normalize(x, dim=channel_dim)
+        x = torch.nn.functional.normalize(x, dim=2)
         x = self.canonicalization_layer(x)
-        return x
+        return x.squeeze(1)
+    
+
+class AffineFeatureNetCanonicalTwo(torch.nn.Module):
+    def __init__(self, scales:list[float | int] | dict[str, float], in_channels=1, conv_depths=[8, 16, 32, 64],  basic_block_params=None):
+        super(AffineFeatureNetCanonicalTwo, self).__init__()
+        if isinstance(scales, list):
+            scale_list: list[float] = scales
+        elif isinstance(scales, dict) and "min_scale" in scales and "factor" in scales and "num_scales" in scales:
+            q = scales["factor"] ** (1 / (scales["num_scales"] - 1))
+            scale_list: list[float] = [scales["min_scale"] * q**i for i in range(scales["num_scales"])]
+        else:
+            raise ValueError("scales must be either a list of scales or a dictionary with keys 'min_scale', 'factor' and 'num_scales'.")
+
+        if basic_block_params is None:
+            basic_block_params = {}
+
+        self.feature_net = torch.nn.Sequential(
+            asel.affine.BasicBlock(in_channels, conv_depths[0], scales=scale_list, **basic_block_params),
+            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params) for i in range(len(conv_depths)-1)),
+            asel.affine.EquivarLayer(conv_depths[-1], 4, scales=scale_list, type=["0", "c"]),
+            asel.affine.ScaleProjectionLayer(scales=scale_list),
+        )
 
 
-""""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
+        assert x.size(1) == 1
+
+        return self.feature_net(x)
+
+
+"""
 All model definition with their respective training functions are collected in this dictionary for easier access.
 """
 MODELS = {
     "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
     "affine_feature_net_one": (AffineFeatureNetOne, train_descriptor),
     "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_detector),
+    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_detector)
 }
