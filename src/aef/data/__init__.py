@@ -91,7 +91,7 @@ class HomographyData(torch.utils.data.Dataset):
                 self.c = torchvision.io.decode_image(self.images[0]).size(0)
 
         # self.transforms = random_affine(len(self.images), image_size=image_size, **transform_params)
-        self.transforms = torch.stack([torch.Tensor(sample_homography(image_size)) for _ in range(len(self.images))])
+        self.transforms = torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
         if in_memory:
             if self.images.size(1) == 1:

@@ -5,7 +5,7 @@ defaults:
 model:
   name: scale_space_sesn
   params:
-    factor: 13.0
+    factor: 6.5
     num_scales: 8
     min_scale: 2.0
     effective_size: 5
@@ -16,6 +16,8 @@ training:
       image_size: [128, 128]
       num_boards: 80
       polarity: "random"
+      transform_params:
+        scaling_amplitude: 1
   optimizer:
     name: adam
     params:
@@ -33,6 +35,8 @@ validation:
     params:
       image_size: [128, 128]
       num_boards: 10
-    polarity: "random"
+      polarity: "random"
+      transform_params:
+        scaling_amplitude: 1
 logging:
   interval: 1

@@ -4,16 +4,7 @@ defaults:
   - _self_
 
 training:
-  batch_size: 16
-  dataset:
-    params:
-      image_size: [512, 512]
-      blobboard_params:
-        max_diameter_fraction: 0.05
+  batch_size: 32
+
 validation:
-  batch_size: 16
-  dataset:
-    params:
-      image_size: [512, 512]
-      blobboard_params:
-        max_diameter_fraction: 0.05
+  batch_size: 32
