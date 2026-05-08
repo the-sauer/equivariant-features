@@ -141,7 +141,7 @@ class AffineFeatureNetCanonicalTwo(torch.nn.Module):
             asel.affine.BasicBlock(in_channels, conv_depths[0], scales=scale_list, **basic_block_params),
             *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params) for i in range(len(conv_depths)-1)),
             asel.affine.EquivarLayer(conv_depths[-1], 4, scales=scale_list, type=["0", "c"]),
-            asel.affine.ScaleProjectionLayer(scales=scale_list),
+            asel.affine.LearnedSaliencyLayer(scales=scale_list),
         )
 
 
