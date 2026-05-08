@@ -30,22 +30,20 @@ import torch
 
 
 def sample_homography(
-    original_shape,
-    patch_shape=None,
-    perspective=True,
-    scaling=True,
-    rotation=True,
-    translation=True,
-    n_scales=5,
-    n_angles=25,
-    scaling_amplitude=0.1,
-    base_scale=1.0,
-    perspective_amplitude_x=0.1,
-    perspective_amplitude_y=0.1,
-    patch_ratio=1.0,
-    max_angle=np.pi / 2,
-    allow_artifacts=False,
-    translation_overflow=0.0,
+        shape,
+        perspective=True,
+        scaling=True,
+        rotation=True,
+        translation=True,
+        n_scales=5,
+        n_angles=25,
+        scaling_amplitude=0.1,
+        perspective_amplitude_x=0.1,
+        perspective_amplitude_y=0.1,
+        patch_ratio=0.5,
+        max_angle=np.pi / 2,
+        allow_artifacts=False,
+        translation_overflow=0.0,
 ) -> torch.Tensor:
     """Sample a random valid homography.
 
@@ -83,9 +81,6 @@ def sample_homography(
             result = np.random.normal(loc, scale, shape)
             logging.debug("Recalculated truncated normal")
         return result
-    
-    if patch_shape is None:
-        patch_shape = (patch_ratio * original_shape[0], patch_ratio * original_shape[1])
 
     # Corners of the output image
     margin = (1 - patch_ratio) / 2
@@ -155,9 +150,9 @@ def sample_homography(
         pts2 = rotated[idx]
 
     # Rescale to actual size
-    patch_shape = tuple(map(float, patch_shape[::-1]))  # different convention [y, x]
-    pts1 = pts1 * np.expand_dims(patch_shape, axis=0)
-    pts2 = pts2 * np.expand_dims(patch_shape, axis=0)
+    shape = tuple(map(float, shape[::-1]))  # different convention [y, x]
+    pts1 = pts1 * np.expand_dims(shape, axis=0)
+    pts2 = pts2 * np.expand_dims(shape, axis=0)
 
     def ax(p, q):
         return [p[0], p[1], 1, 0, 0, 0, -p[0] * q[0], -p[1] * q[0]]
@@ -172,11 +167,4 @@ def sample_homography(
     homography[0, :] = flat_homography[0][:3]
     homography[1, :] = flat_homography[0][3:6]
     homography[2, :2] = flat_homography[0][6:]
-    translation1 = np.identity(3)
-    translation1[0, 2] = -original_shape[0] / 2
-    translation1[1, 2] = -original_shape[1] / 2
-    translation2 = np.identity(3)
-    translation2[0, 2] = patch_shape[0] / 2
-    translation2[1, 2] = patch_shape[1] / 2
-    scale = min(patch_shape[0] / original_shape[0], patch_shape[1] / original_shape[1]) * base_scale
-    return torch.tensor(homography @ translation2 @ np.diag([scale, scale, 1]) @ translation1, dtype=torch.float32)
+    return torch.tensor(homography, dtype=torch.float32)
