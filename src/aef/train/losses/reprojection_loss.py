@@ -35,7 +35,9 @@ class HomographyReprojectionLoss(torch.nn.Module):
         ).float().reshape(1, -1, 3).expand(pred.shape[0], -1, -1)
 
         pred_proj = torch.bmm(pred.view(pred.shape[0], 3, 3), grid.permute(0, 2, 1)).permute(0, 2, 1)
+        pred_proj = pred_proj[..., :2] / pred_proj[..., 2:3]
         target_proj = torch.bmm(target.view(target.shape[0], 3, 3), grid.permute(0, 2, 1)).permute(0, 2, 1)
+        target_proj = target_proj[..., :2] / target_proj[..., 2:3]
 
         if self.distance_metric == "euclidean":
             loss = torch.norm(pred_proj - target_proj, dim=-1)
