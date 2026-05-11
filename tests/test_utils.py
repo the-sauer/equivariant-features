@@ -9,7 +9,7 @@ from aef.train.losses.rel_scale_loss import RELScaleLoss
 from aef.train.losses.reprojection_loss import HomographyReprojectionLoss
 from aef.train.detector import linearize_homography
 from aef.train.scale import compute_scale
-from aef.transforms import random_affine
+from aef.transforms.affine import random_affine
 
 
 def test_random_affine_without_scaling_or_rotation_is_identity():
