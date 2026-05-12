@@ -21,6 +21,10 @@ import kornia
 import torch
 from tqdm import tqdm
 
+from ..data.blobboards import BlobBoardAbsoluteScaleData
+
+from ..data import HomographyData, sample_homography
+
 from .losses.geodesic_loss import GeodesicLoss
 from .losses.reprojection_loss import HomographyReprojectionLoss
 from ..train import prepare_training
@@ -39,30 +43,40 @@ def homogenize(A, b=None):
     ), dim=width_dim)
 
 
-def linearize_homography(H, shape):
-    coords = torch.stack(
-        (
-            *torch.meshgrid(
-                torch.arange(shape[0], device=H.device),
-                torch.arange(shape[1], device=H.device), indexing="ij"
+def linearize_homography(H, shape=None, coords=None):
+    if coords is None:
+        if shape is None:
+            raise ValueError("Either shape or coords must be provided")
+        coords = torch.stack(
+            (
+                *torch.meshgrid(
+                    torch.arange(shape[0], device=H.device),
+                    torch.arange(shape[1], device=H.device), indexing="ij"
             ),
             torch.ones((1, 1), device=H.device).expand(shape[0], shape[1],)
         ),
         dim=2
-    )
-    coords = coords.unsqueeze(0).unsqueeze(4)
+        )
+        coords = coords.unsqueeze(0)
     H = H.unsqueeze(1).unsqueeze(2)
+    coords = coords.unsqueeze(-1)
     proj = H @ coords
     x = proj[..., 0, 0]
     y = proj[..., 1, 0]
     w = proj[..., 2, 0]
     return torch.stack((
-        torch.stack(((H[..., 0, 0] * w - H[..., 2, 0] * x) / w ** 2, (H[..., 1, 0] * w - H[..., 2, 0] * y) / w ** 2), dim=2),
-        torch.stack(((H[..., 0, 1] * w - H[..., 2, 1] * x) / w ** 2, (H[..., 1, 1] * w - H[..., 2, 1] * y) / w ** 2), dim=2)
-    ), dim=3)
+        torch.stack(((H[..., 0, 0] * w - H[..., 2, 0] * x) / w ** 2, (H[..., 1, 0] * w - H[..., 2, 0] * y) / w ** 2), dim=-1),
+        torch.stack(((H[..., 0, 1] * w - H[..., 2, 1] * x) / w ** 2, (H[..., 1, 1] * w - H[..., 2, 1] * y) / w ** 2), dim=-1)
+    ), dim=-1)
 
 
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
+    if isinstance(train_dataset, HomographyData):
+        return train_homographic(model, train_dataset, validation_dataset, cfg, experiment_name)
+    elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
+        return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
+
+def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
@@ -174,3 +188,63 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
 
         for sch in scheduler:
             sch.step()
+
+
+def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
+    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+
+    for epoch in range(cfg.training.num_epochs):
+        loop = tqdm(train_loader, leave=True)
+        cumulative_loss = 0.0
+        model.train()
+        for b, gt, num_blobs in loop:
+            for opt in optimizer:
+                opt.zero_grad()
+            b: torch.Tensor = b.to(device)
+            gt: torch.Tensor = gt.to(device)
+            num_blobs: torch.Tensor = num_blobs.to(device)
+            B = b.size(0)
+
+
+            transform_params = cfg.training.homography_params if "homography_params" in cfg.training else {}
+            H = torch.stack([sample_homography(b.shape[2:], **transform_params) for _ in range(b.size(0))], dim=0).to(device)
+
+            b_t = kornia.geometry.transform.warp_perspective(b, H, b.shape[2:], padding_mode="zeros")
+
+            out = model(b_t)
+
+            coords = torch.cat([gt[..., :2], torch.ones(1, 1, 1).expand(*gt.shape[:2], 1).to(device)], dim=-1)
+            positions = (H.unsqueeze(1) @ coords.unsqueeze(-1)).squeeze(-1)
+            positions = positions[..., :2] / positions[..., 2:3]
+            affine_gt = linearize_homography(
+                H,
+                coords=coords.unsqueeze((2))
+            ).reshape(gt.shape[0], gt.shape[1], 2, 2)
+
+            y = []
+            y_hat = []
+            for i in range(B):
+                coords_i = positions[i, :num_blobs[i], :2]
+                affine_gt_i = affine_gt[i, :num_blobs[i]]
+
+                mask = (coords_i[:, 0] >= 0) & (coords_i[:, 0] < b.size(2)) & (coords_i[:, 1] >= 0) & (coords_i[:, 1] < b.size(3))
+
+                coords_i = coords_i[mask]
+                affine_gt_i = affine_gt_i[mask]
+
+                y.append(affine_gt_i)
+                y_hat.append(out[i, :, :, coords_i[:, 0].round().int(), coords_i[:, 1].round().int()].permute(2, 0, 1))
+
+            y = torch.stack(y, dim=0)
+            y_hat = torch.stack(y_hat, dim=0)
+
+            loss = criterion(homogenize(y_hat.reshape(-1, 2, 2)), homogenize(y.reshape(-1, 2, 2)))
+            loss.backward()
+            for opt in optimizer:
+                opt.step()
+            cumulative_loss += loss.item() * b.size(0)
+            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
+            loop.set_postfix(loss=loss.item())
+
+
+            
