@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import itertools
 import logging
 import os
 
@@ -72,7 +73,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         # TODO: Refactor optimizer initialization to be more flexible and less hardcoded.
         optimizer = [
             OPTIMIZERS[opt_cfg.scale_space.name](model.scale_space.parameters(), **opt_cfg.scale_space.get("params", {})),
-            OPTIMIZERS[opt_cfg.feature_net.name](model.feature_net.parameters(), **opt_cfg.feature_net.get("params", {}))
+            OPTIMIZERS[opt_cfg.feature_net.name](itertools.chain(model.feature_net.parameters(), model.scale_gain.parameters()), **opt_cfg.feature_net.get("params", {}))
         ]
         scheduler = []
         if hasattr(opt_cfg.scale_space, "scheduler"):

@@ -7,7 +7,7 @@ from aef.evaluate import fpr
 from aef.train.losses.geodesic_loss import GeodesicLoss
 from aef.train.losses.rel_scale_loss import RELScaleLoss
 from aef.train.losses.reprojection_loss import HomographyReprojectionLoss
-from aef.train.detector import linearize_homography
+from aef.train.detector import homogenize, linearize_homography
 from aef.train.scale import compute_scale
 from aef.transforms.affine import random_affine
 
@@ -112,3 +112,11 @@ def test_fpr_is_zero_when_positive_scores_rank_first():
     labels = torch.tensor([1, 0])
 
     assert fpr(preds, labels, target_recall=0.5) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("A, b, expected", [
+    (torch.eye(2), torch.zeros(2), torch.eye(3)),
+    (torch.eye(2).reshape(1, 1, 2, 2).expand(4, 5, -1, -1), torch.zeros(1, 1, 2).expand(4, 5, -1), torch.eye(3).reshape(1, 1, 3, 3).expand(4, 5, -1, -1)),
+])
+def test_homogenize(A, b, expected):
+    torch.testing.assert_close(homogenize(A, b), expected)

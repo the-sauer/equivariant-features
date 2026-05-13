@@ -31,15 +31,15 @@ from ..train import prepare_training
 
 
 def homogenize(A, b=None):
-    B, H, W = A.size()
-    _, h_dim, w_dim = 0, 1, 2
+    *B, H, W = A.size()
+    h_dim, w_dim = -2, -1
     if b is None:
-        b = torch.zeros(1, 1, dtype=A.dtype, device=A.device).expand(B, H)
-    assert b.size() == (B, H)
+        b = torch.zeros(1, 1, dtype=A.dtype, device=A.device).expand(*B, H)
+    assert b.size() == (*B, H)
 
     return torch.cat((
-        torch.cat((A, torch.zeros(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, W)), dim=h_dim),
-        torch.cat((b.unsqueeze(-1), torch.ones(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, 1)), dim=h_dim),
+        torch.cat((A, torch.zeros(*(1 for _ in B), 1, 1, dtype=A.dtype, device=A.device).expand(*B, 1, W)), dim=h_dim),
+        torch.cat((b.unsqueeze(-1), torch.ones(*(1 for _ in B), 1, 1, dtype=A.dtype, device=A.device).expand(*B, 1, 1)), dim=h_dim),
     ), dim=w_dim)
 
 
@@ -99,7 +99,6 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
         batch_counter = 0
         loop = tqdm(train_loader, leave=True)
         loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
-        cumulative_loss = 0.0
         model.train()
         for (img, img_t, H, H_inv) in loop:
             img = img.to(device)
@@ -130,36 +129,44 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
                 H_inv,
                 dsize=feature_map.shape[-2:]
             ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
-            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, :, :]
-            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, : ,:]
+            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+
+            b = torch.stack(torch.meshgrid(
+                torch.arange(feature_map.size(3), device=device),
+                torch.arange(feature_map.size(4), device=device), indexing="ij"
+            ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
 
             non_singular_mask = torch.linalg.det(features) > 1e-6
-            rel_t = features_t[non_singular_mask] @ torch.linalg.inv(features[non_singular_mask])   # use linalg.solve
+            num_features = torch.sum(non_singular_mask.int(), dim=1)
+            features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+            features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+            b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+            for i in range(features.size(0)):
+                features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
+                features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
+                b_filtered[i] = b[i, non_singular_mask[i]]
+            features = features_filtered
+            features_t = features_t_filtered
+            b = b_filtered
 
-            gt = linearize_homography(H, feature_map.shape[-2:]).reshape(-1, 2, 2)[::feature_stride, :, :][non_singular_mask]
+            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b), img_t), num_features)
 
-            loss = criterion(homogenize(rel_t), homogenize(gt))
-
-            reprojection_loss = HomographyReprojectionLoss()(homogenize(rel_t), homogenize(gt))
-            geodesic_loss = GeodesicLoss()(rel_t, gt)
-
-            loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
-            cumulative_loss += loss * img.size(0)
+            loop.set_postfix(loss=loss.item())
             loss.backward()
             for opt in optimizer:
                 opt.step()
             batch_counter += 1
             if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and batch_counter % cfg.logging.interval == 0:
-                checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
-                logging.info(f"epoch {epoch}, loss: {loss}, saved_model to: {checkpoint_name}")
-                # if checkpoint_dir is not None:
-                # torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
+                logging.info("epoch %d, loss: %f", epoch, loss)
+
         if checkpoint_dir is not None:
             torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
 
         loop = tqdm(validation_loader, leave=True)
         loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
         model.eval()
+        cumulative_loss = 0.0
         for (img, img_t, H, H_inv) in loop:
             img = img.to(device)
             img_t = augmentation(img_t.to(device))
@@ -187,22 +194,33 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
                 H_inv,
                 dsize=feature_map.shape[-2:]
             ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
-            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, :, :]
-            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, : ,:]
+            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+
+            b = torch.stack(torch.meshgrid(
+                torch.arange(feature_map.size(3), device=device),
+                torch.arange(feature_map.size(4), device=device), indexing="ij"
+            ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
 
             non_singular_mask = torch.linalg.det(features) > 1e-6
-            rel_t = features_t[non_singular_mask] @ torch.linalg.inv(features[non_singular_mask])   # use linalg.solve
+            num_features = torch.sum(non_singular_mask.int(), dim=1)
+            features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+            features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+            b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+            for i in range(features.size(0)):
+                features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
+                features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
+                b_filtered[i] = b[i, non_singular_mask[i]]
+            features = features_filtered
+            features_t = features_t_filtered
+            b = b_filtered
 
-            gt = linearize_homography(H, feature_map.shape[-2:]).reshape(-1, 2, 2)[::feature_stride, :, :][non_singular_mask]
+            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b), img_t), num_features)
+            cumulative_loss += loss * img.size(0)
 
-            loss = criterion(homogenize(rel_t), homogenize(gt))
+            loop.set_postfix(loss=loss.item())
 
-            reprojection_loss = HomographyReprojectionLoss()(homogenize(rel_t), homogenize(gt))
-            geodesic_loss = GeodesicLoss()(rel_t, gt)
-
-            loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
-
-        logging.info(f"finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(train_dataset))
+        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(validation_dataset))
 
         for sch in scheduler:
             sch.step()

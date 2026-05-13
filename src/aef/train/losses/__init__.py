@@ -19,6 +19,7 @@ import omegaconf
 import torch
 
 from .geodesic_loss import GeodesicLoss
+from .image_generation_loss import ImageGenerationLoss
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import HomographyReprojectionLoss
 
@@ -31,7 +32,8 @@ _LOSSES = {
     "rel": RELScaleLoss,
     "rel_squared": RELScaleLossSquared,
     "geodesic": GeodesicLoss,
-    "reprojection": HomographyReprojectionLoss
+    "reprojection": HomographyReprojectionLoss,
+    "img_gen": ImageGenerationLoss,
 }
 
 
@@ -50,5 +52,5 @@ class Loss(torch.nn.Module):
             [loss_cfg] = args
             self.losses = [loss_cfg.get("weight", 1), _LOSSES[loss_cfg["name"]](**loss_cfg.get("params", {}))]
 
-    def forward(self, pred, gt):
-        return sum(w * loss(pred, gt) for w, loss in self.losses)
+    def forward(self, *args):
+        return sum(w * loss(*args) for w, loss in self.losses)
