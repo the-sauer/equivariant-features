@@ -16,37 +16,8 @@
 
 import torch
 
+from .homography import sample_homography
 
-def random_affine(n, scale=True, min_scale=0.5, max_scale=1.0, translate=True, rotate=True, image_size=(128, 128)) -> torch.Tensor:
-    # TODO: Implement
-
-    origin_translation1 = torch.eye(3, dtype=torch.float32).unsqueeze(0)
-    origin_translation1[..., 0, 2] = image_size[1] / 2
-    origin_translation1[..., 1, 2] = image_size[0] / 2
-    origin_translation1 = origin_translation1.expand(n, -1, -1)
-
-    origin_translation2 = torch.eye(3, dtype=torch.float32).unsqueeze(0)
-    origin_translation2[..., 0, 2] = -image_size[1] / 2
-    origin_translation2[..., 1, 2] = -image_size[0] / 2
-    origin_translation2 = origin_translation2.expand(n, -1, -1)
-
-    if scale:
-        scale = torch.rand(n, dtype=torch.float32) * (max_scale - min_scale) + min_scale
-        scale_mat = torch.eye(3, dtype=torch.float32).unsqueeze(0).repeat(n, 1, 1)
-        scale_mat[..., 0, 0] = scale
-        scale_mat[..., 1, 1] = scale
-    else:
-        scale_mat = torch.eye(3, dtype=torch.float32).unsqueeze(0).expand(n, -1, -1)
-
-    if rotate:
-        rotation = torch.rand(n, dtype=torch.float32) * 2 * torch.pi
-        rot_mat = torch.stack([
-            torch.stack([torch.cos(rotation), -torch.sin(rotation), torch.zeros(1,).expand(n)], dim=-1),
-            torch.stack([torch.sin(rotation), torch.cos(rotation), torch.zeros(1,).expand(n)], dim=-1),
-            torch.stack([torch.zeros(1,).expand(n), torch.zeros(1,).expand(n), torch.ones(1,).expand(n)], dim=-1)
-
-        ], dim=-1)
-    else:
-        rot_mat = torch.eye(3, dtype=torch.float32).unsqueeze(0).expand(n, -1, -1)
-
-    return origin_translation1 @ scale_mat @ rot_mat @ origin_translation2
+def random_affine(image_size, **kwargs) -> torch.Tensor:
+    kwargs["perspective"] = False
+    return sample_homography(image_size, **kwargs)
