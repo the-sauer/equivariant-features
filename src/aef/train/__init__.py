@@ -44,39 +44,43 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     Prepares the training by setting up logging, device, model, optimizer, scheduler, data loaders, criterion and
     augmentation.
     """
-    os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-    checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
-    logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+    if hasattr(cfg, "logging") and cfg.logging is not None:
+        os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
+        checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
+        logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
 
-    with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w", encoding="utf-8") as f:
-        f.write(omegaconf.OmegaConf.to_yaml(cfg))
+        with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w", encoding="utf-8") as f:
+            f.write(omegaconf.OmegaConf.to_yaml(cfg))
+    else:
+        checkpoint_dir = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.mps.is_available() else "cpu"))
 
     model = model.to(device)
 
     opt_cfg = cfg.training.optimizer
-    if "name" in opt_cfg:
+    if hasattr(opt_cfg, "name"):
         optimizer = [OPTIMIZERS[opt_cfg.name](model.parameters(), **opt_cfg.get("params", {}))]
-        if "scheduler" in opt_cfg:
+        if hasattr(opt_cfg, "scheduler"):
             sched_cfg = opt_cfg.scheduler
             scheduler = [SCHEDULERS[sched_cfg.name](optimizer[0], **sched_cfg.get("params", {}))]
         else:
             scheduler = []
     else:
+        # TODO: Refactor optimizer initialization to be more flexible and less hardcoded.
         optimizer = [
             OPTIMIZERS[opt_cfg.scale_space.name](model.scale_space.parameters(), **opt_cfg.scale_space.get("params", {})),
             OPTIMIZERS[opt_cfg.feature_net.name](model.feature_net.parameters(), **opt_cfg.feature_net.get("params", {}))
         ]
         scheduler = []
-        if "scheduler" in opt_cfg.scale_space:
+        if hasattr(opt_cfg.scale_space, "scheduler"):
             scheduler_kwargs = opt_cfg.scale_space.scheduler.get("params", {})
             scheduler.append(
                 SCHEDULERS[opt_cfg.scale_space.scheduler.name](optimizer[0], **scheduler_kwargs)
             )
-        if "scheduler" in opt_cfg.feature_net:
+        if hasattr(opt_cfg.feature_net, "scheduler"):
             scheduler_kwargs = opt_cfg.feature_net.scheduler.get("params", {})
             scheduler.append(
                 SCHEDULERS[opt_cfg.feature_net.scheduler.name](optimizer[1], **scheduler_kwargs)
@@ -95,13 +99,17 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
     criterion = Loss(cfg.training.loss)
 
-    augmentation = v2.Compose([
-        v2.ColorJitter(**cfg.training.augmentation.color_jitter),
-        v2.GaussianBlur(
-            cfg.training.augmentation.gaussian_blur.kernel_size,
-            sigma=cfg.training.augmentation.gaussian_blur.sigma
-        ),
-        v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
-    ])
+    if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
+        # TODO: Check for all innner augmentations
+        augmentation = v2.Compose([
+            v2.ColorJitter(**cfg.training.augmentation.color_jitter),
+            v2.GaussianBlur(
+                cfg.training.augmentation.gaussian_blur.kernel_size,
+                sigma=cfg.training.augmentation.gaussian_blur.sigma
+            ),
+            v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
+        ])
+    else:
+        augmentation = lambda x: x
 
     return model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir

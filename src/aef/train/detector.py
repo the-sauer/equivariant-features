@@ -105,7 +105,7 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
 
             H_inv = H_inv.to(device)
             feature_map_t = kornia.geometry.transform.warp_perspective(
-                torch.flatten(feature_map, start_dim=1, end_dim=2),
+                torch.flatten(feature_map_t, start_dim=1, end_dim=2),
                 H_inv,
                 dsize=feature_map.shape[-2:]
             ).reshape(feature_map.shape)
@@ -128,16 +128,18 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
             geodesic_loss = GeodesicLoss()(rel_t, gt)
 
             loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
-            cumulative_loss += loss.item() * img.size(0)
+            cumulative_loss += loss * img.size(0)
             loss.backward()
             for opt in optimizer:
                 opt.step()
             batch_counter += 1
-            if batch_counter % cfg.logging.interval == 0:
+            if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and batch_counter % cfg.logging.interval == 0:
                 checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
-                logging.info(f"epoch {epoch}, loss: {loss.item()}, saved_model to: {checkpoint_name}")
+                logging.info(f"epoch {epoch}, loss: {loss}, saved_model to: {checkpoint_name}")
+                # if checkpoint_dir is not None:
                 # torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+        if checkpoint_dir is not None:
+            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
 
         loop = tqdm(validation_loader, leave=True)
         loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
@@ -160,7 +162,7 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
 
             H_inv = H_inv.to(device)
             feature_map_t = kornia.geometry.transform.warp_perspective(
-                torch.flatten(feature_map, start_dim=1, end_dim=2),
+                torch.flatten(feature_map_t, start_dim=1, end_dim=2),
                 H_inv,
                 dsize=feature_map.shape[-2:]
             ).reshape(feature_map.shape)

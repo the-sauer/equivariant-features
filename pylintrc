@@ -1,6 +1,6 @@
 [BASIC]
 
-good-names=H, H_inv, A
+good-names=H, H_inv, A, B, W, DoG, R_diffs, N, Nx,n Ny, D, H00, H01, H10, H11, H20, H21
 
 [MESSAGES CONTROL]
 
