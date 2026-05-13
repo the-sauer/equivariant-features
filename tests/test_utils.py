@@ -13,25 +13,39 @@ from aef.transforms.affine import random_affine
 
 
 def test_random_affine_without_scaling_or_rotation_is_identity():
-    matrix = random_affine(2, scale=False, rotate=False, image_size=(8, 10))
+    n = 5
+    matrix = torch.stack([
+        random_affine(image_size=(8, 10), scaling=False, rotation=False, translation=False) for _ in range(n)
+    ])
 
-    expected = torch.eye(3, dtype=torch.float32).expand(2, -1, -1)
+    expected = torch.eye(3, dtype=torch.float32).expand(n, -1, -1)
     torch.testing.assert_close(matrix, expected)
 
 
 def test_random_affine_scales_around_image_center(monkeypatch):
     monkeypatch.setattr(torch, "rand", lambda n, dtype=None: torch.zeros(n, dtype=dtype or torch.float32))
-
-    matrix = random_affine(1, scale=True, min_scale=0.5, max_scale=1.0, rotate=False, image_size=(8, 10))
-
-    expected = torch.tensor(
-        [
-            [0.5, 0.0, 2.5],
-            [0.0, 0.5, 2.0],
+    n = 5
+    matrix = torch.stack([
+        random_affine(image_size=(8, 10), scaling=True, scaling_amplitude=1, rotation=False, translation=False)
+        for _ in range(n)
+    ])
+    print(matrix)
+    scales = torch.linalg.det(matrix[:, :2, :2]) ** (1/2)
+    expected = (torch.tensor([
+            [1.0, 0.0, 5.0],
+            [0.0, 1.0, 4.0],
             [0.0, 0.0, 1.0],
-        ],
-        dtype=torch.float32,
-    ).unsqueeze(0)
+        ], dtype=torch.float32).unsqueeze(0)
+        @ torch.stack([torch.tensor([
+            [s, 0.0, 0],
+            [0.0, s, 0],
+            [0.0, 0.0, 1.0],
+        ], dtype=torch.float32) for s in scales])
+        @ torch.tensor([
+            [1.0, 0.0, -5.0],
+            [0.0, 1.0, -4.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=torch.float32).unsqueeze(0))
     torch.testing.assert_close(matrix, expected)
 
 
@@ -48,7 +62,7 @@ def test_linearize_homography_identity_is_identity_jacobian():
 
     jacobian = linearize_homography(homography, (3, 4))
 
-    expected = torch.eye(2, dtype=torch.float32).view(1, 1, 2, 2, 1).expand(1, 3, -1, -1, 4)
+    expected = torch.eye(2, dtype=torch.float32).view(1, 1, 1, 2, 2).expand(1, 3, 4, -1, -1)
     torch.testing.assert_close(jacobian, expected)
 
 
