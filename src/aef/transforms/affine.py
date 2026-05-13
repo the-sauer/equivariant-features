@@ -18,6 +18,7 @@ import torch
 
 from .homography import sample_homography
 
+
 def random_affine(image_size, **kwargs) -> torch.Tensor:
     kwargs["perspective"] = False
     return sample_homography(image_size, **kwargs)

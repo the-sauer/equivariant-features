@@ -26,13 +26,26 @@ def get_seeds(num_seeds, seed_range=(0, 10000), split="train"):
     seeds = []
     while len(seeds) < num_seeds:
         seed = random.randint(*seed_range)
-        if seed not in seeds and ((split == "validation" and seed % 10 == 0) or (split != "test" and seed % 10 == 1) or (split == "train" and seed % 10 > 1)):
+        if (
+            seed not in seeds
+            and ((split == "validation" and seed % 10 == 0)
+                 or (split == "test" and seed % 10 == 1)
+                 or (split == "train" and seed % 10 > 1))
+        ):
             seeds.append(seed)
     return seeds
 
 
 class BlobBoardHomographyData(HomographyData):
-    def __init__(self, num_boards, blobboard_params=None, image_size=(128, 128), split="train", polarity="dark", **kwargs):
+    def __init__(
+        self,
+        num_boards,
+        blobboard_params=None,
+        image_size=(128, 128),
+        split="train",
+        polarity="dark",
+        **kwargs
+    ):
         if blobboard_params is None:
             blobboard_params = {}
         if blobboard_params is None:
@@ -43,11 +56,13 @@ class BlobBoardHomographyData(HomographyData):
             polarity = ["light"] * num_boards
         else:
             assert polarity == "random", "Polarity must be 'dark', 'light', or 'random'."
-            polarity = [random.choice(["dark", "light"]) for _ in range(num_boards)]    
+            polarity = [random.choice(["dark", "light"]) for _ in range(num_boards)]
         kwargs["in_memory"] = True
         super().__init__(
             torch.stack([
-                torch.Tensor(blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params).pattern).unsqueeze(0)
+                torch.Tensor(
+                    blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params).pattern
+                ).unsqueeze(0)
                 for s, p in zip(get_seeds(num_boards, split=split), polarity)
             ]),
             image_size=image_size,
@@ -68,7 +83,8 @@ class BlobBoardAbsoluteScaleData(torch.utils.data.Dataset):
             assert polarity == "random", "Polarity must be 'dark', 'light', or 'random'."
             polarities = [random.choice(["dark", "light"]) for _ in range(num_boards)]
         boards = [
-            blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params) for s, p in zip(get_seeds(num_boards, split=split), polarities)
+            blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params)
+            for s, p in zip(get_seeds(num_boards, split=split), polarities)
         ]
         self.data = torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards])
         self.num_blobs = torch.Tensor([len(board.blobs) for board in boards]).to(torch.int32)

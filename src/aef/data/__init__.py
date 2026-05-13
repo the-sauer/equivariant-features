@@ -22,7 +22,6 @@ import kornia
 import torch
 import torchvision
 
-from ..transforms.affine import random_affine
 from ..transforms.homography import sample_homography
 
 
@@ -73,12 +72,25 @@ def load_images(dir,  size, extensions=[".jpg", ".jpeg", ".JPG", ".JPEG", ".png"
 
 
 class HomographyData(torch.utils.data.Dataset):
-    def __init__(self, images: Union[str, torch.Tensor], image_size: tuple[int, int] = (128, 128), in_memory=True, transform_params=None):
+    images: torch.Tensor | list[str]
+    transforms: torch.Tensor
+    transforms_inv: torch.Tensor
+    size: tuple[int, int]
+    c: int
+
+    def __init__(
+        self,
+        images: Union[str, torch.Tensor],
+        image_size: tuple[int, int] = (128, 128),
+        in_memory=True,
+        transform_params=None,
+        **_
+    ):
         super().__init__()
         if transform_params is None:
             transform_params = {}
         self.size = image_size
-        if type(images) is torch.Tensor:
+        if isinstance(images, torch.Tensor):
             self.images = images
             self.c = self.images.size(1)
         else:
@@ -90,7 +102,6 @@ class HomographyData(torch.utils.data.Dataset):
                 self.resize = torchvision.transforms.Resize(image_size)
                 self.c = torchvision.io.decode_image(self.images[0]).size(0)
 
-        # self.transforms = random_affine(len(self.images), image_size=image_size, **transform_params)
         self.transforms = torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
         if in_memory:
@@ -114,7 +125,7 @@ class HomographyData(torch.utils.data.Dataset):
                 raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
 
     def __getitem__(self, index):
-        if type(self.images[index]) is str:
+        if isinstance(self.images[index], str):
             img = self.resize(torchvision.io.decode_image(self.images[index]).unsqueeze(0).to(torch.float32) / 255)
             if img.size(1) == 1:
                 transformed = kornia.geometry.transform.warp_perspective(
@@ -136,7 +147,12 @@ class HomographyData(torch.utils.data.Dataset):
                 raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
             return (img.squeeze(0), transformed.squeeze(0), self.transforms[index], self.transforms_inv[index])
         else:
-            return (self.images[index], self.images_transformed[index], self.transforms[index], self.transforms_inv[index])
+            return (
+                self.images[index],
+                self.images_transformed[index],
+                self.transforms[index],
+                self.transforms_inv[index]
+            )
 
     def __len__(self):
         return len(self.images)

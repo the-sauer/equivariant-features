@@ -110,6 +110,6 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
             v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
         ])
     else:
-        augmentation = lambda x: x
+        augmentation = lambda x: x  # noqa: E731
 
     return model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir

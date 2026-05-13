@@ -41,8 +41,8 @@ class GeodesicLoss(nn.Module):
         self.eps = eps
         self.reduction = reduction
 
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
-        R_diffs = input @ target.permute(0, 2, 1)
+    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
+        R_diffs = pred @ target.permute(0, 2, 1)
         # See: https://github.com/pytorch/pytorch/issues/7500#issuecomment-502122839.
         traces = R_diffs.diagonal(dim1=-2, dim2=-1).sum(-1)
         dists = torch.acos(torch.clamp((traces - 1) / 2, -1 + self.eps, 1 - self.eps))

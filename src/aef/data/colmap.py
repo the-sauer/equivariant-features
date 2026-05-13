@@ -29,7 +29,7 @@ class ColmapDataset(torch.utils.data.Dataset):
         resize = torchvision.transforms.Resize(image_size)
         self.img = torch.stack([
             resize(torchvision.io.read_image(file)).to(torch.float32) / 255.0 for file in self.images_files
-            ])
+        ])
         database_path = os.path.join(images, "database.db")
         if not os.path.exists(database_path):
             # Run reconstruction if not already done

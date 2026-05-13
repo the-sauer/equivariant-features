@@ -21,29 +21,27 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-
 import logging
-
 
 import numpy as np
 import torch
 
 
 def sample_homography(
-        shape,
-        perspective=True,
-        scaling=True,
-        rotation=True,
-        translation=True,
-        n_scales=5,
-        n_angles=25,
-        scaling_amplitude=0.1,
-        perspective_amplitude_x=0.1,
-        perspective_amplitude_y=0.1,
-        patch_ratio=0.5,
-        max_angle=np.pi / 2,
-        allow_artifacts=False,
-        translation_overflow=0.0,
+        shape: tuple[int | float, int | float] | list[int | float],
+        perspective: bool = True,
+        scaling: bool = True,
+        rotation: bool = True,
+        translation: bool = True,
+        n_scales: int = 5,
+        n_angles: int = 25,
+        scaling_amplitude: float = 0.1,
+        perspective_amplitude_x: float = 0.1,
+        perspective_amplitude_y: float = 0.1,
+        patch_ratio: float = 0.5,
+        max_angle: float = np.pi / 2,
+        allow_artifacts: bool = False,
+        translation_overflow: float = 0.0,
 ) -> torch.Tensor:
     """Sample a random valid homography.
 

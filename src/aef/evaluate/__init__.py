@@ -27,9 +27,9 @@ def fpr(preds, labels, target_recall=0.95):
     cum_negatives = torch.cumsum(1 - sorted_labels, dim=0)
 
     # Calculate false positive rates at each threshold
-    fpr = cum_negatives / (cum_negatives[-1] + 1e-8)  # Avoid division by zero
+    fpr_val = cum_negatives / (cum_negatives[-1] + 1e-8)  # Avoid division by zero
 
     # Find the index where FPR is closest to the target recall
     idx = torch.argmax((torch.cumsum(sorted_labels, dim=0) >= target_recall * torch.sum(sorted_labels)).float(), dim=0)
 
-    return fpr[idx].item() if idx < len(fpr) else 1.0
+    return fpr_val[idx].item() if idx < len(fpr_val) else 1.0

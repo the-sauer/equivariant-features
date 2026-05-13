@@ -43,7 +43,7 @@ class Loss(torch.nn.Module):
             self.losses = [(1, _LOSSES[arg](**kwargs.get("params", {})))]
         elif isinstance(args[0], dict | omegaconf.ListConfig):
             self.losses = [
-                (loss_cfg.get("weight", 1), _LOSSES[loss_cfg["name"]](**loss_cfg.get("params", {}))) 
+                (loss_cfg.get("weight", 1), _LOSSES[loss_cfg["name"]](**loss_cfg.get("params", {})))
                 for loss_cfg in args[0]
             ]
         elif isinstance(args[0], dict | omegaconf.DictConfig):

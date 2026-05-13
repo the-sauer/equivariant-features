@@ -20,33 +20,29 @@ import os
 from typing import Iterable
 
 import kornia
-import omegaconf
 import torch
-from torchvision.transforms import v2
 from tqdm import tqdm
 
-from .losses import Loss
-
 from ..evaluate import fpr
-from ..train import OPTIMIZERS, SCHEDULERS, prepare_training
+from ..train import prepare_training
 
 
 class Detector(Enum):
     DoG = 1
-    Harris = 2
+    HARRIS = 2
 
 
-def detect(img: torch.Tensor, detector: Detector = Detector.Harris, threshold: float = 0.0001) -> Iterable[torch.Tensor]:
+def detect(img: torch.Tensor, detector: Detector = Detector.HARRIS, threshold: float = 1e-4) -> Iterable[torch.Tensor]:
     img = torch.mean(img, dim=1, keepdim=True)
     if detector == Detector.DoG:
         response_map = kornia.feature.dog_response(img)
-    elif detector == Detector.Harris:
+    elif detector == Detector.HARRIS:
         response_map = kornia.feature.harris_response(img)
     else:
         raise ValueError("Unknown detector")
 
     b, _, x, y = torch.where(response_map > threshold)
-    logging.info(f"Detected {b.size(0)} features")
+    logging.info("Detected %d features", b.size(0))
     splits = list(map(lambda i: int(torch.sum(b == i).item()), range(img.shape[0])))
 
     return torch.split(torch.stack((x, y), dim=1).to(img.device), split_size_or_sections=splits, dim=0)
@@ -57,14 +53,27 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
         H, c = e
         if len(c) == 0:
             return c
-        c_h = torch.cat((c.to(torch.float32), torch.tensor([[1.0]], device=c.device).expand(c.size(0), 1)), dim=1).unsqueeze(2)
+        c_h = torch.cat(
+            (c.to(torch.float32), torch.tensor([[1.0]], device=c.device).expand(c.size(0), 1)),
+            dim=1
+        ).unsqueeze(2)
         c_warped = (H.unsqueeze(0) @ c_h).squeeze(2)
         return torch.round(c_warped[:, :2] / c_warped[:, 2:]).to(torch.int)
     return map(coordinate_map, zip(H, detections))
 
 
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+    (
+        model,
+        optimizer,
+        scheduler,
+        criterion,
+        train_loader,
+        validation_loader,
+        augmentation,
+        device,
+        checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
@@ -117,10 +126,18 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
                     raise ValueError("No valid feature sampling method")
 
                 H_inv = H_inv.to(device)
-                feature_map_t = kornia.geometry.transform.warp_perspective(feature_map_t, H_inv, dsize=feature_map.shape[2:])
-                mask = kornia.geometry.transform.warp_perspective(torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()), H_inv, dsize=feature_map.shape[2:]) > 0.5
-                features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
-                features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
+                feature_map_t = kornia.geometry.transform.warp_perspective(
+                    feature_map_t,
+                    H_inv,
+                    dsize=feature_map.shape[2:]
+                )
+                mask = kornia.geometry.transform.warp_perspective(
+                    torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()),
+                    H_inv,
+                    dsize=feature_map.shape[2:]
+                ) > 0.5
+                features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
+                features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
                 y = torch.cat((features, features_t))
                 assert y.size(0) % 2 == 0
                 labels = torch.cat((
@@ -142,7 +159,13 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             batch_counter += 1
             if batch_counter % cfg.logging.interval == 0:
                 checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
-                logging.info(f"epoch {epoch}, loss: {loss.item()}, fpr95: {fpr95}, saved_model to: {checkpoint_name}")
+                logging.info(
+                    "epoch %d, loss: %f, fpr95: %f, saved_model to: %s",
+                    epoch,
+                    loss.item(),
+                    fpr95,
+                    checkpoint_name
+                )
                 torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
 
@@ -156,7 +179,11 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             H_inv = H_inv.to(device)
             feature_map = model(img)
             feature_map_t = model(img_t)
-            feature_map_t = kornia.geometry.transform.warp_perspective(feature_map_t, H_inv, dsize=feature_map.shape[2:])
+            feature_map_t = kornia.geometry.transform.warp_perspective(
+                feature_map_t,
+                H_inv,
+                dsize=feature_map.shape[2:]
+            )
 
             features = feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
             features_t = feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
@@ -167,6 +194,11 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
             fpr_sum += fpr95 * features.size(0)
             fpr_num += features.size(0)
             loop.set_postfix(fpr95=fpr95)
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_loader)}, validation fpr95: {fpr_sum / fpr_num}")
+        logging.info(
+            "finished epoch %d, avg loss: %f, validation fpr95: %f",
+            epoch,
+            cumulative_loss / len(validation_loader),
+            fpr_sum / fpr_num
+        )
         for sch in scheduler:
             sch.step()

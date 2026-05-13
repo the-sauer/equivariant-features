@@ -29,7 +29,14 @@ from aef.train.detector import train as train_detector
 from aef.train.scale import train as train_scale
 
 
-def NeuralScaleSpaceSESN(in_channels:int=1, factor:float=2.0, num_scales:int=4, min_scale:float=1.0, effective_size:int=5, scale_size:int=5) -> torch.nn.Module:
+def NeuralScaleSpaceSESN(
+    in_channels: int = 1,
+    factor: float = 2.0,
+    num_scales: int = 4,
+    min_scale: float = 1.0,
+    effective_size: int = 5,
+    scale_size: int = 5
+) -> torch.nn.Module:
     """
     Neural Scale Field based on Scale-Equivariant Steerable Networks (SESN).
     """
@@ -37,7 +44,7 @@ def NeuralScaleSpaceSESN(in_channels:int=1, factor:float=2.0, num_scales:int=4, 
         raise ValueError("min_scale must be at least 1.")
     q = factor ** (1 / (num_scales - 1))
     scales = [min_scale * q**i for i in range(num_scales)]
-    kernel_size= ceil(effective_size * max(scales))
+    kernel_size = ceil(effective_size * max(scales))
     if kernel_size % 2 == 0:
         kernel_size += 1
     padding = kernel_size // 2
@@ -60,7 +67,7 @@ class AffineFeatureNetOne(torch.nn.Module):
     Steerable CNNs (ASEL). The scale field is concatenated to the input image and fed into the feature extraction
     network together with the original image.
     """
-    def __init__(self, in_channels=1, feature_size=128, conv_depths=[8, 16, 32, 64], scale_space=None, basic_block_params=None):
+    def __init__(self, conv_depths, in_channels=1, feature_size=128, scale_space=None, basic_block_params=None):
         super(AffineFeatureNetOne, self).__init__()
         if scale_space is None:
             scale_space = {"name": "scale_space_sesn", "params": {}}
@@ -76,7 +83,8 @@ class AffineFeatureNetOne(torch.nn.Module):
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
         self.feature_net = torch.nn.Sequential(
             asel.affine.BasicBlock(in_channels, conv_depths[0], **basic_block_params),
-            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
+            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params)
+              for i in range(len(conv_depths)-1)),
             asel.affine.BasicBlock(conv_depths[-1], feature_size, **basic_block_params),
         )
         self.feature_size = feature_size
@@ -91,7 +99,7 @@ class AffineFeatureNetOne(torch.nn.Module):
 
 
 class AffineFeatureNetCanonicalOne(torch.nn.Module):
-    def __init__(self, in_channels=1, conv_depths=[8, 16, 32, 64], scale_space=None, basic_block_params=None):
+    def __init__(self, conv_depths, in_channels=1, scale_space=None, basic_block_params=None):
         super(AffineFeatureNetCanonicalOne, self).__init__()
         if scale_space is None:
             scale_space = {"name": "scale_space_sesn", "params": {}}
@@ -107,7 +115,8 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)
         self.feature_net = torch.nn.Sequential(
             asel.affine.BasicBlock(in_channels, conv_depths[0], **basic_block_params),
-            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params) for i in range(len(conv_depths)-1)),
+            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], **basic_block_params)
+              for i in range(len(conv_depths)-1)),
         )
         self.canonicalization_layer = asel.affine.EquivarLayer(conv_depths[-1], 4, type=["0", "c"])
 
@@ -121,29 +130,37 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
         x = torch.nn.functional.normalize(x, dim=2)
         x = self.canonicalization_layer(x)
         return x.squeeze(1)
-    
+
 
 class AffineFeatureNetCanonicalTwo(torch.nn.Module):
-    def __init__(self, scales:list[float | int] | dict[str, float], in_channels=1, conv_depths=[8, 16, 32, 64],  basic_block_params=None):
+    def __init__(
+        self,
+        scales: list[float | int] | dict[str, float | int],
+        in_channels,
+        conv_depths,
+        basic_block_params=None
+    ):
         super(AffineFeatureNetCanonicalTwo, self).__init__()
+        scale_list: list[float]
         if isinstance(scales, list):
-            scale_list: list[float] = scales
+            scale_list = scales
         elif isinstance(scales, dict) and "min_scale" in scales and "factor" in scales and "num_scales" in scales:
             q = scales["factor"] ** (1 / (scales["num_scales"] - 1))
-            scale_list: list[float] = [scales["min_scale"] * q**i for i in range(scales["num_scales"])]
+            scale_list = [scales["min_scale"] * q**i for i in range(int(scales["num_scales"]))]
         else:
-            raise ValueError("scales must be either a list of scales or a dictionary with keys 'min_scale', 'factor' and 'num_scales'.")
+            raise ValueError("scales must be either a list of scales or a dictionary with keys 'min_scale', 'factor'\
+                              and 'num_scales'.")
 
         if basic_block_params is None:
             basic_block_params = {}
 
         self.feature_net = torch.nn.Sequential(
             asel.affine.BasicBlock(in_channels, conv_depths[0], scales=scale_list, **basic_block_params),
-            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params) for i in range(len(conv_depths)-1)),
+            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params)
+              for i in range(len(conv_depths)-1)),
             asel.affine.EquivarLayer(conv_depths[-1], 4, scales=scale_list, type=["0", "c"]),
             asel.affine.LearnedSaliencyLayer(scales=scale_list),
         )
-
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 4:
@@ -153,9 +170,27 @@ class AffineFeatureNetCanonicalTwo(torch.nn.Module):
         return self.feature_net(x)
 
 
-"""
-All model definition with their respective training functions are collected in this dictionary for easier access.
-"""
+def SimpleFeatureNet(in_channels=1, feature_size=128, conv_depths=None, layer_kwargs=None):
+    if conv_depths is None:
+        conv_depths = [16, 32, 64]
+    if layer_kwargs is None:
+        layer_kwargs = {}
+    return torch.nn.Sequential(
+        *(
+            torch.nn.Sequential(
+                torch.nn.Conv2d(d_1, d_2, 3, **layer_kwargs),
+                torch.nn.ReLU(),
+                torch.nn.MaxPool2d(2, 2),
+                torch.nn.BatchNorm2d(d_2)
+            ) for (d_1, d_2) in zip([in_channels] + conv_depths, conv_depths)
+        ),
+        torch.nn.Flatten(),
+        torch.nn.Linear(conv_depths[-1] * 4, feature_size)
+    )
+
+
+# All model definition with their respective training functions are collected in this dictionary for easier access.
+# TODO: Consider moving this into a class
 MODELS = {
     "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
     "affine_feature_net_one": (AffineFeatureNetOne, train_descriptor),

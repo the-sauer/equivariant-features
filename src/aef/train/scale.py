@@ -88,7 +88,17 @@ def train(model, train_dataset, *args, **kwargs):
 
 
 def train_scale_homographic(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    model, optimizer, scheduler, criterion, training_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+    (
+        model,
+        optimizer,
+        scheduler,
+        criterion,
+        training_loader,
+        validation_loader,
+        augmentation,
+        device,
+        checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
         loop = tqdm(training_loader, leave=True)
@@ -113,14 +123,29 @@ def train_scale_homographic(model, train_dataset, validation_dataset, cfg, exper
             loop.set_postfix(loss=loss.item())
 
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
+        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(train_dataset))
 
         for sch in scheduler:
             sch.step()
 
 
-def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data.Dataset, validation_dataset: torch.utils.data.Dataset, cfg, experiment_name="default"):
-    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+def train_scale_absolute(
+    model: torch.nn.Module,
+    train_dataset: torch.utils.data.Dataset,
+    validation_dataset: torch.utils.data.Dataset,
+    cfg, experiment_name="default"
+):
+    (
+        model,
+        optimizer,
+        scheduler,
+        criterion,
+        train_loader,
+        validation_loader,
+        augmentation,
+        device,
+        checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
         loop = tqdm(train_loader, leave=True)
@@ -129,7 +154,6 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
             b: torch.Tensor = b.to(device)
             gt: torch.Tensor = gt.to(device)
             num_blobs: torch.Tensor = num_blobs.to(device)
-            B = b.size(0)
 
             for opt in optimizer:
                 opt.zero_grad()
@@ -138,7 +162,9 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
             scale_field: torch.Tensor = model(b)
             out = []
             for i in range(b.size(0)):
-                out.append(scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()])
+                out.append(
+                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
+                )
             out = torch.cat(out, dim=0).flatten()
             gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
 
@@ -163,7 +189,9 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
             scale_field: torch.Tensor = model(b)
             out = []
             for i in range(b.size(0)):
-                out.append(scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()])
+                out.append(
+                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
+                )
             out = torch.cat(out, dim=0).flatten()
             gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
 
@@ -174,7 +202,7 @@ def train_scale_absolute(model: torch.nn.Module, train_dataset: torch.utils.data
             loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
             loop.set_postfix(loss=loss.item())
 
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(validation_dataset)}")
+        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(validation_dataset))
 
         for sch in scheduler:
             sch.step()

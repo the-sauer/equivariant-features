@@ -32,15 +32,15 @@ from ..train import prepare_training
 
 def homogenize(A, b=None):
     B, H, W = A.size()
-    batch_dim, height_dim, width_dim = 0, 1, 2
+    _, h_dim, w_dim = 0, 1, 2
     if b is None:
         b = torch.zeros(1, 1, dtype=A.dtype, device=A.device).expand(B, H)
     assert b.size() == (B, H)
 
     return torch.cat((
-        torch.cat((A, torch.zeros(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, W)), dim=height_dim),
-        torch.cat((b.unsqueeze(-1), torch.ones(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, 1)), dim=height_dim),
-    ), dim=width_dim)
+        torch.cat((A, torch.zeros(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, W)), dim=h_dim),
+        torch.cat((b.unsqueeze(-1), torch.ones(1, 1, 1, dtype=A.dtype, device=A.device).expand(B, 1, 1)), dim=h_dim),
+    ), dim=w_dim)
 
 
 def linearize_homography(H, shape=None, coords=None):
@@ -52,10 +52,10 @@ def linearize_homography(H, shape=None, coords=None):
                 *torch.meshgrid(
                     torch.arange(shape[0], device=H.device),
                     torch.arange(shape[1], device=H.device), indexing="ij"
+                ),
+                torch.ones((1, 1), device=H.device).expand(shape[0], shape[1],)
             ),
-            torch.ones((1, 1), device=H.device).expand(shape[0], shape[1],)
-        ),
-        dim=2
+            dim=2
         )
         coords = coords.unsqueeze(0)
     H = H.unsqueeze(1).unsqueeze(2)
@@ -65,8 +65,14 @@ def linearize_homography(H, shape=None, coords=None):
     y = proj[..., 1, 0]
     w = proj[..., 2, 0]
     return torch.stack((
-        torch.stack(((H[..., 0, 0] * w - H[..., 2, 0] * x) / w ** 2, (H[..., 1, 0] * w - H[..., 2, 0] * y) / w ** 2), dim=-1),
-        torch.stack(((H[..., 0, 1] * w - H[..., 2, 1] * x) / w ** 2, (H[..., 1, 1] * w - H[..., 2, 1] * y) / w ** 2), dim=-1)
+        torch.stack(
+            ((H[..., 0, 0] * w - H[..., 2, 0] * x) / w ** 2, (H[..., 1, 0] * w - H[..., 2, 0] * y) / w ** 2),
+            dim=-1
+        ),
+        torch.stack(
+            ((H[..., 0, 1] * w - H[..., 2, 1] * x) / w ** 2, (H[..., 1, 1] * w - H[..., 2, 1] * y) / w ** 2),
+            dim=-1
+        )
     ), dim=-1)
 
 
@@ -76,8 +82,18 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
         return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
 
+
 def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+    (
+        model,
+        optimizer,
+        scheduler,
+        criterion,
+        train_loader,
+        validation_loader,
+        augmentation, device,
+        checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
         batch_counter = 0
@@ -186,14 +202,24 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
 
             loop.set_postfix(reprojection_loss=reprojection_loss.item(), geodesic_loss=geodesic_loss.item())
 
-        logging.info(f"finished epoch {epoch}, avg loss: {cumulative_loss / len(train_dataset)}")
+        logging.info(f"finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(train_dataset))
 
         for sch in scheduler:
             sch.step()
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+    (
+        model,
+        optimizer,
+        _scheduler,
+        criterion,
+        train_loader,
+        _validation_loader,
+        _augmentation,
+        device,
+        _checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
     for epoch in range(cfg.training.num_epochs):
         loop = tqdm(train_loader, leave=True)
@@ -207,9 +233,11 @@ def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_nam
             num_blobs: torch.Tensor = num_blobs.to(device)
             B = b.size(0)
 
-
             transform_params = cfg.training.homography_params if "homography_params" in cfg.training else {}
-            H = torch.stack([sample_homography(b.shape[2:], **transform_params) for _ in range(b.size(0))], dim=0).to(device)
+            H = torch.stack(
+                [sample_homography(b.shape[2:], **transform_params) for _ in range(b.size(0))],
+                dim=0
+            ).to(device)
 
             b_t = kornia.geometry.transform.warp_perspective(b, H, b.shape[2:], padding_mode="zeros")
 
@@ -229,7 +257,12 @@ def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_nam
                 coords_i = positions[i, :num_blobs[i], :2]
                 affine_gt_i = affine_gt[i, :num_blobs[i]]
 
-                mask = (coords_i[:, 0] >= 0) & (coords_i[:, 0] < b.size(2)) & (coords_i[:, 1] >= 0) & (coords_i[:, 1] < b.size(3))
+                mask = (
+                    (coords_i[:, 0] >= 0)
+                    & (coords_i[:, 0] < b.size(2))
+                    & (coords_i[:, 1] >= 0)
+                    & (coords_i[:, 1] < b.size(3))
+                )
 
                 coords_i = coords_i[mask]
                 affine_gt_i = affine_gt_i[mask]
@@ -247,6 +280,3 @@ def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_nam
             cumulative_loss += loss.item() * b.size(0)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             loop.set_postfix(loss=loss.item())
-
-
-            
