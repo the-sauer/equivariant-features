@@ -168,11 +168,12 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
             for opt in optimizer:
                 opt.step()
             if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0:
-                logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), (cumulative_loss / cfg.logging.interval))
+                average_loss = cumulative_loss / (i + 1)
+                logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), average_loss)
 
         loop = tqdm(validation_loader, leave=True)
         loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
-        del data
+
         with torch.no_grad():
             model.eval()
             cumulative_loss = 0.0
@@ -185,17 +186,18 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
             logging.info("finished epoch [%d/%d], avg loss: %f", epoch, cfg.training.num_epochs, cumulative_loss / len(validation_dataset))
 
             if checkpoint_dir is not None:
+                average_loss = cumulative_loss / len(validation_dataset)
                 checkpoint = {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": [opt.state_dict() for opt in optimizer],
                     "scheduler_state_dict": [sch.state_dict() for sch in scheduler],
-                    "loss": cumulative_loss / len(validation_dataset),
+                    "loss": average_loss,
                     "best_loss": best_loss
                 }
                 torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
-                if cumulative_loss < best_loss:
-                    best_loss = cumulative_loss
+                if average_loss < best_loss:
+                    best_loss = average_loss
                     torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
                     msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
                     print("\033[1m" + msg + "\033[0m")

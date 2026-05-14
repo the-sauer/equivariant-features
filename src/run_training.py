@@ -64,17 +64,17 @@ def train(cfg) -> None:
     model_kwargs["in_channels"] = train_dataset.c
     Model, train_func = MODELS[cfg.model.name]
     model = Model(**model_kwargs)
-    train_func(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=experiment_name_from_cfg(cfg))
+    train_func(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="scale")
 def main(cfg: Config):
     dotenv.load_dotenv()
 
-    experiment_name = experiment_name_from_cfg(cfg)
+    experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
     print(f"Running experiment {experiment_name}")
     train(cfg)
 
 
 if __name__ == "__main__":
-    main()
+    main() # pyright: ignore[reportCallIssue]
