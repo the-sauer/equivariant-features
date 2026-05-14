@@ -16,16 +16,10 @@
 
 from enum import Enum
 import logging
-import os
 from typing import Iterable
 
 import kornia
 import torch
-from tqdm import tqdm
-
-from ..evaluate import fpr
-from ..train import prepare_training
-
 
 class Detector(Enum):
     DoG = 1
@@ -62,143 +56,67 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
     return map(coordinate_map, zip(H, detections))
 
 
-def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    (
-        model,
-        optimizer,
-        scheduler,
-        criterion,
-        train_loader,
-        validation_loader,
-        augmentation,
-        device,
-        checkpoint_dir
-    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+def process_batch_homographic_descriptor(model, data, criterion, augmentation, device, cfg):
+    img, img_t, H, H_inv = data
+    img = augmentation(img.to(device))
+    img_t = augmentation(img_t.to(device))
 
-    for epoch in range(cfg.training.num_epochs):
-        batch_counter = 0
-        loop = tqdm(train_loader, leave=True)
-        loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
-        cumulative_loss = 0.0
-        model.train()
-        for (img, img_t, H, H_inv) in loop:
-            img = img.to(device)
-            img_t = augmentation(img_t.to(device))
-            for opt in optimizer:
-                opt.zero_grad()
+    feature_map = model(img)
+    feature_map_t = model(img_t)
 
-            feature_map = model(img)
-            feature_map_t = model(img_t)
+    if "detector" in cfg.training.feature_sampling:
+        # TODO: Fix this
+        H = H.to(device)
+        detections = detect(img)
+        detections_t = warp_detections(detections, H)
 
-            if "detector" in cfg.training.feature_sampling:
-                # TODO: Fix this
-                H = H.to(device)
-                detections = detect(img)
-                detections_t = warp_detections(detections, H)
-
-                valid_detections = map(
-                    lambda ds:
-                        (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
-                        & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
-                    detections_t
-                )
-
-                detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
-                detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
-                features = torch.empty(sum(map(len, detections)), model.feature_size)
-                features_t = torch.empty(sum(map(len, detections)), model.feature_size)
-
-                i = 0
-                for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
-                    for d, d_t in zip(ds, ds_t):
-                        features[i, :] = feature_map[j, :, *d].squeeze()
-                        features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
-                        i += 1
-
-                y = torch.cat((features, features_t))
-                labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
-            else:
-                if "stride" in cfg.training.feature_sampling:
-                    feature_stride = cfg.training.feature_sampling.stride
-                elif "num_features" in cfg.training.feature_sampling:
-                    feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
-                else:
-                    raise ValueError("No valid feature sampling method")
-
-                H_inv = H_inv.to(device)
-                feature_map_t = kornia.geometry.transform.warp_perspective(
-                    feature_map_t,
-                    H_inv,
-                    dsize=feature_map.shape[2:]
-                )
-                mask = kornia.geometry.transform.warp_perspective(
-                    torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()),
-                    H_inv,
-                    dsize=feature_map.shape[2:]
-                ) > 0.5
-                features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
-                features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
-                y = torch.cat((features, features_t))
-                assert y.size(0) % 2 == 0
-                labels = torch.cat((
-                    torch.arange(y.size(0) // 2),
-                    torch.arange(y.size(0) // 2)
-                )).to(device)
-
-            loss = criterion(y, labels)
-
-            distances = torch.cdist(features, features_t)
-            ll = torch.eye(features.size(0), device=device)
-            fpr95 = fpr(-distances.flatten(), ll.flatten(), target_recall=0.95)
-
-            loop.set_postfix(loss=loss.item(), fpr95=fpr95)
-            cumulative_loss += loss.item() * img.size(0)
-            loss.backward()
-            for opt in optimizer:
-                opt.step()
-            batch_counter += 1
-            if batch_counter % cfg.logging.interval == 0:
-                checkpoint_name = f"epoch_{epoch:03d}_{batch_counter//cfg.logging.interval:06d}.pth"
-                logging.info(
-                    "epoch %d, loss: %f, fpr95: %f, saved_model to: %s",
-                    epoch,
-                    loss.item(),
-                    fpr95,
-                    checkpoint_name
-                )
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
-
-        loop = tqdm(validation_loader, leave=True)
-        loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
-        fpr_sum = 0.0
-        fpr_num = 0
-        for (img, img_t, H, H_inv) in loop:
-            img = img.to(device)
-            img_t = augmentation(img_t.to(device))
-            H_inv = H_inv.to(device)
-            feature_map = model(img)
-            feature_map_t = model(img_t)
-            feature_map_t = kornia.geometry.transform.warp_perspective(
-                feature_map_t,
-                H_inv,
-                dsize=feature_map.shape[2:]
-            )
-
-            features = feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :]
-            features_t = feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
-
-            distances = torch.cdist(features, features_t)
-            ll = torch.eye(features.size(0), device=device)
-            fpr95 = fpr(-distances.flatten(), ll.flatten(), target_recall=0.95)
-            fpr_sum += fpr95 * features.size(0)
-            fpr_num += features.size(0)
-            loop.set_postfix(fpr95=fpr95)
-        logging.info(
-            "finished epoch %d, avg loss: %f, validation fpr95: %f",
-            epoch,
-            cumulative_loss / len(validation_loader),
-            fpr_sum / fpr_num
+        valid_detections = map(
+            lambda ds:
+                (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
+                & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
+            detections_t
         )
-        for sch in scheduler:
-            sch.step()
+
+        detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
+        detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
+        features = torch.empty(sum(map(len, detections)), model.feature_size)
+        features_t = torch.empty(sum(map(len, detections)), model.feature_size)
+
+        i = 0
+        for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
+            for d, d_t in zip(ds, ds_t):
+                features[i, :] = feature_map[j, :, *d].squeeze()
+                features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
+                i += 1
+
+        y = torch.cat((features, features_t))
+        labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+    else:
+        if "stride" in cfg.training.feature_sampling:
+            feature_stride = cfg.training.feature_sampling.stride
+        elif "num_features" in cfg.training.feature_sampling:
+            feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
+        else:
+            raise ValueError("No valid feature sampling method")
+
+        H_inv = H_inv.to(device)
+        feature_map_t = kornia.geometry.transform.warp_perspective(
+            feature_map_t,
+            H_inv,
+            dsize=feature_map.shape[2:]
+        )
+        mask = kornia.geometry.transform.warp_perspective(
+            torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()),
+            H_inv,
+            dsize=feature_map.shape[2:]
+        ) > 0.5
+        features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
+        features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
+        y = torch.cat((features, features_t))
+        assert y.size(0) % 2 == 0
+        labels = torch.cat((
+            torch.arange(y.size(0) // 2),
+            torch.arange(y.size(0) // 2)
+        )).to(device)
+
+    return criterion(y, labels)

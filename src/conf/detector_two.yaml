@@ -39,7 +39,6 @@ validation:
     name: blobboards_homographic
     params:
       image_size: [128, 128]
-      num_boards: 8
-      polarity: "random"
-logging:
-  interval: 1
+      # num_boards: 8
+      # polarity: "random"
+  loss: img_gen

@@ -54,5 +54,4 @@ validation:
       num_boards: 8
       blobboard_params:
         cutoff: 2.0
-logging:
-  interval: 1
+  loss: img_gen

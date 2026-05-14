@@ -24,9 +24,10 @@ import asel
 import sesn
 import torch
 
-from aef.train.descriptor import train as train_descriptor
-from aef.train.detector import train as train_detector
-from aef.train.scale import train as train_scale
+from ..train import train_func
+from ..train.descriptor import process_batch_homographic_descriptor
+from ..train.detector import process_batch_homograpric_detector
+from ..train.scale import train as train_scale
 
 
 def NeuralScaleSpaceSESN(
@@ -90,12 +91,13 @@ class AffineFeatureNetOne(torch.nn.Module):
         self.feature_size = feature_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        channel_dim = 1
-        scale_field = self.scale_space(torch.mean(x, dim=channel_dim, keepdim=True))
+        scale_field = self.scale_space(torch.mean(x, dim=1, keepdim=True))
         scale_field = self.scale_gain(scale_field)
+        if x.dim() == 4:
+            x = x.unsqueeze(1)
         x, _ = self.feature_net((x, scale_field))
-        x = torch.nn.functional.normalize(x, dim=channel_dim)
-        return x
+        x = torch.nn.functional.normalize(x, dim=2)
+        return x.squeeze(1)
 
 
 class AffineFeatureNetCanonicalOne(torch.nn.Module):
@@ -193,7 +195,7 @@ def SimpleFeatureNet(in_channels=1, feature_size=128, conv_depths=None, layer_kw
 # TODO: Consider moving this into a class
 MODELS = {
     "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
-    "affine_feature_net_one": (AffineFeatureNetOne, train_descriptor),
-    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_detector),
-    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_detector)
+    "affine_feature_net_one": (AffineFeatureNetOne, train_func(process_batch_homographic_descriptor)),
+    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_func(process_batch_homograpric_detector)),
+    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_func(process_batch_homograpric_detector))
 }

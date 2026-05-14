@@ -42,3 +42,4 @@ validation:
     name: image-matching-challenge-2025
     params:
       in_memory: false
+  loss: fpr

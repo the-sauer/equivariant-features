@@ -17,12 +17,27 @@
 import itertools
 import logging
 import os
+from typing import Callable
 
 import omegaconf
 import torch
 from torchvision.transforms import v2
+from tqdm import tqdm
 
 from .losses import Loss
+
+
+ProcessBatchType = Callable[
+    [
+        torch.nn.Module,
+        tuple[torch.Tensor, ...],
+        Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        Callable[[torch.Tensor], torch.Tensor],
+        torch.device,
+        omegaconf.DictConfig
+    ],
+    torch.Tensor
+]
 
 
 OPTIMIZERS = {
@@ -99,6 +114,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     )
 
     criterion = Loss(cfg.training.loss)
+    validation_criterion = Loss(cfg.validation.loss)
 
     if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
         # TODO: Check for all innner augmentations
@@ -113,4 +129,76 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     else:
         augmentation = lambda x: x  # noqa: E731
 
-    return model, optimizer, scheduler, criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir
+    return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir
+
+
+def train_func(process_batch: ProcessBatchType):
+    def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
+        (
+            model,
+            optimizer,
+            scheduler,
+            criterion,
+            validation_criterion,
+            train_loader,
+            validation_loader,
+            augmentation,
+            device,
+            checkpoint_dir
+        ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+
+        best_loss = float("inf")
+        for epoch in range(cfg.training.num_epochs):
+            loop = tqdm(train_loader, leave=True)
+            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
+            model.train()
+            cumulative_loss = 0.0
+            for i, data in enumerate(loop):
+                for opt in optimizer:
+                    opt.zero_grad()
+
+                loss = process_batch(model, data, criterion, augmentation, device, cfg)
+                cumulative_loss += loss.item()
+                loop.set_postfix(loss=loss.item())
+                loss.backward()
+                for opt in optimizer:
+                    opt.step()
+                if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0:
+                    average_loss = cumulative_loss / (i + 1)
+                    logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), average_loss)
+
+            loop = tqdm(validation_loader, leave=True)
+            loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
+
+            with torch.no_grad():
+                model.eval()
+                cumulative_loss = 0.0
+                for data in loop:
+                    loss = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
+
+                    cumulative_loss += loss.item() * data[0].size(0)
+                    loop.set_postfix(loss=loss.item())
+
+                logging.info("finished epoch [%d/%d], avg loss: %f", epoch, cfg.training.num_epochs, cumulative_loss / len(validation_dataset))
+
+                if checkpoint_dir is not None:
+                    average_loss = cumulative_loss / len(validation_dataset)
+                    checkpoint = {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": [opt.state_dict() for opt in optimizer],
+                        "scheduler_state_dict": [sch.state_dict() for sch in scheduler],
+                        "loss": average_loss,
+                        "best_loss": best_loss
+                    }
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+                    if average_loss < best_loss:
+                        best_loss = average_loss
+                        torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
+                        msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
+                        print("\033[1m" + msg + "\033[0m")
+                        logging.info("\033[1m" + msg + "\033[0m")
+                for sch in scheduler:
+                    sch.step()
+
+    return train

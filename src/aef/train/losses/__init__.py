@@ -18,6 +18,7 @@ import pytorch_metric_learning.losses as pml_losses
 import omegaconf
 import torch
 
+from ...evaluate import fpr
 from .geodesic_loss import GeodesicLoss
 from .image_generation_loss import ImageGenerationLoss
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
@@ -34,6 +35,7 @@ _LOSSES = {
     "geodesic": GeodesicLoss,
     "reprojection": HomographyReprojectionLoss,
     "img_gen": ImageGenerationLoss,
+    "fpr": fpr
 }
 
 

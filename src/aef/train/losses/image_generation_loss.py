@@ -55,7 +55,7 @@ class ImageGenerationLoss(torch.nn.Module):
         assert target[0].dim() == 4
         assert target[1].dim() == 4
         pred_transform, pred_image = pred
-        pred_patch = torch.stack([kornia.geometry.transform.warp_perspective(
+        pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
             torchvision.transforms.functional.gaussian_blur(
                 pred_image[i].unsqueeze(0).expand(int(num_features[i]), -1, -1, -1),
                 kernel_size=self.kernel_size,
@@ -65,7 +65,7 @@ class ImageGenerationLoss(torch.nn.Module):
             dsize=self.patch_size
         ) for i in range(pred[0].size(0))])
         target_transform, target_image = target
-        target_patch = torch.stack([kornia.geometry.transform.warp_perspective(
+        target_patch = torch.cat([kornia.geometry.transform.warp_perspective(
             torchvision.transforms.functional.gaussian_blur(
                 target_image[i].unsqueeze(0).expand(int(num_features[i]), -1, -1, -1), kernel_size=self.kernel_size, sigma=self.sigma),
             patch_scale @ torch.linalg.inv(target_transform[i, :num_features[i]]),
