@@ -76,6 +76,61 @@ def linearize_homography(H, shape=None, coords=None):
     ), dim=-1)
 
 
+def process_batch(model, data, criterion, augmentation, device, cfg):
+    img, img_t, H, H_inv = data
+    img = img.to(device)
+    img_t = augmentation(img_t.to(device))
+    H = H.to(device)
+    H_inv = H_inv.to(device)
+
+    feature_map = model(img)
+    feature_map_t = model(img_t)
+
+    if "stride" in cfg.training.feature_sampling:
+        feature_stride = cfg.training.feature_sampling.stride
+    elif "num_features" in cfg.training.feature_sampling:
+        feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
+    else:
+        raise ValueError("No valid feature sampling method")
+
+    H_inv = H_inv.to(device)
+    feature_map_t = kornia.geometry.transform.warp_perspective(
+        torch.flatten(feature_map_t, start_dim=1, end_dim=2),
+        H_inv,
+        dsize=feature_map.shape[-2:]
+    ).reshape(feature_map.shape)
+    mask = (kornia.geometry.transform.warp_perspective(
+        torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
+        H_inv,
+        dsize=feature_map.shape[-2:]
+    ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
+    features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+    features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+
+    b = torch.stack(torch.meshgrid(
+        torch.arange(feature_map.size(3), device=device),
+        torch.arange(feature_map.size(4), device=device), indexing="ij"
+    ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
+
+    non_singular_mask = torch.linalg.det(features) > 1e-6
+    num_features = torch.sum(non_singular_mask.int(), dim=1)
+    features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+    features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
+    b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+    b_t = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+    for i in range(features.size(0)):
+        features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
+        features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
+        b_filtered[i, :num_features[i]] = b[i, non_singular_mask[i]]
+        transformed = (H[i].unsqueeze(0) @ torch.cat((b[i, non_singular_mask[i]], torch.ones(num_features[i], 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
+        b_t[i, :num_features[i]] = transformed[..., :2] / transformed[..., 2:3]
+    features = features_filtered
+    features_t = features_t_filtered
+    b = b_filtered
+
+    return criterion((homogenize(features, b), img), (homogenize(features_t, b_t), img_t), num_features)
+
+
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     if isinstance(train_dataset, HomographyData):
         return train_homographic(model, train_dataset, validation_dataset, cfg, experiment_name)
@@ -91,142 +146,62 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
         criterion,
         train_loader,
         validation_loader,
-        augmentation, device,
+        augmentation,
+        device,
         checkpoint_dir
     ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
+    best_loss = float("inf")
     for epoch in range(cfg.training.num_epochs):
-        batch_counter = 0
         loop = tqdm(train_loader, leave=True)
         loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
         model.train()
-        for (img, img_t, H, H_inv) in loop:
-            img = img.to(device)
-            img_t = augmentation(img_t.to(device))
-            H = H.to(device)
-            H_inv = H_inv.to(device)
+        cumulative_loss = 0.0
+        for i, data in enumerate(loop):
             for opt in optimizer:
                 opt.zero_grad()
 
-            feature_map = model(img)
-            feature_map_t = model(img_t)
-
-            if "stride" in cfg.training.feature_sampling:
-                feature_stride = cfg.training.feature_sampling.stride
-            elif "num_features" in cfg.training.feature_sampling:
-                feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
-            else:
-                raise ValueError("No valid feature sampling method")
-
-            H_inv = H_inv.to(device)
-            feature_map_t = kornia.geometry.transform.warp_perspective(
-                torch.flatten(feature_map_t, start_dim=1, end_dim=2),
-                H_inv,
-                dsize=feature_map.shape[-2:]
-            ).reshape(feature_map.shape)
-            mask = (kornia.geometry.transform.warp_perspective(
-                torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
-                H_inv,
-                dsize=feature_map.shape[-2:]
-            ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
-            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
-            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
-
-            b = torch.stack(torch.meshgrid(
-                torch.arange(feature_map.size(3), device=device),
-                torch.arange(feature_map.size(4), device=device), indexing="ij"
-            ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
-
-            non_singular_mask = torch.linalg.det(features) > 1e-6
-            num_features = torch.sum(non_singular_mask.int(), dim=1)
-            features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-            features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-            b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
-            b_t = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
-            for i in range(features.size(0)):
-                features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
-                features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
-                b_filtered[i, :num_features[i]] = b[i, non_singular_mask[i]]
-                transformed = (H[i].unsqueeze(0) @ torch.cat((b[i, non_singular_mask[i]], torch.ones(num_features[i], 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
-                b_t[i, :num_features[i]] = transformed[..., :2] / transformed[..., 2:3]
-            features = features_filtered
-            features_t = features_t_filtered
-            b = b_filtered
-
-            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b_t), img_t), num_features)
-
+            loss = process_batch(model, data, criterion, augmentation, device, cfg)
+            cumulative_loss += loss.item()
             loop.set_postfix(loss=loss.item())
             loss.backward()
             for opt in optimizer:
                 opt.step()
-            batch_counter += 1
-            if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and batch_counter % cfg.logging.interval == 0:
-                logging.info("epoch %d, loss: %f", epoch, loss)
-
-        if checkpoint_dir is not None:
-            torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+            if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0:
+                logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), (cumulative_loss / cfg.logging.interval))
 
         loop = tqdm(validation_loader, leave=True)
         loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
-        model.eval()
-        cumulative_loss = 0.0
-        for (img, img_t, H, H_inv) in loop:
-            img = img.to(device)
-            img_t = augmentation(img_t.to(device))
-            H = H.to(device)
-            H_inv = H_inv.to(device)
+        del data
+        with torch.no_grad():
+            model.eval()
+            cumulative_loss = 0.0
+            for data in loop:
+                loss = process_batch(model, data, criterion, lambda x: x, device, cfg)
 
-            feature_map = model(img)
-            feature_map_t = model(img_t)
+                cumulative_loss += loss.item() * data[0].size(0)
+                loop.set_postfix(loss=loss.item())
 
-            if "stride" in cfg.validation.feature_sampling:
-                feature_stride = cfg.validation.feature_sampling.stride
-            elif "num_features" in cfg.validation.feature_sampling:
-                feature_stride = img.size(2) * img.size(3) // cfg.validation.feature_sampling.num_features
-            else:
-                raise ValueError("No valid feature sampling method")
+            logging.info("finished epoch [%d/%d], avg loss: %f", epoch, cfg.training.num_epochs, cumulative_loss / len(validation_dataset))
 
-            H_inv = H_inv.to(device)
-            feature_map_t = kornia.geometry.transform.warp_perspective(
-                torch.flatten(feature_map_t, start_dim=1, end_dim=2),
-                H_inv,
-                dsize=feature_map.shape[-2:]
-            ).reshape(feature_map.shape)
-            mask = (kornia.geometry.transform.warp_perspective(
-                torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
-                H_inv,
-                dsize=feature_map.shape[-2:]
-            ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
-            features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
-            features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
-
-            b = torch.stack(torch.meshgrid(
-                torch.arange(feature_map.size(3), device=device),
-                torch.arange(feature_map.size(4), device=device), indexing="ij"
-            ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
-
-            non_singular_mask = torch.linalg.det(features) > 1e-6
-            num_features = torch.sum(non_singular_mask.int(), dim=1)
-            features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-            features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-            b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
-            for i in range(features.size(0)):
-                features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
-                features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
-                b_filtered[i] = b[i, non_singular_mask[i]]
-            features = features_filtered
-            features_t = features_t_filtered
-            b = b_filtered
-
-            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b), img_t), num_features)
-            cumulative_loss += loss * img.size(0)
-
-            loop.set_postfix(loss=loss.item())
-
-        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(validation_dataset))
-
-        for sch in scheduler:
-            sch.step()
+            if checkpoint_dir is not None:
+                checkpoint = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": [opt.state_dict() for opt in optimizer],
+                    "scheduler_state_dict": [sch.state_dict() for sch in scheduler],
+                    "loss": cumulative_loss / len(validation_dataset),
+                    "best_loss": best_loss
+                }
+                torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+                if cumulative_loss < best_loss:
+                    best_loss = cumulative_loss
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
+                    msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
+                    print("\033[1m" + msg + "\033[0m")
+                    logging.info("\033[1m" + msg + "\033[0m")
+            for sch in scheduler:
+                sch.step()
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
