@@ -142,15 +142,18 @@ def train_homographic(model, train_dataset, validation_dataset, cfg, experiment_
             features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
             features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
             b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+            b_t = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
             for i in range(features.size(0)):
                 features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
                 features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
-                b_filtered[i] = b[i, non_singular_mask[i]]
+                b_filtered[i, :num_features[i]] = b[i, non_singular_mask[i]]
+                transformed = (H[i].unsqueeze(0) @ torch.cat((b[i, non_singular_mask[i]], torch.ones(num_features[i], 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
+                b_t[i, :num_features[i]] = transformed[..., :2] / transformed[..., 2:3]
             features = features_filtered
             features_t = features_t_filtered
             b = b_filtered
 
-            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b), img_t), num_features)
+            loss = criterion((homogenize(features, b), img), (homogenize(features_t, b_t), img_t), num_features)
 
             loop.set_postfix(loss=loss.item())
             loss.backward()
