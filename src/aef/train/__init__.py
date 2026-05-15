@@ -101,7 +101,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 sched_cfg = o.scheduler
                 scheduler[n] = SCHEDULERS[sched_cfg.name](optimizer[n], **sched_cfg.get("params", {}))
 
-    if cfg.training.continue_from_checkpoint is not None:
+    if hasattr(cfg.training, "continue_from_checkpoint"):
         checkpoint = torch.load(cfg.training.continue_from_checkpoint, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         for n, o in optimizer.items():
