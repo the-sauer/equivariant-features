@@ -25,7 +25,7 @@ from tqdm import tqdm
 from ..data import HomographyData
 from ..data.blobboards import BlobBoardAbsoluteScaleData
 
-from ..train import prepare_training
+from ..train import prepare_training, train_func
 
 
 def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
@@ -80,54 +80,25 @@ def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
 
 def train(model, train_dataset, *args, **kwargs):
     if isinstance(train_dataset, HomographyData):
-        train_scale_homographic(model, train_dataset, *args, **kwargs)
+        train_func(process_batch_scale_homographic)(model, train_dataset, *args, **kwargs)
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
+        # TODO: Implement using train_func
         train_scale_absolute(model, *args, train_dataset=train_dataset, **kwargs)
     else:
         raise ValueError(f"Unsupported dataset type for training scale {type(train_dataset)}")
 
 
-def train_scale_homographic(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    (
-        model,
-        optimizer,
-        scheduler,
-        criterion,
-        training_loader,
-        validation_loader,
-        augmentation,
-        device,
-        checkpoint_dir
-    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+def process_batch_scale_homographic(model, data, criterion, augmentation, device, cfg):
+    b, b_t, H, H_inv = map(lambda x: x.to(device), data)
+    b = augmentation(b)
+    b_t = augmentation(b_t)
+    gt = compute_scale(H, b.shape[2:])
 
-    for epoch in range(cfg.training.num_epochs):
-        loop = tqdm(training_loader, leave=True)
-        cumulative_loss = 0.0
-        for data in loop:
-            b, b_t, H, H_inv = map(lambda x: x.to(device), data)
-            gt = compute_scale(H, b.shape[2:])
-            for opt in optimizer:
-                opt.zero_grad()
+    o = model(b)
+    o_t = model(b_t)
+    o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
 
-            o = model(b)
-            o_t = model(b_t)
-            o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
-
-            loss = criterion(o_t / o, gt)
-            loss.backward()
-            for opt in optimizer:
-                opt.step()
-            cumulative_loss += loss.item() * b.size(0)
-
-            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
-            loop.set_postfix(loss=loss.item())
-
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
-        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(train_dataset))
-
-        for sch in scheduler:
-            sch.step()
-
+    return criterion(o_t / o, gt)
 
 def train_scale_absolute(
     model: torch.nn.Module,
