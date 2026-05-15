@@ -11,21 +11,22 @@ model:
     scale_space:
       name: scale_space_sesn
       params:
-        num_scales: 5
+        factor: 6.5
+        num_scales: 8
+        min_scale: 2.0
+        effective_size: 5
 training:
   dataset:
-    name: blobboards_homographic
+    name: image-matching-challenge-2025
     params:
-      image_size: [128, 128]
+      image_size: [256, 256]
       num_boards: 80
       blobboard_params:
         cutoff: 2.0
   loss:
-    - name: reprojection
+    - name: img_gen
       params:
-        distance_metric: euclidean
-      weight: 1
-    - name: geodesic
+        distance_metric: mse
       weight: 1
   optimizer:
     scale_space:
@@ -52,9 +53,9 @@ training:
           T_max: 50
 validation:
   dataset:
-    name: blobboards_homographic
+    name: image-matching-challenge-2025
     params:
-      image_size: [128, 128]
+      image_size: [256, 256]
       num_boards: 8
       blobboard_params:
         cutoff: 2.0

@@ -2,7 +2,7 @@ training:
   batch_size: 1
   num_epochs: 60
   feature_sampling:
-    num_features: 100
+    num_features: 1000
     # stride: 12
     # detector: harris
   dataset:
@@ -30,7 +30,7 @@ validation:
     params:
       image_size: [256, 256]
   feature_sampling:
-    num_features: 10
+    num_features: 1000
 logging:
   dir: ./data/logs
   interval: 100
