@@ -101,6 +101,22 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 sched_cfg = o.scheduler
                 scheduler[n] = SCHEDULERS[sched_cfg.name](optimizer[n], **sched_cfg.get("params", {}))
 
+    if cfg.training.continue_from_checkpoint is not None:
+        checkpoint = torch.load(cfg.training.continue_from_checkpoint, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        for n, o in optimizer.items():
+            if n in checkpoint["optimizer_state_dict"]:
+                o.load_state_dict(checkpoint["optimizer_state_dict"][n])
+        for n, s in scheduler.items():
+            if n in checkpoint["scheduler_state_dict"]:
+                s.load_state_dict(checkpoint["scheduler_state_dict"][n])
+
+        start_epoch = checkpoint["epoch"] + 1
+        best_loss = checkpoint["best_loss"]
+    else:
+        start_epoch = 0
+        best_loss = float("inf")
+
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
@@ -128,7 +144,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     else:
         augmentation = lambda x: x  # noqa: E731
 
-    return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir
+    return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
 
 
 def train_func(process_batch: ProcessBatchType):
@@ -143,11 +159,12 @@ def train_func(process_batch: ProcessBatchType):
             validation_loader,
             augmentation,
             device,
-            checkpoint_dir
+            checkpoint_dir,
+            start_epoch,
+            best_loss
         ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
-        best_loss = float("inf")
-        for epoch in range(cfg.training.num_epochs):
+        for epoch in range(start_epoch, cfg.training.num_epochs):
             loop = tqdm(train_loader, leave=True)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             model.train()
