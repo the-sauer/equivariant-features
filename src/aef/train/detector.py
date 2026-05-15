@@ -76,7 +76,7 @@ def linearize_homography(H, shape=None, coords=None):
     ), dim=-1)
 
 
-def process_batch_homograpric_detector(model, data, criterion, augmentation, device, cfg):
+def process_batch_homographic_detector_for_image_loss(model, data, criterion, augmentation, device, cfg):
     img, img_t, H, H_inv = data
     img = img.to(device)
     img_t = img_t.to(device)
@@ -132,9 +132,52 @@ def process_batch_homograpric_detector(model, data, criterion, augmentation, dev
     return criterion((homogenize(features, b), img), (homogenize(features_t, b_t), img_t), num_features)
 
 
+def process_batch_homographic_detector_for_transform_loss(model, data, criterion, augmentation, device, cfg):
+    img, img_t, H, H_inv = data
+    img = img.to(device)
+    img_t = img_t.to(device)
+    img_aug, img_t_aug = augmentation((img, img_t))
+    H = H.to(device)
+    H_inv = H_inv.to(device)
+
+    feature_map = model(img_aug)
+    feature_map_t = model(img_t_aug)
+
+    if "stride" in cfg.training.feature_sampling:
+        feature_stride = cfg.training.feature_sampling.stride
+    elif "num_features" in cfg.training.feature_sampling:
+        feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
+    else:
+        raise ValueError("No valid feature sampling method")
+
+    H_inv = H_inv.to(device)
+    feature_map_t = kornia.geometry.transform.warp_perspective(
+        torch.flatten(feature_map_t, start_dim=1, end_dim=2),
+        H_inv,
+        dsize=feature_map.shape[-2:]
+    ).reshape(feature_map.shape)
+    mask = (kornia.geometry.transform.warp_perspective(
+        torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
+        H_inv,
+        dsize=feature_map.shape[-2:]
+    ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
+    features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, :, :]
+    features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(-1, 2, 2)[::feature_stride, :, :]
+
+    non_singular_mask = torch.linalg.det(features) > 1e-6
+    rel_t = features_t[non_singular_mask] @ torch.linalg.inv(features[non_singular_mask])   # use linalg.solve
+
+    gt = linearize_homography(H, feature_map.shape[-2:]).reshape(-1, 2, 2)[::feature_stride, :, :][non_singular_mask]
+
+    return criterion(homogenize(rel_t), homogenize(gt))
+
+
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     if isinstance(train_dataset, HomographyData):
-        return train_func(process_batch_homographic)(model, train_dataset, validation_dataset, cfg, experiment_name)
+        if cfg.training.loss == "img_gen":
+            return train_func(process_batch_homographic_detector_for_image_loss)(model, train_dataset, validation_dataset, cfg, experiment_name)
+        else:
+            return train_func(process_batch_homographic_detector_for_transform_loss)(model, train_dataset, validation_dataset, cfg, experiment_name)
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
         # TODO: Implement using train_func
         return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)

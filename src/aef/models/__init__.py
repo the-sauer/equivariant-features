@@ -26,7 +26,7 @@ import torch
 
 from ..train import train_func
 from ..train.descriptor import process_batch_homographic_descriptor
-from ..train.detector import process_batch_homograpric_detector
+from ..train.detector import train as train_detector
 from ..train.scale import train as train_scale
 
 
@@ -196,6 +196,6 @@ def SimpleFeatureNet(in_channels=1, feature_size=128, conv_depths=None, layer_kw
 MODELS = {
     "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
     "affine_feature_net_one": (AffineFeatureNetOne, train_func(process_batch_homographic_descriptor)),
-    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_func(process_batch_homograpric_detector)),
-    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_func(process_batch_homograpric_detector))
+    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_detector),
+    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_detector),
 }

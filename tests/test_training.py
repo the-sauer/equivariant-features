@@ -3,8 +3,9 @@ import pytest
 import torch
 
 import aef
+from aef.train import train_func
 from aef.transforms.affine import random_affine
-from aef.train.detector import train_homographic as train_detector_homographic
+from aef.train.detector import process_batch_homographic_detector_for_transform_loss
 
 
 DEFAULT_CFG = omegaconf.DictConfig(
@@ -21,6 +22,7 @@ DEFAULT_CFG = omegaconf.DictConfig(
         "validation": {
             "batch_size": 1,
             "feature_sampling": {"num_features": 1},
+            "loss": "assertion_loss",
         },
         "model": None,
         "logging": None,
@@ -90,4 +92,4 @@ def test_detector_training_homographic(transform, monkeypatch):
 
     dataset = [(torch.ones(1, 8, 10), torch.zeros(1, 8, 10), gt_transform, gt_transform_inv)]
 
-    train_detector_homographic(model, dataset, dataset, DEFAULT_CFG)
+    train_func(process_batch_homographic_detector_for_transform_loss)(model, dataset, dataset, DEFAULT_CFG)
