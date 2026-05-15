@@ -13,7 +13,7 @@ DEFAULT_CFG = omegaconf.DictConfig(
         "training": {
             "num_epochs": 1,
             "batch_size": 1,
-            "feature_sampling": {"num_features": 1, "stride": None, "detector": None},
+            "feature_sampling": {"num_features": 10, "stride": None, "detector": None},
             "loss": "assertion_loss",
             "optimizer": {"name": "mock_optimizer"},
             "augmentation": None,
@@ -21,7 +21,7 @@ DEFAULT_CFG = omegaconf.DictConfig(
         },
         "validation": {
             "batch_size": 1,
-            "feature_sampling": {"num_features": 1},
+            "feature_sampling": {"num_features": 10},
             "loss": "assertion_loss",
         },
         "model": None,

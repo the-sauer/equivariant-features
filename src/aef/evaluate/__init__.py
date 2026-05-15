@@ -21,7 +21,7 @@ def fpr(**_):
     def fpr_from_features(features, labels, target_recall=0.95):
         lx, ly = torch.meshgrid(labels, labels, indexing="ij")
         return fpr_from_distances(
-            -torch.cdist(features, features, p=2).view(-1),
+            torch.cdist(features, features, p=2).view(-1),
             (lx == ly).int().view(-1),
             target_recall=target_recall
         )
@@ -42,5 +42,4 @@ def fpr_from_distances(preds, labels, target_recall=0.95):
 
     # Find the index where FPR is closest to the target recall
     idx = torch.argmax((torch.cumsum(sorted_labels, dim=0) >= target_recall * torch.sum(sorted_labels)).float(), dim=0)
-
-    return fpr_val[idx] if idx < len(fpr_val) else torch.tensor(1.0)
+    return fpr_val[idx:idx+1] if idx < len(fpr_val) else torch.tensor(1.0)

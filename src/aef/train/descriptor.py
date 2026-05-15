@@ -110,8 +110,8 @@ def process_batch_homographic_descriptor(model, data, criterion, augmentation, d
             H_inv,
             dsize=feature_map.shape[2:]
         ) > 0.5
-        features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
-        features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(start_dim=1)[::feature_stride]
+        features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(end_dim=-2)[::feature_stride]
+        features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(end_dim=-2)[::feature_stride]
         y = torch.cat((features, features_t))
         assert y.size(0) % 2 == 0
         labels = torch.cat((

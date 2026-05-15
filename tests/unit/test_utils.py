@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from aef.evaluate import fpr_from_distances
+from aef.evaluate import fpr, fpr_from_distances
 from aef.train.losses.geodesic_loss import GeodesicLoss
 from aef.train.losses.rel_scale_loss import RELScaleLoss
 from aef.train.losses.reprojection_loss import HomographyReprojectionLoss
@@ -112,6 +112,20 @@ def test_fpr_is_zero_when_positive_scores_rank_first():
     labels = torch.tensor([1, 0])
 
     assert fpr_from_distances(preds, labels, target_recall=0.5) == pytest.approx(0.0)
+
+
+def test_fpr_from_distances_is_zero_when_positive_scores_rank_first():
+    dists = torch.tensor([
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    labels = torch.tensor([0, 1, 2, 0, 1, 2])
+
+    assert fpr()(dists, labels, target_recall=0.5) == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("A, b, expected", [

@@ -96,7 +96,7 @@ class AffineFeatureNetOne(torch.nn.Module):
         if x.dim() == 4:
             x = x.unsqueeze(1)
         x, _ = self.feature_net((x, scale_field))
-        x = torch.nn.functional.normalize(x, dim=2)
+        x = torch.nn.functional.normalize(x, dim=3)
         return x.squeeze(1)
 
 
@@ -129,7 +129,7 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
             x = x.unsqueeze(1)
         assert x.size(1) == 1
         x, _ = self.feature_net((x, scale_field))
-        x = torch.nn.functional.normalize(x, dim=2)
+        x = torch.nn.functional.normalize(x, dim=3)
         x = self.canonicalization_layer(x)
         return x.squeeze(1)
 
