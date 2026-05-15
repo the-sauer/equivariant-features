@@ -78,29 +78,28 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
     opt_cfg = cfg.training.optimizer
     if hasattr(opt_cfg, "name"):
-        optimizer = [OPTIMIZERS[opt_cfg.name](model.parameters(), **opt_cfg.get("params", {}))]
+        optimizer = {"main": OPTIMIZERS[opt_cfg.name](model.parameters(), **opt_cfg.get("params", {}))}
         if hasattr(opt_cfg, "scheduler"):
             sched_cfg = opt_cfg.scheduler
-            scheduler = [SCHEDULERS[sched_cfg.name](optimizer[0], **sched_cfg.get("params", {}))]
+            scheduler = {"main": SCHEDULERS[sched_cfg.name](optimizer["main"], **sched_cfg.get("params", {}))}
         else:
-            scheduler = []
+            scheduler = {}
     else:
-        # TODO: Refactor optimizer initialization to be more flexible and less hardcoded.
-        optimizer = [
-            OPTIMIZERS[opt_cfg.scale_space.name](model.scale_space.parameters(), **opt_cfg.scale_space.get("params", {})),
-            OPTIMIZERS[opt_cfg.feature_net.name](itertools.chain(model.feature_net.parameters(), model.scale_gain.parameters()), **opt_cfg.feature_net.get("params", {}))
-        ]
-        scheduler = []
-        if hasattr(opt_cfg.scale_space, "scheduler"):
-            scheduler_kwargs = opt_cfg.scale_space.scheduler.get("params", {})
-            scheduler.append(
-                SCHEDULERS[opt_cfg.scale_space.scheduler.name](optimizer[0], **scheduler_kwargs)
+        optimizer = {
+            n: OPTIMIZERS[o.name](
+                (getattr(model, o.model_params).parameters()
+                    if isinstance(o.model_params, str)
+                    else itertools.chain(*(getattr(model, mp).parameters() for mp in o.model_params)))
+                if hasattr(o, "model_params") else model.parameters(),
+                **o.get("params", {})
             )
-        if hasattr(opt_cfg.feature_net, "scheduler"):
-            scheduler_kwargs = opt_cfg.feature_net.scheduler.get("params", {})
-            scheduler.append(
-                SCHEDULERS[opt_cfg.feature_net.scheduler.name](optimizer[1], **scheduler_kwargs)
-            )
+            for n, o in opt_cfg.items()
+        }
+        scheduler = {}
+        for n, o in opt_cfg.items():
+            if hasattr(o, "scheduler"):
+                sched_cfg = o.scheduler
+                scheduler[n] = SCHEDULERS[sched_cfg.name](optimizer[n], **sched_cfg.get("params", {}))
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -154,14 +153,14 @@ def train_func(process_batch: ProcessBatchType):
             model.train()
             cumulative_loss = 0.0
             for i, data in enumerate(loop):
-                for opt in optimizer:
+                for opt in optimizer.values():
                     opt.zero_grad()
 
                 loss = process_batch(model, data, criterion, augmentation, device, cfg)
                 cumulative_loss += loss.item()
                 loop.set_postfix(loss=loss.item())
                 loss.backward()
-                for opt in optimizer:
+                for opt in optimizer.values():
                     opt.step()
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0:
                     average_loss = cumulative_loss / (i + 1)
@@ -186,8 +185,8 @@ def train_func(process_batch: ProcessBatchType):
                     checkpoint = {
                         "epoch": epoch,
                         "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": [opt.state_dict() for opt in optimizer],
-                        "scheduler_state_dict": [sch.state_dict() for sch in scheduler],
+                        "optimizer_state_dict": {n: o.state_dict() for n, o in optimizer.items()},
+                        "scheduler_state_dict": {n: s.state_dict() for n, s in scheduler.items()},
                         "loss": average_loss,
                         "best_loss": best_loss
                     }
@@ -198,7 +197,7 @@ def train_func(process_batch: ProcessBatchType):
                         msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
                         print("\033[1m" + msg + "\033[0m")
                         logging.info("\033[1m" + msg + "\033[0m")
-                for sch in scheduler:
+                for sch in scheduler.values():
                     sch.step()
 
     return train

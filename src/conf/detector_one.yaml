@@ -30,6 +30,7 @@ training:
   optimizer:
     scale_space:
       name: adam
+      model_params: scale_space
       params:
         lr: 1e-3
         weight_decay: 5e-5
@@ -40,6 +41,9 @@ training:
           gamma: 0.1
     feature_net:
       name: adamw
+      model_params:
+        - feature_net
+        - scale_gain
       params:
         lr: 2e-3
       scheduler:
