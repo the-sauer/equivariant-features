@@ -15,7 +15,7 @@ instantiate `BlobBoards.jl` (optional, will be handled with the first call to th
 julia --project=./deps/BlobBoards.jl -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url="git@github.com:prittjam/CauRegistry.jl.git")); Pkg.instantiate()'
 ```
 and install the python dependencies.
-```
+```sh
 pip install -r requirements.txt
 ```
 

@@ -1,6 +1,9 @@
 [BASIC]
 
-good-names=H, H_inv, A, B, W, DoG, R_diffs, N, Nx,n Ny, D, H00, H01, H10, H11, H20, H21
+good-names=H, A, B, E, F, W, DoG, N, D
+
+good-names-rgxs=H[a-z0-9_]{1,30}$, K[a-z0-9_]{1,30}$, N[a-z0-9_]{1,30}$, R[a-z0-9_]{1,30}$
+
 
 [MESSAGES CONTROL]
 
