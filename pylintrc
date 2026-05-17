@@ -9,3 +9,6 @@ disable=
     missing-class-docstring,
     missing-module-docstring,
     too-few-public-methods,
+
+[FORMAT]
+max-line-length=120
