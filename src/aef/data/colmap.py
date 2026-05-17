@@ -16,31 +16,110 @@
 
 import os
 
+import kagglehub
+import numpy as np
 import pycolmap
 import torch
 import torchvision
 
-from ..data import find_images
+
+def compute_epipolar_fundamental(pose1, pose2, cam1, cam2):
+    # Retrieve Relative Pose
+    R1, t1 = pose1.rotation.matrix(), pose1.translation
+    R2, t2 = pose2.rotation.matrix(), pose2.translation
+    R_rel = R2 @ R1.T
+    t_rel = t2 - R_rel @ t1
+
+    # Essential Matrix
+    t_x = np.array([[0, -t_rel[2], t_rel[1]],
+                    [t_rel[2], 0, -t_rel[0]],
+                    [-t_rel[1], t_rel[0], 0]])
+    E = t_x @ R_rel
+
+    # Fundamental Matrix
+    K1 = cam1.calibration_matrix()
+    K2 = cam2.calibration_matrix()
+    F = np.linalg.inv(K2.T) @ E @ np.linalg.inv(K1)
+
+    return E, F
 
 
 class ColmapDataset(torch.utils.data.Dataset):
-    def __init__(self, images, image_size):
-        self.images_files = find_images(images)
-        resize = torchvision.transforms.Resize(image_size)
-        self.img = torch.stack([
-            resize(torchvision.io.read_image(file)).to(torch.float32) / 255.0 for file in self.images_files
-        ])
+    def __init__(self, images=None, kaggle_dataset=None, image_size=(256, 256)):
+        if images is None and kaggle_dataset is None:
+            raise ValueError("Either 'images' directory or 'kaggle_dataset' name must be provided.")
+
+        if kaggle_dataset is not None:
+            images = kagglehub.dataset_download(kaggle_dataset)
+
+        self.images_dir = os.path.join(images, "images")
+        self.resize_transform = torchvision.transforms.Resize(image_size)
+
         database_path = os.path.join(images, "database.db")
-        if not os.path.exists(database_path):
-            # Run reconstruction if not already done
+        sparse_dir = os.path.join(images, "sparse")
+
+        if not os.path.exists(database_path) or not os.path.exists(sparse_dir):
+            os.makedirs(sparse_dir, exist_ok=True)
             pycolmap.extract_features(database_path, images)
             pycolmap.match_exhaustive(database_path)
-            result, *_ = pycolmap.incremental_mapping(database_path, images, os.path.join(images, "sparse"))
+            # Use incremental mapping
+            maps = pycolmap.incremental_mapping(database_path, images, sparse_dir)
+            self.reconstruction: pycolmap.Reconstruction = maps[0] if isinstance(maps, dict) else next(iter(maps.values() if isinstance(maps, dict) else maps))
+        else:
+            self.reconstruction = pycolmap.Reconstruction(sparse_dir)
 
-            print(f"Reconstruction finished with {result.num_reg_images()} images and {result.num_points3D()} 3D points.")
+        self.pairs = []
+        img_ids = list(self.reconstruction.images.keys())
+
+        # Build pairs with co-visible points
+        for i in range(len(img_ids)):
+            for j in range(i + 1, len(img_ids)):
+                img1_id, img2_id = img_ids[i], img_ids[j]
+                img1, img2 = self.reconstruction.images[img1_id], self.reconstruction.images[img2_id]
+
+                # Intersect valid points 3D
+                p3d_1 = {p.point3D_id: idx for idx, p in enumerate(img1.points2D) if p.has_point3D()}
+                p3d_2 = {p.point3D_id: idx for idx, p in enumerate(img2.points2D) if p.has_point3D()}
+
+                common_3d = set(p3d_1.keys()).intersection(set(p3d_2.keys()))
+                if len(common_3d) > 20: 
+                    self.pairs.append((img1_id, img2_id, list(common_3d)))
 
     def __len__(self):
-        return len(self.img)
+        return len(self.pairs)
 
     def __getitem__(self, idx):
-        return self.img[idx]
+        img1_id, img2_id, common_3d = self.pairs[idx]
+        img1_obj = self.reconstruction.image(img1_id)
+        img2_obj = self.reconstruction.image(img2_id)
+
+        cam1 = self.reconstruction.camera(img1_obj.camera_id)
+        cam2 = self.reconstruction.camera(img2_obj.camera_id)
+
+        img1_path = os.path.join(self.images_dir, img1_obj.name)
+        img2_path = os.path.join(self.images_dir, img2_obj.name)
+
+        img1_tensor = torchvision.io.read_image(img1_path).to(torch.float32) / 255.0
+        img2_tensor = torchvision.io.read_image(img2_path).to(torch.float32) / 255.0
+
+        pts1 = []
+        pts2 = []
+        for p3d_id in common_3d:
+            idx1 = next(idx for idx, p in enumerate(img1_obj.points2D) if p.point3D_id == p3d_id)
+            idx2 = next(idx for idx, p in enumerate(img2_obj.points2D) if p.point3D_id == p3d_id)
+            pts1.append(img1_obj.points2D[idx1].xy)
+            pts2.append(img2_obj.points2D[idx2].xy)
+
+        pts1 = torch.tensor(pts1, dtype=torch.float32)
+        pts2 = torch.tensor(pts2, dtype=torch.float32)
+
+        E, F = compute_epipolar_fundamental(img1_obj.cam_from_world(), img2_obj.cam_from_world(), cam1, cam2)
+
+        return {
+            "image1": img1_tensor,
+            "image2": img2_tensor,
+            "pts1": pts1,
+            "pts2": pts2,
+            "essential_matrix": torch.tensor(E, dtype=torch.float32),
+            "fundamental_matrix": torch.tensor(F, dtype=torch.float32)
+        }
