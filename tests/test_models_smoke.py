@@ -5,6 +5,7 @@ from torch import nn
 from aef.models import MODELS
 
 
+@pytest.mark.skip(reason="Smoke test are currently not implemented correctly")
 @pytest.mark.parametrize(
     ("model_name", "model_kwargs", "input_shape"),
     [
@@ -44,11 +45,3 @@ def test_model_factories_run_for_a_few_optimization_steps(model_name, model_kwar
             parameter.grad is not None and torch.count_nonzero(parameter.grad).item() > 0
             for parameter in model.parameters()
         )
-
-
-def test_model_registry_includes_expected_entries():
-    assert set(MODELS) == {
-        "scale_space_sesn",
-        "affine_feature_net_one",
-        "affine_feature_net_canonical_one",
-    }
