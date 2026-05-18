@@ -22,10 +22,7 @@ import kornia
 import torch
 from tqdm import tqdm
 
-from ..data.homography import HomographyData
-from ..data.blobboards import BlobBoardAbsoluteScaleData
-
-from ..train import prepare_training, train_func
+from ..train import prepare_training
 
 
 def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
@@ -78,16 +75,6 @@ def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
     return scale.view(N, 1, size[0], size[1])
 
 
-def train(model, train_dataset, *args, **kwargs):
-    if isinstance(train_dataset, HomographyData):
-        train_func(process_batch_scale_homographic)(model, train_dataset, *args, **kwargs)
-    elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
-        # TODO: Implement using train_func
-        train_scale_absolute(model, *args, train_dataset=train_dataset, **kwargs)
-    else:
-        raise ValueError(f"Unsupported dataset type for training scale {type(train_dataset)}")
-
-
 def process_batch_scale_homographic(model, data, criterion, augmentation, device, cfg):
     b, b_t, H, H_inv = map(lambda x: x.to(device), data)
     b = augmentation(b)
@@ -100,6 +87,8 @@ def process_batch_scale_homographic(model, data, criterion, augmentation, device
 
     return criterion(o_t / o, gt)
 
+
+# TODO: Implement using train_func
 def train_scale_absolute(
     model: torch.nn.Module,
     train_dataset: torch.utils.data.Dataset,

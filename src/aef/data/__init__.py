@@ -17,7 +17,10 @@
 import omegaconf
 import torch
 
-from .blobboards import *
+try:
+    from .blobboards import *
+except ImportError as e:
+    print("Could not import blobboards dataset. Make sure to install the BlobBoards.jl python bindings and to have the Julia package installed. Error was:", e)
 from .colmap import *
 from .constant import *
 from .kaggle import *

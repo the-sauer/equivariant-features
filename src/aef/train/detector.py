@@ -18,12 +18,6 @@ import kornia
 import torch
 from tqdm import tqdm
 
-from ..data.constant import ConstantData
-from ..data.colmap import ColmapData
-from ..data.blobboards import BlobBoardAbsoluteScaleData
-from ..data.homography import HomographyData, sample_homography
-from ..train import prepare_training, train_func
-
 
 def homogenize(A, b=None):
     *B, H, W = A.size()
@@ -263,21 +257,6 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     E = torch.cat(E_list, dim=0)
 
     return criterion(homogenize(rel), E, pts)
-
-
-def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
-    if isinstance(train_dataset, HomographyData):
-        if cfg.training.loss == "img_gen":
-            return train_func(process_batch_homographic_detector_for_image_loss)(model, train_dataset, validation_dataset, cfg, experiment_name)
-        else:
-            return train_func(process_batch_homographic_detector_for_transform_loss)(model, train_dataset, validation_dataset, cfg, experiment_name)
-    elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
-        # TODO: Implement using train_func
-        return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
-    elif isinstance(train_dataset, ConstantData):
-        return train_func(process_batch_gt)(model, train_dataset, validation_dataset, cfg, experiment_name)
-    elif isinstance(train_dataset, ColmapData):
-        return train_func(process_batch_colmap_detector)(model, train_dataset, validation_dataset, cfg, experiment_name)
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
