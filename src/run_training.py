@@ -28,6 +28,7 @@ import omegaconf
 from aef.configuration import Config
 from aef.data import HomographyData
 from aef.data.blobboards import BlobBoardAbsoluteScaleData, BlobBoardHomographyData
+from aef.data.constant import ConstantDataset
 from aef.models import MODELS
 
 
@@ -48,6 +49,8 @@ def get_dataset(dataset_cfg):
         return BlobBoardHomographyData(**dataset_cfg.params)
     elif dataset_cfg.name == "blobboards_absolute_scale":
         return BlobBoardAbsoluteScaleData(**dataset_cfg.params)
+    elif dataset_cfg.name == "constant":
+        return ConstantDataset(**dataset_cfg.params)
     else:
         data_dir = os.path.join(dataset_cfg.data_dir, dataset_cfg.name)
         if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{dataset_cfg.name}.archive")):

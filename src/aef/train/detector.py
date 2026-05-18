@@ -21,6 +21,8 @@ import kornia
 import torch
 from tqdm import tqdm
 
+from ..data.constant import ConstantDataset
+
 from ..data.blobboards import BlobBoardAbsoluteScaleData
 
 from ..data import HomographyData, sample_homography
@@ -172,6 +174,19 @@ def process_batch_homographic_detector_for_transform_loss(model, data, criterion
     return criterion(homogenize(rel_t), homogenize(gt))
 
 
+def process_batch_gt(model, data, criterion, augmentation, device, cfg):
+    img, gt = data
+    img = img.to(device)
+    gt = gt.to(device)
+
+    img_aug = augmentation(img)
+
+    feature_map = model(img_aug)
+    print("Mean values per channel:", feature_map.mean(dim=(0, 3, 4)).tolist())
+
+    return criterion(feature_map, gt)
+
+
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     if isinstance(train_dataset, HomographyData):
         if cfg.training.loss == "img_gen":
@@ -181,6 +196,8 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
         # TODO: Implement using train_func
         return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
+    elif isinstance(train_dataset, ConstantDataset):
+        return train_func(process_batch_gt)(model, train_dataset, validation_dataset, cfg, experiment_name)
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
