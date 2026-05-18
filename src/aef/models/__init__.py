@@ -110,7 +110,7 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
         scale_space["params"]["in_channels"] = 1
         self.scale_space = MODELS[scale_space["name"]][0](**scale_space["params"])
         if "pretrained" in scale_space:
-            self.scale_space.load_state_dict(torch.load(scale_space["pretrained"]))
+            self.scale_space.load_state_dict(torch.load(scale_space["pretrained"])["model_state_dict"])
             if scale_space["freeze"]:
                 for param in self.scale_space.parameters():
                     param.requires_grad = False
