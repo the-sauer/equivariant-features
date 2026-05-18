@@ -14,21 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import logging
-import os
-
 import kornia
 import torch
 from tqdm import tqdm
 
 from ..data.constant import ConstantDataset
-
+from ..data.colmap import ColmapDataset
 from ..data.blobboards import BlobBoardAbsoluteScaleData
-
 from ..data import HomographyData, sample_homography
-
-from .losses.geodesic_loss import GeodesicLoss
-from .losses.reprojection_loss import HomographyReprojectionLoss
 from ..train import prepare_training, train_func
 
 
@@ -187,6 +180,91 @@ def process_batch_gt(model, data, criterion, augmentation, device, cfg):
     return criterion(feature_map, gt)
 
 
+def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg):
+    img_1 = data["image1"].to(device)
+    img_2 = data["image2"].to(device)
+
+    img_1 = augmentation(img_1)
+    img_2 = augmentation(img_2)
+
+    feature_map_1 = model(img_1)
+    feature_map_2 = model(img_2)
+
+    pts1 = data["pts1"].to(device)
+    pts2 = data["pts2"].to(device)
+
+    if pts1.dim() == 2:
+        pts1 = pts1.unsqueeze(0)
+        pts2 = pts2.unsqueeze(0)
+    if pts1.dim() != 3:
+        raise ValueError("Expected pts1/pts2 with 2 or 3 dimensions")
+
+    feature_h, feature_w = feature_map_1.shape[-2:]
+    pts1_px = pts1.clone()
+    pts2_px = pts2.clone()
+    pts1_px[..., 0] = pts1_px[..., 0] * (feature_w - 1)
+    pts1_px[..., 1] = pts1_px[..., 1] * (feature_h - 1)
+    pts2_px[..., 0] = pts2_px[..., 0] * (feature_w - 1)
+    pts2_px[..., 1] = pts2_px[..., 1] * (feature_h - 1)
+
+    def sample_affines(feature_map: torch.Tensor, pts_px: torch.Tensor) -> torch.Tensor:
+        x = (pts_px[..., 0] / (feature_w - 1)) * 2 - 1
+        y = (pts_px[..., 1] / (feature_h - 1)) * 2 - 1
+        grid = torch.stack((x, y), dim=-1).unsqueeze(2)
+        flat_map = feature_map.reshape(feature_map.size(0), 4, feature_h, feature_w)
+        sampled = torch.nn.functional.grid_sample(flat_map, grid, mode="bilinear", align_corners=True)
+        sampled = sampled.squeeze(-1).transpose(1, 2)
+        return sampled.reshape(sampled.size(0), sampled.size(1), 2, 2)
+
+    aff_1 = sample_affines(feature_map_1, pts1_px)
+    aff_2 = sample_affines(feature_map_2, pts2_px)
+
+    valid = (
+        (pts1_px[..., 0] >= 0) & (pts1_px[..., 0] < feature_w)
+        & (pts1_px[..., 1] >= 0) & (pts1_px[..., 1] < feature_h)
+        & (pts2_px[..., 0] >= 0) & (pts2_px[..., 0] < feature_w)
+        & (pts2_px[..., 1] >= 0) & (pts2_px[..., 1] < feature_h)
+    )
+
+    E = data.get("fundamental_matrix", data.get("essential_matrix")).to(device)
+    if E.dim() == 2:
+        E = E.unsqueeze(0)
+
+    rel_list = []
+    pt_list = []
+    E_list = []
+    for i in range(pts1_px.size(0)):
+        valid_i = valid[i]
+        if not torch.any(valid_i):
+            continue
+        pts1_i = pts1_px[i, valid_i]
+        aff_1_i = aff_1[i, valid_i]
+        aff_2_i = aff_2[i, valid_i]
+
+        det = torch.linalg.det(aff_1_i)
+        non_singular = det.abs() > 1e-6
+        if not torch.any(non_singular):
+            continue
+
+        pts1_i = pts1_i[non_singular]
+        aff_1_i = aff_1_i[non_singular]
+        aff_2_i = aff_2_i[non_singular]
+
+        rel_i = aff_2_i @ torch.linalg.inv(aff_1_i)
+        rel_list.append(rel_i)
+        pt_list.append(pts1_i)
+        E_list.append(E[i].expand(rel_i.size(0), -1, -1))
+
+    if not rel_list:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    rel = torch.cat(rel_list, dim=0)
+    pts = torch.cat(pt_list, dim=0)
+    E = torch.cat(E_list, dim=0)
+
+    return criterion(homogenize(rel), E, pts)
+
+
 def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
     if isinstance(train_dataset, HomographyData):
         if cfg.training.loss == "img_gen":
@@ -198,6 +276,8 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
         return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
     elif isinstance(train_dataset, ConstantDataset):
         return train_func(process_batch_gt)(model, train_dataset, validation_dataset, cfg, experiment_name)
+    elif isinstance(train_dataset, ColmapDataset):
+        return train_func(process_batch_colmap_detector)(model, train_dataset, validation_dataset, cfg, experiment_name)
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):

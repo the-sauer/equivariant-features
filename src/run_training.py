@@ -28,6 +28,7 @@ import omegaconf
 from aef.configuration import Config
 from aef.data import HomographyData
 from aef.data.blobboards import BlobBoardAbsoluteScaleData, BlobBoardHomographyData
+from aef.data.colmap import ColmapDataset
 from aef.data.constant import ConstantDataset
 from aef.models import MODELS
 
@@ -55,9 +56,12 @@ def get_dataset(dataset_cfg):
         data_dir = os.path.join(dataset_cfg.data_dir, dataset_cfg.name)
         if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{dataset_cfg.name}.archive")):
             dataset_path = kagglehub.competition_download(dataset_cfg.name, output_dir=data_dir, force_download=True)
+            return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
+        elif os.path.exists(os.path.join(data_dir, "database.db")):
+            return ColmapDataset(data_dir, **dataset_cfg.params)
         else:
             dataset_path = data_dir
-        return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
+            return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
 
 
 def train(cfg) -> None:

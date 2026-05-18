@@ -120,3 +120,91 @@ def process_batch_homographic_descriptor(model, data, criterion, augmentation, d
         )).to(device)
 
     return criterion(y, labels)
+
+
+def process_batch_colmap_descriptor(model, data, criterion, augmentation, device, cfg):
+    img_1 = data["image1"].to(device)
+    img_2 = data["image2"].to(device)
+    
+    batch_size = img_1.shape[0]
+
+    # Apply augmentation
+    img_1 = augmentation(img_1)
+    img_2 = augmentation(img_2)
+
+    # Get feature maps from model
+    feature_map_1 = model(img_1)
+    feature_map_2 = model(img_2)
+
+    # Get normalized point coordinates [0, 1]
+    pts1 = data["pts1"].to(device)
+    pts2 = data["pts2"].to(device)
+
+    # Convert normalized coordinates to feature map coordinates
+    feature_h, feature_w = feature_map_1.shape[-2:]
+    pts1[:, 0] = pts1[:, 0] * (feature_w - 1)
+    pts1[:, 1] = pts1[:, 1] * (feature_h - 1)
+
+    pts2[:, 0] = pts2[:, 0] * (feature_w - 1)
+    pts2[:, 1] = pts2[:, 1] * (feature_h - 1)
+
+    # Extract features at point locations
+    features_1 = []
+    features_2 = []
+    labels = []
+    offset = 0
+
+    def sample_features(feature_map: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
+        if pts.numel() == 0:
+            return torch.empty((0, feature_map.size(1)), device=feature_map.device)
+        x = (pts[:, 0] / (feature_w - 1)) * 2 - 1
+        y = (pts[:, 1] / (feature_h - 1)) * 2 - 1
+        grid = torch.stack((x, y), dim=-1).view(1, -1, 1, 2)
+        sampled = torch.nn.functional.grid_sample(
+            feature_map,
+            grid,
+            mode="bilinear",
+            align_corners=True
+        )
+        return sampled.squeeze(0).squeeze(-1).transpose(0, 1)
+
+    for i in range(batch_size):
+        if pts1.dim() == 3:
+            pts1_i = pts1[i]
+            pts2_i = pts2[i]
+        elif pts1.dim() == 2:
+            pts1_i = pts1
+            pts2_i = pts2
+        else:
+            raise ValueError("Expected pts1/pts2 with 2 or 3 dimensions")
+
+        valid = (
+            (pts1_i[:, 0] >= 0) & (pts1_i[:, 0] < feature_w)
+            & (pts1_i[:, 1] >= 0) & (pts1_i[:, 1] < feature_h)
+            & (pts2_i[:, 0] >= 0) & (pts2_i[:, 0] < feature_w)
+            & (pts2_i[:, 1] >= 0) & (pts2_i[:, 1] < feature_h)
+        )
+        pts1_i = pts1_i[valid]
+        pts2_i = pts2_i[valid]
+        if pts1_i.numel() == 0:
+            continue
+
+        f1 = sample_features(feature_map_1[i].unsqueeze(0), pts1_i)
+        f2 = sample_features(feature_map_2[i].unsqueeze(0), pts2_i)
+
+        features_1.append(f1)
+        features_2.append(f2)
+        labels.append(torch.arange(f1.size(0), device=device) + offset)
+        offset += f1.size(0)
+
+    if len(features_1) == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    features_1 = torch.cat(features_1, dim=0)
+    features_2 = torch.cat(features_2, dim=0)
+    labels = torch.cat(labels, dim=0)
+
+    y = torch.cat((features_1, features_2), dim=0)
+    labels = torch.cat((labels, labels), dim=0)
+
+    return criterion(y, labels)
