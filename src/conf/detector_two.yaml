@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 model:
-  name: affine_feature_net_canonical_two
+  name: AffineFeatureNetCanonicalTwo
   params:
     conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
     basic_block_params:

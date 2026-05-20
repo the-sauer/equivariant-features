@@ -25,7 +25,8 @@ import omegaconf
 
 from aef.configuration import Config
 from aef.data import get_dataset
-from aef.models import MODELS
+from aef.train import train_func
+from aef.models import *
 
 
 def experiment_name_from_cfg(cfg: Config) -> str:
@@ -42,13 +43,14 @@ def experiment_name_from_cfg(cfg: Config) -> str:
 
 
 def train(cfg) -> None:
+    # TODO: Move all this to prepare training if possible
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
     validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
     model_kwargs["in_channels"] = train_dataset.c
-    Model, train_func = MODELS[cfg.model.name]
+    Model = eval(cfg.model.name)
     model = Model(**model_kwargs)
-    train_func(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
+    train_func(eval(cfg.training.process_batch))(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="scale")

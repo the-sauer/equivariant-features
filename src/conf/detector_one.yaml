@@ -3,13 +3,14 @@ defaults:
   - _self_
 
 model:
-  name: affine_feature_net_canonical_one
+  name: AffineFeatureNetCanonicalOne
   params:
+    process_batch: process_batch_homographic_detector
     conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
     basic_block_params:
       option: B
     scale_space:
-      name: scale_space_sesn
+      name: ScaleSpaceSESN
       params:
         factor: 6.5
         num_scales: 8

@@ -24,11 +24,6 @@ import asel
 import sesn
 import torch
 
-from ..train import train_func
-from ..train.descriptor import process_batch_homographic_descriptor
-from ..train.detector import train as train_detector
-from ..train.scale import train as train_scale
-
 
 def NeuralScaleSpaceSESN(
     in_channels: int = 1,
@@ -189,13 +184,3 @@ def SimpleFeatureNet(in_channels=1, feature_size=128, conv_depths=None, layer_kw
         torch.nn.Flatten(),
         torch.nn.Linear(conv_depths[-1] * 4, feature_size)
     )
-
-
-# All model definition with their respective training functions are collected in this dictionary for easier access.
-# TODO: Consider moving this into a class
-MODELS = {
-    "scale_space_sesn": (NeuralScaleSpaceSESN, train_scale),
-    "affine_feature_net_one": (AffineFeatureNetOne, train_func(process_batch_homographic_descriptor)),
-    "affine_feature_net_canonical_one": (AffineFeatureNetCanonicalOne, train_detector),
-    "affine_feature_net_canonical_two": (AffineFeatureNetCanonicalTwo, train_detector),
-}

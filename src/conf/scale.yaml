@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 model:
-  name: scale_space_sesn
+  name: ScaleSpaceSESN
   params:
     factor: 6.5
     num_scales: 8
