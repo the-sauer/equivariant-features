@@ -2,21 +2,20 @@ import pytest
 import torch
 from torch import nn
 
-from aef.models import MODELS
+from aef.models import *
 
 
 @pytest.mark.skip(reason="Smoke test are currently not implemented correctly")
 @pytest.mark.parametrize(
     ("model_name", "model_kwargs", "input_shape"),
     [
-        ("scale_space_sesn", {"in_channels": 1, "factor": 1.25, "num_scales": 3, "min_scale": 0.5}, (4, 1, 12, 12)),
-        ("affine_feature_net_one", {"in_channels": 2, "feature_size": 8, "conv_depths": [4, 4]}, (4, 2, 12, 12)),
-        ("affine_feature_net_canonical_one", {"in_channels": 1, "conv_depths": [4, 4]}, (4, 1, 12, 12)),
+        (NeuralScaleSpaceSESN, {"in_channels": 1, "factor": 1.25, "num_scales": 3, "min_scale": 0.5}, (4, 1, 12, 12)),
+        (AffineFeatureNetOne, {"in_channels": 2, "feature_size": 8, "conv_depths": [4, 4]}, (4, 2, 12, 12)),
+        (AffineFeatureNetCanonicalOne, {"in_channels": 1, "conv_depths": [4, 4]}, (4, 1, 12, 12)),
     ],
 )
 def test_model_factories_run_for_a_few_optimization_steps(model_name, model_kwargs, input_shape):
-    model_factory, _ = MODELS[model_name]
-    model = model_factory(**model_kwargs)
+    model = model_name(**model_kwargs)
     model.train()
 
     inputs = torch.randn(input_shape)
