@@ -17,19 +17,14 @@
 import juliacall    # Must be imported before pytorch  # noqa: F401
 
 from datetime import datetime
-import os
 from typing import Any
 
 import dotenv
 import hydra
-import kagglehub
 import omegaconf
 
 from aef.configuration import Config
-from aef.data import HomographyData
-from aef.data.blobboards import BlobBoardAbsoluteScaleData, BlobBoardHomographyData
-from aef.data.colmap import ColmapDataset
-from aef.data.constant import ConstantDataset
+from aef.data import get_dataset
 from aef.models import MODELS
 
 
@@ -43,25 +38,7 @@ def experiment_name_from_cfg(cfg: Config) -> str:
         loss_name: str = "_".join(loss_cfg if isinstance(loss_cfg, str) else loss_cfg.name for loss_cfg in cfg.training.loss)
     else:   # isinstance(cfg.training.loss, omegaconf.DictConfig):
         loss_name = cfg.training.loss.name
-    return f"{cfg.model.name}_{cfg.training.dataset.name}_{loss_name}_{date}"
-
-def get_dataset(dataset_cfg):
-    if dataset_cfg.name == "blobboards_homographic":
-        return BlobBoardHomographyData(**dataset_cfg.params)
-    elif dataset_cfg.name == "blobboards_absolute_scale":
-        return BlobBoardAbsoluteScaleData(**dataset_cfg.params)
-    elif dataset_cfg.name == "constant":
-        return ConstantDataset(**dataset_cfg.params)
-    else:
-        data_dir = os.path.join(dataset_cfg.data_dir, dataset_cfg.name)
-        if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{dataset_cfg.name}.archive")):
-            dataset_path = kagglehub.competition_download(dataset_cfg.name, output_dir=data_dir, force_download=True)
-            return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
-        elif os.path.exists(os.path.join(data_dir, "database.db")):
-            return ColmapDataset(data_dir, **dataset_cfg.params)
-        else:
-            dataset_path = data_dir
-            return HomographyData(os.path.join(dataset_path, dataset_cfg.suffix), **dataset_cfg.params)
+    return f"{cfg.model.name}_{loss_name}_{date}"
 
 
 def train(cfg) -> None:

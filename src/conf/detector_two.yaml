@@ -14,7 +14,7 @@ model:
       min_scale: 2.0
 training:
   dataset:
-    name: blobboards_homographic
+    name: BlobBoardHomographyData
     params:
       image_size: [128, 128]
       num_boards: 80
@@ -36,7 +36,7 @@ training:
         T_max: 50
 validation:
   dataset:
-    name: blobboards_homographic
+    name: BlobBoardHomographyData
     params:
       image_size: [128, 128]
       # num_boards: 8

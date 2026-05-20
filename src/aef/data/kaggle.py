@@ -14,20 +14,19 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import torch
+import os
+
+import kagglehub
+
+from .homography import HomographyData
 
 
-class ConstantData(torch.utils.data.Dataset):
-    def __init__(self, value, image_size: tuple[int, int], n: int, c: int, **_):
-        if value == "identity":
-            self.value = torch.eye(2).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(n, -1, -1, *image_size)
-        else:
-            raise ValueError(f"Unsupported value: {value}")
-        self.image_size = image_size
-        self.c = c
-
-    def __len__(self):
-        return self.value.shape[0]
-
-    def __getitem__(self, idx):
-        return torch.rand(self.c, *self.image_size), self.value[idx]
+class KaggleHomographyData(HomographyData):
+    def __init__(self, name: str, data_dir=None, suffix="", **kwargs):
+        if data_dir is None:
+            data_dir = "./data/datasets"
+        data_dir = os.path.join(data_dir, name)
+        if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{name}.archive")):
+            data_dir = kagglehub.competition_download(name, output_dir=data_dir, force_download=True)
+        data_dir = os.path.join(data_dir, suffix)
+        super().__init__(data_dir, **kwargs)

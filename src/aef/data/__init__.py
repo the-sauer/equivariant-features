@@ -14,145 +14,17 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import functools
-import os
-from typing import Iterable, Union
-
-import kornia
+import omegaconf
 import torch
-import torchvision
 
-from ..transforms.homography import sample_homography
-
-
-def flip(f):
-    def flipped_f(y, x):
-        return f(x, y)
-    return flipped_f
+from .blobboards import *
+from .colmap import *
+from .constant import *
+from .kaggle import *
 
 
-def curry(f):
-    def function(x):
-        def inner(y):
-            return f(x, y)
-        return inner
-    return function
-
-
-def uncurry(f):
-    def function(x, y):
-        return f(y)(x)
-    return function
-
-
-def fchain(*args):
-    def function(x):
-        for f in reversed(args):
-            x = f(x)
-        return x
-    return function
-
-
-def find_images(dir, extensions=[".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]) -> Iterable[str]:
-    return fchain(
-        curry(filter)(lambda file: any(map(lambda e: file.endswith(e), extensions))),
-        curry(functools.reduce)(list.__add__),
-        curry(map)(lambda x: list(map(lambda f: os.path.join(x[0], f), x[2]))),
-    )(os.walk(dir))
-
-
-def load_images(dir,  size, extensions=[".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]) -> torch.Tensor:
-    resize = torchvision.transforms.Resize(size)
-    return fchain(
-        torch.stack,
-        list,
-        curry(map)(resize),
-        curry(map)(torchvision.io.decode_image),
-    )(find_images(dir, extensions))
-
-
-class HomographyData(torch.utils.data.Dataset):
-    images: torch.Tensor | list[str]
-    transforms: torch.Tensor
-    transforms_inv: torch.Tensor
-    size: tuple[int, int]
-    c: int
-
-    def __init__(
-        self,
-        images: Union[str, torch.Tensor],
-        image_size: tuple[int, int] = (128, 128),
-        in_memory=True,
-        transform_params=None,
-        **_
-    ):
-        super().__init__()
-        if transform_params is None:
-            transform_params = {}
-        self.size = image_size
-        if isinstance(images, torch.Tensor):
-            self.images = images
-            self.c = self.images.size(1)
-        else:
-            if in_memory:
-                self.images = load_images(images, size=image_size).to(torch.float32) / 255
-                self.c = self.images.size(1)
-            else:
-                self.images = list(find_images(images))
-                self.resize = torchvision.transforms.Resize(image_size)
-                self.c = torchvision.io.decode_image(self.images[0]).size(0)
-
-        self.transforms = torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(len(self.images))])
-        self.transforms_inv = torch.linalg.inv(self.transforms)
-        if in_memory:
-            if self.images.size(1) == 1:
-                self.images_transformed = kornia.geometry.transform.warp_perspective(
-                    self.images.expand(-1, 3, -1, -1),
-                    self.transforms,
-                    image_size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )[:, :1, ...]
-            elif self.images.size(1) == 3:
-                self.images_transformed = kornia.geometry.transform.warp_perspective(
-                    self.images,
-                    self.transforms,
-                    image_size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )
-            else:
-                raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
-
-    def __getitem__(self, index):
-        if isinstance(self.images[index], str):
-            img = self.resize(torchvision.io.decode_image(self.images[index]).unsqueeze(0).to(torch.float32) / 255)
-            if img.size(1) == 1:
-                transformed = kornia.geometry.transform.warp_perspective(
-                    img.expand(-1, 3, -1, -1),
-                    self.transforms,
-                    self.size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )[:, :1, ...]
-            elif img.size(1) == 3:
-                transformed = kornia.geometry.transform.warp_perspective(
-                    img,
-                    self.transforms[index].unsqueeze(0),
-                    self.size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )
-            else:
-                raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
-            return (img.squeeze(0), transformed.squeeze(0), self.transforms[index], self.transforms_inv[index])
-        else:
-            return (
-                self.images[index],
-                self.images_transformed[index],
-                self.transforms[index],
-                self.transforms_inv[index]
-            )
-
-    def __len__(self):
-        return len(self.images)
+def get_dataset(dataset_cfg):
+    if isinstance(dataset_cfg, omegaconf.ListConfig):
+        return torch.utils.data.ConcatDataset(*(get_dataset(c) for c in dataset_cfg))
+    else:
+        return eval(f"{dataset_cfg.name}(**dataset_cfg.params)")

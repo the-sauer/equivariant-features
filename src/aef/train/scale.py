@@ -22,7 +22,7 @@ import kornia
 import torch
 from tqdm import tqdm
 
-from ..data import HomographyData
+from ..data.homography import HomographyData
 from ..data.blobboards import BlobBoardAbsoluteScaleData
 
 from ..train import prepare_training, train_func

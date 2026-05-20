@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from aef.data.colmap import ColmapDataset
+from aef.data.colmap import ColmapData
 
 def visualize_epipolar_lines(img1, img2, pts1, pts2, F, num_lines=15):
     """
@@ -80,7 +80,7 @@ if __name__ == "__main__":
         kagglehub.competition_download('image-matching-challenge-2025', output_dir=path, force_download=True)
 
     scene_dir = os.path.join(path, "south-building")
-    dataset = ColmapDataset(scene_dir, image_size=(512, 512))
+    dataset = ColmapData(scene_dir, image_size=(512, 512))
 
     print(f"Dataset has {len(dataset)} valid pairs with >20 common 3D points.")
 

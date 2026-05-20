@@ -18,10 +18,10 @@ import kornia
 import torch
 from tqdm import tqdm
 
-from ..data.constant import ConstantDataset
-from ..data.colmap import ColmapDataset
+from ..data.constant import ConstantData
+from ..data.colmap import ColmapData
 from ..data.blobboards import BlobBoardAbsoluteScaleData
-from ..data import HomographyData, sample_homography
+from ..data.homography import HomographyData, sample_homography
 from ..train import prepare_training, train_func
 
 
@@ -274,9 +274,9 @@ def train(model, train_dataset, validation_dataset, cfg, experiment_name="defaul
     elif isinstance(train_dataset, BlobBoardAbsoluteScaleData):
         # TODO: Implement using train_func
         return train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name)
-    elif isinstance(train_dataset, ConstantDataset):
+    elif isinstance(train_dataset, ConstantData):
         return train_func(process_batch_gt)(model, train_dataset, validation_dataset, cfg, experiment_name)
-    elif isinstance(train_dataset, ColmapDataset):
+    elif isinstance(train_dataset, ColmapData):
         return train_func(process_batch_colmap_detector)(model, train_dataset, validation_dataset, cfg, experiment_name)
 
 

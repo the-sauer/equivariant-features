@@ -14,8 +14,10 @@ model:
         num_scales: 5
 training:
   dataset:
-    name: image-matching-challenge-2025
+    name: KaggleHomographyData
     params:
+      data_dir: ./data/datasets/
+      name: image-matching-challenge-2025
       in_memory: false
   optimizer:
     scale_space:
@@ -39,7 +41,10 @@ training:
   loss: npairs
 validation:
   dataset:
-    name: image-matching-challenge-2025
+    name: KaggleHomographyData
     params:
-      in_memory: false
+      name: image-matching-challenge-2025
+      data_dir: ./data/datasets/
+      params:
+        in_memory: false
   loss: fpr

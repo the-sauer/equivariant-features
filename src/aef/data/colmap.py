@@ -44,7 +44,7 @@ def compute_epipolar_fundamental(pose1, pose2, cam1, cam2):
     return E, F
 
 
-class ColmapDataset(torch.utils.data.Dataset):
+class ColmapData(torch.utils.data.Dataset):
     def __init__(self, images=None, kaggle_dataset=None, image_size=(256, 256), **_):
         if images is None and kaggle_dataset is None:
             raise ValueError("Either 'images' directory or 'kaggle_dataset' name must be provided.")

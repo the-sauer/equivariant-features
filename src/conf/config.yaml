@@ -6,9 +6,9 @@ training:
     # stride: 12
     # detector: harris
   dataset:
-    suffix: train
     data_dir: ./data/datasets
     params:
+      suffix: train
       image_size: [256, 256]
   augmentation:
     color_jitter:
@@ -25,10 +25,10 @@ training:
 validation:
   batch_size: 1
   dataset:
-    suffix: test
     data_dir: ./data/datasets
     params:
       image_size: [256, 256]
+      suffix: test
   feature_sampling:
     num_features: 1000
 logging:

@@ -19,7 +19,7 @@ import random
 import blobboards
 import torch
 
-from ..data import HomographyData
+from .homography import HomographyData
 
 
 def get_seeds(num_seeds, seed_range=(0, 10000), split="train"):

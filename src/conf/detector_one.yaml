@@ -17,8 +17,9 @@ model:
         effective_size: 5
 training:
   dataset:
-    name: image-matching-challenge-2025
+    name: KaggleHomographyData
     params:
+      name: image-matching-challenge-2025
       image_size: [256, 256]
       num_boards: 80
       blobboard_params:
@@ -53,8 +54,9 @@ training:
           T_max: 50
 validation:
   dataset:
-    name: image-matching-challenge-2025
+    name: KaggleHomographyData
     params:
+      name: image-matching-challenge-2025
       image_size: [256, 256]
       num_boards: 8
       blobboard_params:
