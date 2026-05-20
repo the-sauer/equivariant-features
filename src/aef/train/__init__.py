@@ -26,6 +26,10 @@ from tqdm import tqdm
 
 from .losses import Loss
 
+from .descriptor import *
+from .detector import *
+# from .scale import *
+
 
 ProcessBatchType = Callable[
     [
