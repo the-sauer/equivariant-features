@@ -6,7 +6,7 @@ model:
   name: ScaleSpaceSESN
   params:
     factor: 6.5
-    num_scales: 8
+    num_scales: 4
     min_scale: 2.0
     effective_size: 5
 training:
@@ -38,5 +38,6 @@ validation:
       polarity: "random"
       transform_params:
         scaling_amplitude: 1
+  loss: rel_squared
 logging:
   interval: 1

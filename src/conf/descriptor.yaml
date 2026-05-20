@@ -9,7 +9,7 @@ model:
     basic_block_params:
       option: B
     scale_space:
-      name: scale_space_sesn
+      name: NeuralScaleSpaceSESN
       params:
         num_scales: 5
 training:

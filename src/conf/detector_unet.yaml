@@ -3,9 +3,9 @@ defaults:
   - _self_
 
 model:
-  name: AffineFeatureNetUnet
+  name: AffineEquivariantUNet
 training:
-  process_batch: process_batch_homographic_detector_for_transform_loss
+  process_batch: process_batch_homographic_detector_for_image_loss
   dataset:
     name: KaggleHomographyData
     params:
@@ -16,7 +16,10 @@ training:
         perspective_amplitude_x: 0.05
         perspective_amplitude_y: 0.05
         max_angle: "π / 8"
-  loss: reprojection
+  loss:
+    - name: img_gen
+      params:
+        sigma: 4 
 
   optimizer:
     name: adam
@@ -26,4 +29,7 @@ validation:
     params:
       name: image-matching-challenge-2025
       image_size: [512, 512]
-  loss: reprojection
+  loss:
+    - name: img_gen
+      params:
+        sigma: 4
