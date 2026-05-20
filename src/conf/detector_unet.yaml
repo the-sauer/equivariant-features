@@ -1,0 +1,29 @@
+defaults:
+  - config
+  - _self_
+
+model:
+  name: AffineFeatureNetUnet
+training:
+  process_batch: process_batch_homographic_detector_for_transform_loss
+  dataset:
+    name: KaggleHomographyData
+    params:
+      name: image-matching-challenge-2025
+      image_size: [512, 512]
+      transform_params:
+        scaling_amplitude: 0.05
+        perspective_amplitude_x: 0.05
+        perspective_amplitude_y: 0.05
+        max_angle: "π / 8"
+  loss: reprojection
+
+  optimizer:
+    name: adam
+validation:
+  dataset:
+    name: KaggleHomographyData
+    params:
+      name: image-matching-challenge-2025
+      image_size: [512, 512]
+  loss: reprojection
