@@ -17,7 +17,7 @@
 import torch
 
 
-class DeterminantLoss(torch.nn.Module):
+class NonSingularLoss(torch.nn.Module):
     def __init__(self, sigma=1e-4):
         super().__init__()
         self.sigma = sigma
@@ -26,3 +26,14 @@ class DeterminantLoss(torch.nn.Module):
         pred = x["pred"]
         ε = 1e-6
         return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε))
+
+
+class DeterminantLoss(torch.nn.Module):
+    def forward(self, x):
+        pred = x["pred"][0]
+        if "scale" in x:
+            scale = x["scale"][0]
+            scale = scale.view(-1, 1, 1)
+        else:
+            scale = 1.0
+        return torch.mean((torch.linalg.det(pred) - scale) ** 2)

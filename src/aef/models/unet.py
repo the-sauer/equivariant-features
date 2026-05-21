@@ -18,22 +18,33 @@ import asel
 import torch
 import torchvision
 
+from . import scale
+from ..configuration import ComponentConfig
+
 
 class AffineEquivariantUNet(torch.nn.Module):
-    def __init__(self, channels=None, **_):
+    def __init__(self, channels=None, scale_space=None, **_):
         super().__init__()
         if channels is None:
             channels = [10, 20, 40, 80]
+        if scale_space is None:
+            scale_space = ComponentConfig(name="ConstantScaleSpace", params={})
+
+        self.scale_space = getattr(scale, (getattr(scale_space, "name")))(**getattr(scale_space, "params"))
+        self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)  # Learnable gain for the scale space output
+
         self.conv_down = torch.nn.ModuleList([
             torch.nn.Sequential(
                 asel.affine.EquivarLayer(c_in, c_out),
                 asel.affine.EquivarLayer(c_out, c_out)
             ) for c_in, c_out in zip([3] + channels[:-1], channels)
         ])
+
         self.bottleneck = torch.nn.Sequential(
             asel.affine.EquivarLayer(channels[-1], channels[-1] * 2),
             asel.affine.EquivarLayer(channels[-1] * 2, channels[-1] * 2)
         )
+
         self.conv_up = torch.nn.ModuleList([
             torch.nn.ModuleList([
                 torch.nn.Sequential(
@@ -47,15 +58,16 @@ class AffineEquivariantUNet(torch.nn.Module):
             torch.nn.ModuleList([
                 torch.nn.Sequential(
                     asel.affine.EquivarLayer(channels[0] * 2, channels[0], conv_layer=torch.nn.ConvTranspose2d),
-                    asel.affine.EquivarLayer(channels[0], channels[0], conv_layer=torch.nn.ConvTranspose2d),
-                    asel.affine.EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
+                    asel.affine.EquivarLayer(channels[0], channels[0], conv_layer=torch.nn.ConvTranspose2d)   
                 ),
                 asel.affine.EquivarLayer(channels[0] * 2, channels[0], type=["0", "0"], conv_layer=torch.nn.ConvTranspose2d, kernel_size=2, up_stride=2)
             ])
         ])
+        self.out_layer = asel.affine.EquivarLayer(channels[0] + 1, 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residuals = []
+        scale_field = self.scale_gain(self.scale_space(x))
         for conv in self.conv_down:
             x = conv(x.unsqueeze(1)).squeeze(1)
             residuals.append(x)
@@ -66,6 +78,6 @@ class AffineEquivariantUNet(torch.nn.Module):
             x = up(x.unsqueeze(1)).squeeze(1)
             res = residuals.pop()
             x = torch.cat([x, res], dim=1)
-            # x = torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
             x = conv(x.unsqueeze(1)).squeeze(1)
+        x = self.out_layer(torch.cat([x, scale_field], dim=1).unsqueeze(1)).squeeze(1)
         return x

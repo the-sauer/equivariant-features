@@ -14,8 +14,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from math import ceil
+
 import sesn
 import torch
+
 
 def NeuralScaleSpaceSESN(
     in_channels: int = 1,
@@ -23,7 +26,8 @@ def NeuralScaleSpaceSESN(
     num_scales: int = 4,
     min_scale: float = 1.0,
     effective_size: int = 5,
-    scale_size: int = 5
+    scale_size: int = 5,
+    **_
 ) -> torch.nn.Module:
     """
     Neural Scale Field based on Scale-Equivariant Steerable Networks (SESN).
@@ -44,3 +48,11 @@ def NeuralScaleSpaceSESN(
         sesn.SESConv_H_H_1x1(32, 1, num_scales=num_scales),
         sesn.SESArgMaxProjection(scales)
     )
+
+
+class ConstantScaleSpace(torch.nn.Module):
+    """
+    Identity Scale Space that simply returns the input as the scale field.
+    """
+    def forward(self, *_):
+        return 1

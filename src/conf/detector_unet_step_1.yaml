@@ -1,0 +1,20 @@
+defaults:
+  - detector_unet_dgx
+  - _self_
+
+model:
+  params:
+    scale_space:
+      name: ConstantScaleSpace
+training:
+  loss:
+    - name: DeterminantLoss
+      params:
+        goal: 1
+  epochs: 10
+validation:
+  loss:
+    - name: DeterminantLoss
+      params:
+        sigma: 1
+experiment_name: detector_unet_step_1
