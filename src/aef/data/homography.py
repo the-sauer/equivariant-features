@@ -90,6 +90,7 @@ class HomographyData(torch.utils.data.Dataset):
         if transform_params is None:
             transform_params = {}
         self.size = image_size
+        self.in_memory = in_memory
         if isinstance(images, torch.Tensor):
             self.images = images
             self.c = self.images.size(1)
@@ -104,7 +105,7 @@ class HomographyData(torch.utils.data.Dataset):
 
         self.transforms = torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
-        if in_memory:
+        if in_memory or isinstance(self.images, torch.Tensor):
             if self.images.size(1) == 1:
                 self.images_transformed = kornia.geometry.transform.warp_perspective(
                     self.images.expand(-1, 3, -1, -1),
@@ -125,8 +126,11 @@ class HomographyData(torch.utils.data.Dataset):
                 raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
 
     def __getitem__(self, index):
-        if isinstance(self.images[index], str):
-            img = self.resize(torchvision.io.decode_image(self.images[index]).unsqueeze(0).to(torch.float32) / 255)
+        if not self.in_memory:
+            files = self.images[index]
+            if isinstance(files, str):
+                files = [files]
+            img = torch.stack([self.resize(torchvision.io.decode_image(p).to(torch.float32) / 255) for p in files], dim=0)
             if img.size(1) == 1:
                 transformed = kornia.geometry.transform.warp_perspective(
                     img.expand(-1, 3, -1, -1),
@@ -138,7 +142,7 @@ class HomographyData(torch.utils.data.Dataset):
             elif img.size(1) == 3:
                 transformed = kornia.geometry.transform.warp_perspective(
                     img,
-                    self.transforms[index].unsqueeze(0),
+                    self.transforms[index].view(-1, 3, 3),
                     self.size,
                     padding_mode="fill",
                     fill_value=torch.ones((3,))

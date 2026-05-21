@@ -24,7 +24,7 @@ def homogenize(A, b=None):
     h_dim, w_dim = -2, -1
     if b is None:
         b = torch.zeros(1, 1, dtype=A.dtype, device=A.device).expand(*B, H)
-    assert b.size() == (*B, H)
+    assert b.size() == (*B, H), f"batch dimension of b {b.shape[:-1]} must match batch dimension of A {B}"
 
     return torch.cat((
         torch.cat((A, torch.zeros(*(1 for _ in B), 1, 1, dtype=A.dtype, device=A.device).expand(*B, 1, W)), dim=h_dim),
