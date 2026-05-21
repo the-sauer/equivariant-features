@@ -32,17 +32,17 @@ def homogenize(A, b=None):
     ), dim=w_dim)
 
 
-def linearize_homography(H, shape=None, coords=None):
+def linearize_homography(H, shape=None, coords=None, stride=1):
     if coords is None:
         if shape is None:
             raise ValueError("Either shape or coords must be provided")
         coords = torch.stack(
             (
                 *torch.meshgrid(
-                    torch.arange(shape[0], device=H.device),
-                    torch.arange(shape[1], device=H.device), indexing="ij"
+                    torch.arange(start=0, end=shape[0], step=stride, device=H.device),
+                    torch.arange(start=0, end=shape[1], step=stride, device=H.device), indexing="ij"
                 ),
-                torch.ones((1, 1), device=H.device).expand(shape[0], shape[1],)
+                torch.ones((1, 1), device=H.device).expand(shape[0] // stride, shape[1] // stride)
             ),
             dim=2
         )
@@ -89,36 +89,28 @@ def process_batch_homographic_detector_for_image_loss(model, data, criterion, au
         H_inv,
         dsize=feature_map.shape[-2:]
     ).reshape(feature_map.shape)
-    mask = (kornia.geometry.transform.warp_perspective(
-        torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
-        H_inv,
-        dsize=feature_map.shape[-2:]
-    ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
-    features = torch.where(mask, feature_map, 0).permute(0, 3, 4, 1, 2).reshape(feature_map.size(0), -1, 2, 2)[:,::feature_stride, :, :]
-    features_t = torch.where(mask, feature_map_t, 0).permute(0, 3, 4, 1, 2).reshape(feature_map_t.size(0), -1, 2, 2)[:,::feature_stride, :, :]
+    # mask = (kornia.geometry.transform.warp_perspective(
+    #     torch.ones(1, 1, 1, 1).to(device).expand(feature_map.shape[0], -1, *feature_map.shape[-2:]),
+    #     H_inv,
+    #     dsize=feature_map.shape[-2:]
+    # ) > 0.5).unsqueeze(1).expand(-1, feature_map.shape[1], feature_map.shape[2], -1, -1)
+    features = feature_map.permute(0, 3, 4, 1, 2)#.reshape(feature_map.size(0), -1, 2, 2)
+    features_t = feature_map_t.permute(0, 3, 4, 1, 2)#.reshape(feature_map_t.size(0), -1, 2, 2)
 
     b = torch.stack(torch.meshgrid(
         torch.arange(feature_map.size(3), device=device),
         torch.arange(feature_map.size(4), device=device), indexing="ij"
-    ), dim=-1).reshape(-1, 2)[::feature_stride].unsqueeze(0).expand(feature_map.size(0), -1, -1)
-
-    non_singular_mask = torch.linalg.det(features) > 1e-6
-    num_features = torch.sum(non_singular_mask.int(), dim=1)
-    features_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-    features_t_filtered = torch.empty(features.size(0), int(max(num_features)), 2, 2, device=device)
-    b_filtered = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
-    b_t = torch.empty(features.size(0), int(max(num_features)), 2, device=device)
+    ), dim=-1).unsqueeze(0).expand(feature_map.size(0), -1, -1, -1)
+    b_t = torch.zeros_like(b)
     for i in range(features.size(0)):
-        features_filtered[i, :num_features[i]] = features[i, non_singular_mask[i]]
-        features_t_filtered[i, :num_features[i]] = features_t[i, non_singular_mask[i]]
-        b_filtered[i, :num_features[i]] = b[i, non_singular_mask[i]]
-        transformed = (H[i].unsqueeze(0) @ torch.cat((b[i, non_singular_mask[i]], torch.ones(num_features[i], 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
-        b_t[i, :num_features[i]] = transformed[..., :2] / transformed[..., 2:3]
-    features = features_filtered
-    features_t = features_t_filtered
-    b = b_filtered
+        transformed = (H[i].unsqueeze(0) @ torch.cat((b[i], torch.ones(b.size(1), b.size(2), 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
+        b_t[i] = transformed[..., :2] / transformed[..., 2:3]
 
-    return criterion((homogenize(features, b), img), (homogenize(features_t, b_t), img_t), num_features)
+    return criterion({
+        "pred": (homogenize(features, b), img),
+        "target": (homogenize(features_t, b_t), img_t),
+        "H": H
+    })
 
 
 def process_batch_homographic_detector_for_transform_loss(model, data, criterion, augmentation, device, cfg):

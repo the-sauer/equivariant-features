@@ -19,7 +19,14 @@ training:
   loss:
     - name: img_gen
       params:
-        sigma: 4 
+        sigma: 4
+      weigth: 1
+    - name: reprojection
+      weight: 0.1
+    - name: determinant
+      params:
+        sigma: 1e-3
+      weight: 0.1
 
   optimizer:
     name: adam

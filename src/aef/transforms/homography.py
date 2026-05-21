@@ -39,7 +39,7 @@ def sample_homography(
         perspective_amplitude_x: float = 0.1,
         perspective_amplitude_y: float = 0.1,
         patch_ratio: float = 0.5,
-        max_angle: float = np.pi / 2,
+        max_angle: float | str = np.pi / 2,
         allow_artifacts: bool = False,
         translation_overflow: float = 0.0,
 ) -> torch.Tensor:
@@ -79,6 +79,12 @@ def sample_homography(
             result = np.random.normal(loc, scale, shape)
             logging.debug("Recalculated truncated normal")
         return result
+    
+    pi = np.pi
+    π = np.pi
+    
+    if isinstance(max_angle, str):
+        max_angle = eval(max_angle)
 
     # Corners of the output image
     margin = (1 - patch_ratio) / 2

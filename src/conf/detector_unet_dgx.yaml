@@ -1,0 +1,11 @@
+defaults:
+  - detector_unet
+  - dgx
+  - _self_
+
+training:
+  batch_size: 2
+validation:
+  batch_size: 16
+logging:
+  interval: 10

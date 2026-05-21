@@ -19,6 +19,7 @@ import omegaconf
 import torch
 
 from ...evaluate import fpr
+from .determinant import DeterminantLoss
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
 from .image_generation_loss import ImageGenerationLoss
@@ -37,7 +38,8 @@ _LOSSES = {
     "reprojection": HomographyReprojectionLoss,
     "img_gen": ImageGenerationLoss,
     "fpr": fpr,
-    "epipolar": EpipolarLoss
+    "epipolar": EpipolarLoss,
+    "determinant": DeterminantLoss,
 }
 
 

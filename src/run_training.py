@@ -27,6 +27,7 @@ from aef.configuration import Config
 from aef.data import get_dataset
 from aef.train import train_func
 from aef.models import *
+from aef.train import *
 
 
 def experiment_name_from_cfg(cfg: Config) -> str:
