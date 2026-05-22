@@ -27,9 +27,6 @@ training:
       params:
         sigma: 1e-3
       weight: 0.1
-
-  optimizer:
-    name: adam
 validation:
   dataset:
     name: KaggleHomographyData

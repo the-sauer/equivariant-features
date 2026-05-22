@@ -15,35 +15,29 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
-from math import ceil
 
 import kornia
+import pytorch_metric_learning
 import torch
-import torchvision
 
 
-class ImageGenerationLoss(torch.nn.Module):
+class ContrastiveLoss(torch.nn.Module):
     def __init__(
         self,
-        distance_metric: str = "mse",
+        contrastive_loss: str = "NPairsLoss",
+        contrastive_loss_kwargs: dict = None,
         patch_size: tuple[int, int] = (64, 64),
-        sigma: float = 1,
         **_
     ):
         super().__init__()
-        if distance_metric == "mse":
-            self.image_distance_metric = torch.nn.functional.mse_loss
-        else:
-            raise ValueError(f"Unsupported image distance metric: {distance_metric}")
+        try:
+            self.contrastive_loss = getattr(pytorch_metric_learning.losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
+        except AttributeError as e:
+            raise ValueError(f"Unsupported distance metric: {contrastive_loss}" + e.msg)
         self.patch_size = patch_size
         self.patch_scale = torch.diag(
             torch.Tensor([patch_size[0], patch_size[1], 1]).to(torch.float32)
         ).unsqueeze(0)
-        kernel_size = ceil(sigma * 4)
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        self.kernel_size = kernel_size
-        self.sigma = sigma
 
     def forward(
         self,
@@ -51,6 +45,7 @@ class ImageGenerationLoss(torch.nn.Module):
     ) -> torch.Tensor:
         pred = x["pred"]
         target = x["target"]
+        descriptor_model = x["descriptor_model"]
 
         patch_scale = self.patch_scale.to(pred[0].device)
         # assert pred[0].dim() == 4
@@ -62,28 +57,27 @@ class ImageGenerationLoss(torch.nn.Module):
             # We will try to increase the determinants first
             return 1e9
         pred_transform, pred_image = pred
-        pred_transform = pred_transform[:,::4,::4].reshape(pred_transform.size(0), -1, 3, 3)
+        pred_transform = pred_transform[:, ::8, ::8].reshape(pred_transform.size(0), -1, 3, 3)
         target_transform, target_image = target
-        target_transform = target_transform[:,::4,::4].reshape(target_transform.size(0), -1, 3, 3)
+        target_transform = target_transform[:, ::8, ::8].reshape(target_transform.size(0), -1, 3, 3)
         pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6)  & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
         pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-            torchvision.transforms.functional.gaussian_blur(
-                pred_image[i].unsqueeze(0),
-                kernel_size=self.kernel_size,
-                sigma=self.sigma
-            ).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
+            pred_image[i].unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
             patch_scale @ torch.linalg.inv(pred_transform[i][pred_transform_masks[i]]),
             dsize=self.patch_size
         ) for i in range(pred[0].size(0))])
         target_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-            torchvision.transforms.functional.gaussian_blur(
-                target_image[i].unsqueeze(0),
-                kernel_size=self.kernel_size,
-                sigma=self.sigma
-            ).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
+            target_image[i].unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
             patch_scale @ torch.linalg.inv(target_transform[i][pred_transform_masks[i]]),
             dsize=self.patch_size
         ) for i in range(target[0].size(0))])
 
-        image_loss = self.image_distance_metric(pred_patch, target_patch)
-        return image_loss
+        features_pred = descriptor_model(pred_patch)
+        features_target = descriptor_model(target_patch)
+        features = torch.cat([features_pred, features_target], dim=0)
+
+        loss = self.contrastive_loss(
+            features,
+            torch.cat([torch.arange(features_pred.size(0)), torch.arange(features_target.size(0))], dim=0).to(features.device)
+        )
+        return loss

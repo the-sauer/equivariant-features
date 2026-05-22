@@ -2,22 +2,19 @@ default:
   - detector_unet_dgx
   - _self_
 
-model:
-  params:
-    scale_space:
-      name: NeuralScaleSpaceSESN
-      params:
-        factor: 6.5
-        num_scales: 4
-        min_scale: 2.0
-        effective_size: 5
 training:
   loss:
     - name: img_gen
+      weight: 0.5
     - name: reprojection
-    - name: DeterminantLoss
-      params:
-        goal: 1
+      weight: 0.5
+    - name: ContrastiveLoss
+    - name: NonSingularLoss
   epochs: 60
   continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
+  optimizer:
+    name: adamw
+    params:
+      lr: 1e-4
+      weight_decay: 1e-4
 experiment_name: detector_unet_step_2

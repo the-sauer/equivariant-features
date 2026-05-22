@@ -12,6 +12,7 @@ training:
       params:
         goal: 1
   epochs: 10
+  optimizer: adam
 validation:
   loss:
     - name: DeterminantLoss

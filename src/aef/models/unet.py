@@ -18,7 +18,9 @@ import asel
 import torch
 import torchvision
 
+
 from . import scale
+from .hardnet import HardNet
 from ..configuration import ComponentConfig
 
 
@@ -63,11 +65,12 @@ class AffineEquivariantUNet(torch.nn.Module):
                 asel.affine.EquivarLayer(channels[0] * 2, channels[0], type=["0", "0"], conv_layer=torch.nn.ConvTranspose2d, kernel_size=2, up_stride=2)
             ])
         ])
-        self.out_layer = asel.affine.EquivarLayer(channels[0] + 1, 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
+        self.out_layer = asel.affine.EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
+        self.descriptor_model = HardNet()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residuals = []
-        scale_field = self.scale_gain(self.scale_space(x))
+        # scale_field = self.scale_gain(self.scale_space(x))
         for conv in self.conv_down:
             x = conv(x.unsqueeze(1)).squeeze(1)
             residuals.append(x)
@@ -79,5 +82,5 @@ class AffineEquivariantUNet(torch.nn.Module):
             res = residuals.pop()
             x = torch.cat([x, res], dim=1)
             x = conv(x.unsqueeze(1)).squeeze(1)
-        x = self.out_layer(torch.cat([x, scale_field], dim=1).unsqueeze(1)).squeeze(1)
+        x = self.out_layer(torch.cat(x, dim=1).unsqueeze(1)).squeeze(1)
         return x

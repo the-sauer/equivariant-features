@@ -107,7 +107,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
     if hasattr(cfg.training, "continue_from_checkpoint"):
         checkpoint = torch.load(cfg.training.continue_from_checkpoint, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         for n, o in optimizer.items():
             if n in checkpoint["optimizer_state_dict"]:
                 o.load_state_dict(checkpoint["optimizer_state_dict"][n])
