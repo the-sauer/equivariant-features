@@ -109,7 +109,7 @@ def process_batch_homographic_detector_for_image_loss(model, data, criterion, au
     return criterion({
         "pred": (homogenize(features, b), img),
         "target": (homogenize(features_t, b_t), img_t),
-        "H": H
+        "H": H,
         "descriptor_model": model.descriptor_model
     })
 

@@ -54,5 +54,10 @@ class ConstantScaleSpace(torch.nn.Module):
     """
     Identity Scale Space that simply returns the input as the scale field.
     """
-    def forward(self, *_):
-        return 1
+    def __init__(self, **_):
+        super().__init__()
+
+    def forward(self, x):
+        size = list(x.size())
+        size[1] = 1
+        return torch.ones(size, dtype=torch.float32, device=x.device)

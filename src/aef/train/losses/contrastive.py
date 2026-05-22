@@ -19,6 +19,9 @@ import logging
 import kornia
 import pytorch_metric_learning
 import torch
+import torchvision
+
+from ...evaluate import fpr
 
 
 class ContrastiveLoss(torch.nn.Module):
@@ -26,14 +29,17 @@ class ContrastiveLoss(torch.nn.Module):
         self,
         contrastive_loss: str = "NPairsLoss",
         contrastive_loss_kwargs: dict = None,
-        patch_size: tuple[int, int] = (64, 64),
+        patch_size: tuple[int, int] = (32, 32),
         **_
     ):
         super().__init__()
-        try:
-            self.contrastive_loss = getattr(pytorch_metric_learning.losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
-        except AttributeError as e:
-            raise ValueError(f"Unsupported distance metric: {contrastive_loss}" + e.msg)
+        if contrastive_loss == "fpr":
+            self.contrastive_loss = fpr()
+        else:
+            try:
+                self.contrastive_loss = getattr(pytorch_metric_learning.losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
+            except AttributeError:
+                raise ValueError(f"Unsupported distance metric: {contrastive_loss}")
         self.patch_size = patch_size
         self.patch_scale = torch.diag(
             torch.Tensor([patch_size[0], patch_size[1], 1]).to(torch.float32)
@@ -57,23 +63,23 @@ class ContrastiveLoss(torch.nn.Module):
             # We will try to increase the determinants first
             return 1e9
         pred_transform, pred_image = pred
-        pred_transform = pred_transform[:, ::8, ::8].reshape(pred_transform.size(0), -1, 3, 3)
+        pred_transform = pred_transform[:, ::16, ::16].reshape(pred_transform.size(0), -1, 3, 3)
         target_transform, target_image = target
-        target_transform = target_transform[:, ::8, ::8].reshape(target_transform.size(0), -1, 3, 3)
+        target_transform = target_transform[:, ::16, ::16].reshape(target_transform.size(0), -1, 3, 3)
         pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6)  & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
         pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-            pred_image[i].unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
+            torchvision.transforms.functional.rgb_to_grayscale(pred_image[i]).unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
             patch_scale @ torch.linalg.inv(pred_transform[i][pred_transform_masks[i]]),
             dsize=self.patch_size
         ) for i in range(pred[0].size(0))])
         target_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-            target_image[i].unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
+            torchvision.transforms.functional.rgb_to_grayscale(target_image[i]).unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
             patch_scale @ torch.linalg.inv(target_transform[i][pred_transform_masks[i]]),
             dsize=self.patch_size
         ) for i in range(target[0].size(0))])
 
-        features_pred = descriptor_model(pred_patch)
-        features_target = descriptor_model(target_patch)
+        features_pred = descriptor_model(pred_patch)[0]
+        features_target = descriptor_model(target_patch)[0]
         features = torch.cat([features_pred, features_target], dim=0)
 
         loss = self.contrastive_loss(

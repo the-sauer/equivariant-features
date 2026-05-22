@@ -16,24 +16,9 @@ training:
         perspective_amplitude_x: 0.05
         perspective_amplitude_y: 0.05
         max_angle: "π / 8"
-  loss:
-    - name: img_gen
-      params:
-        sigma: 4
-      weigth: 1
-    - name: reprojection
-      weight: 0.1
-    - name: determinant
-      params:
-        sigma: 1e-3
-      weight: 0.1
 validation:
   dataset:
     name: KaggleHomographyData
     params:
       name: image-matching-challenge-2025
       image_size: [512, 512]
-  loss:
-    - name: img_gen
-      params:
-        sigma: 4

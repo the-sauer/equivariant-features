@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asel
+import omegaconf
 import torch
 import torchvision
 
@@ -30,9 +31,9 @@ class AffineEquivariantUNet(torch.nn.Module):
         if channels is None:
             channels = [10, 20, 40, 80]
         if scale_space is None:
-            scale_space = ComponentConfig(name="ConstantScaleSpace", params={})
+            scale_space = omegaconf.DictConfig({"name": "ConstantScaleSpace", "params": {}})
 
-        self.scale_space = getattr(scale, (getattr(scale_space, "name")))(**getattr(scale_space, "params"))
+        self.scale_space = getattr(scale, scale_space["name"])(**scale_space["params"])
         self.scale_gain = torch.nn.Conv2d(1, 1, kernel_size=1, bias=True)  # Learnable gain for the scale space output
 
         self.conv_down = torch.nn.ModuleList([
@@ -82,5 +83,5 @@ class AffineEquivariantUNet(torch.nn.Module):
             res = residuals.pop()
             x = torch.cat([x, res], dim=1)
             x = conv(x.unsqueeze(1)).squeeze(1)
-        x = self.out_layer(torch.cat(x, dim=1).unsqueeze(1)).squeeze(1)
+        x = self.out_layer(x.unsqueeze(1)).squeeze(1)
         return x

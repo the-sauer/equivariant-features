@@ -6,16 +6,18 @@ model:
   params:
     scale_space:
       name: ConstantScaleSpace
+      params: {}
 training:
+  optimizer:
+    name: adamw
+    params:
+      lr: 1e-4
+      weight_decay: 1e-4
   loss:
-    - name: DeterminantLoss
-      params:
-        goal: 1
-  epochs: 10
-  optimizer: adam
+    - name: determinant
+  num_epochs: 10
 validation:
   loss:
-    - name: DeterminantLoss
-      params:
-        sigma: 1
+    - name: determinant
+
 experiment_name: detector_unet_step_1

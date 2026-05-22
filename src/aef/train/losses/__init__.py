@@ -18,13 +18,14 @@ import pytorch_metric_learning.losses as pml_losses
 import omegaconf
 import torch
 
-from ...evaluate import fpr
-from .determinant import DeterminantLoss
+from .contrastive import ContrastiveLoss
+from .determinant import DeterminantLoss, NonSingularLoss
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
 from .image_generation_loss import ImageGenerationLoss
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import HomographyReprojectionLoss
+from ...evaluate import fpr
 
 
 _LOSSES = {
@@ -39,7 +40,9 @@ _LOSSES = {
     "img_gen": ImageGenerationLoss,
     "fpr": fpr,
     "epipolar": EpipolarLoss,
+    "non_singular": NonSingularLoss,
     "determinant": DeterminantLoss,
+    "ContrastiveLoss": ContrastiveLoss
 }
 
 

@@ -1,4 +1,4 @@
-default:
+defaults:
   - detector_unet_dgx
   - _self_
 
@@ -9,7 +9,7 @@ training:
     - name: reprojection
       weight: 0.5
     - name: ContrastiveLoss
-    - name: NonSingularLoss
+    - name: non_singular
   epochs: 60
   continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
   optimizer:
@@ -17,4 +17,9 @@ training:
     params:
       lr: 1e-4
       weight_decay: 1e-4
+validation:
+  loss:
+    - name: ContrastiveLoss
+      params:
+        contrastive_loss: fpr
 experiment_name: detector_unet_step_2

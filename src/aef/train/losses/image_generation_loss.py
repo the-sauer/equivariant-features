@@ -26,7 +26,7 @@ class ImageGenerationLoss(torch.nn.Module):
     def __init__(
         self,
         distance_metric: str = "mse",
-        patch_size: tuple[int, int] = (64, 64),
+        patch_size: tuple[int, int] = (32, 32),
         sigma: float = 1,
         **_
     ):
@@ -62,9 +62,9 @@ class ImageGenerationLoss(torch.nn.Module):
             # We will try to increase the determinants first
             return 1e9
         pred_transform, pred_image = pred
-        pred_transform = pred_transform[:,::4,::4].reshape(pred_transform.size(0), -1, 3, 3)
+        pred_transform = pred_transform[:,::16,::16].reshape(pred_transform.size(0), -1, 3, 3)
         target_transform, target_image = target
-        target_transform = target_transform[:,::4,::4].reshape(target_transform.size(0), -1, 3, 3)
+        target_transform = target_transform[:,::16,::16].reshape(target_transform.size(0), -1, 3, 3)
         pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6)  & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
         pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
             torchvision.transforms.functional.gaussian_blur(

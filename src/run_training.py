@@ -59,7 +59,7 @@ def main(cfg: Config):
     dotenv.load_dotenv()
 
     experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
-    print(f"Running experiment {experiment_name}")
+    print(f"Running experiment \033[1m{experiment_name}\033[0m")
     train(cfg)
 
 

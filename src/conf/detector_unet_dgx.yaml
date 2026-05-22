@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 training:
-  batch_size: 2
+  batch_size: 16
 validation:
   batch_size: 16
 logging:

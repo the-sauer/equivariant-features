@@ -110,10 +110,16 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         for n, o in optimizer.items():
             if n in checkpoint["optimizer_state_dict"]:
-                o.load_state_dict(checkpoint["optimizer_state_dict"][n])
+                try:
+                    o.load_state_dict(checkpoint["optimizer_state_dict"][n])
+                except ValueError as e:
+                    logging.error(f"Error loading optimizer state dict for {n}: {e}")
         for n, s in scheduler.items():
             if n in checkpoint["scheduler_state_dict"]:
-                s.load_state_dict(checkpoint["scheduler_state_dict"][n])
+                try:
+                    s.load_state_dict(checkpoint["scheduler_state_dict"][n])
+                except ValueError as e:
+                    logging.error(f"Error loading scheduler state dict for {n}: {e}")
 
         start_epoch = checkpoint["epoch"] + 1
         best_loss = checkpoint["best_loss"]
