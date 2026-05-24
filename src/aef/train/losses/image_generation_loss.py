@@ -22,7 +22,7 @@ import torch
 import torchvision
 
 
-class ImageGenerationLoss(torch.nn.Module):
+class ImageGeneration(torch.nn.Module):
     def __init__(
         self,
         distance_metric: str = "mse",

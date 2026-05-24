@@ -24,7 +24,7 @@ import torch
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from .losses import Loss
+from . import losses
 
 from .descriptor import *
 from .detector import *
@@ -138,8 +138,13 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         shuffle=True
     )
 
-    criterion = Loss(cfg.training.loss)
-    validation_criterion = Loss(cfg.validation.loss)
+    criterion = {
+        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.training.loss
+    }
+
+    validation_criterion = {
+        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.validation.loss
+    }
 
     if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
         # TODO: Check for all innner augmentations
@@ -183,9 +188,10 @@ def train_func(process_batch: ProcessBatchType):
                 for opt in optimizer.values():
                     opt.zero_grad()
 
-                loss = process_batch(model, data, criterion, augmentation, device, cfg)
+                losses = process_batch(model, data, criterion, augmentation, device, cfg)
+                loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
+                loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
                 cumulative_loss += loss.item()
-                loop.set_postfix(loss=loss.item())
                 loss.backward()
                 for opt in optimizer.values():
                     opt.step()
@@ -199,13 +205,16 @@ def train_func(process_batch: ProcessBatchType):
             with torch.no_grad():
                 model.eval()
                 cumulative_loss = 0.0
+                cumulative_losses = {n: 0.0 for n in validation_criterion.keys()}
                 for data in loop:
-                    loss = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
-
+                    losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
+                    loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
+                    for n, (l, _, r) in losses.items():
+                        cumulative_losses[n] += l.item() * data[0].size(0)
                     cumulative_loss += loss.item() * data[0].size(0)
-                    loop.set_postfix(loss=loss.item())
+                    loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
 
-                logging.info("finished epoch [%d/%d], avg loss: %f", epoch, cfg.training.num_epochs, cumulative_loss / len(validation_dataset))
+                logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))
 
                 if checkpoint_dir is not None:
                     average_loss = cumulative_loss / len(validation_dataset)

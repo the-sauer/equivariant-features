@@ -6,7 +6,7 @@ import torch
 from aef.evaluate import fpr, fpr_from_distances
 from aef.train.losses.geodesic_loss import GeodesicLoss
 from aef.train.losses.rel_scale_loss import RELScaleLoss
-from aef.train.losses.reprojection_loss import HomographyReprojectionLoss
+from aef.train.losses.reprojection_loss import Reprojection
 from aef.train.detector import homogenize, linearize_homography
 from aef.train.scale import compute_scale
 from aef.transforms.affine import random_affine

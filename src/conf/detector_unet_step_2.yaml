@@ -3,15 +3,17 @@ defaults:
   - _self_
 
 training:
+  num_epochs: 120
   loss:
-    - name: img_gen
+    - name: ImageGeneration
       weight: 0.5
-    - name: reprojection
-      weight: 0.5
-    - name: ContrastiveLoss
-    - name: non_singular
+    - name: Reprojection
+      weight: 0.02
+    - name: Contrastive
+    - name: NonSingular
+      report: false
   epochs: 60
-  continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
+  continue_from_checkpoint: /data/logs/detector_unet_step_2_second_run/checkpoints/epoch_059.pth
   optimizer:
     name: adamw
     params:
@@ -19,7 +21,7 @@ training:
       weight_decay: 1e-4
 validation:
   loss:
-    - name: ContrastiveLoss
+    - name: Contrastive
       params:
         contrastive_loss: fpr
 experiment_name: detector_unet_step_2

@@ -21,7 +21,7 @@ import torch
 from ..detector import homogenize, linearize_homography
 
 
-class HomographyReprojectionLoss(torch.nn.Module):
+class Reprojection(torch.nn.Module):
     def __init__(self, reduction="mean", distance_metric="euclidean", stride=4):
         super().__init__()
         self.reduction = reduction

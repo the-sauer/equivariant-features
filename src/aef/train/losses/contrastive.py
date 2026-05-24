@@ -24,7 +24,7 @@ import torchvision
 from ...evaluate import fpr
 
 
-class ContrastiveLoss(torch.nn.Module):
+class Contrastive(torch.nn.Module):
     def __init__(
         self,
         contrastive_loss: str = "NPairsLoss",

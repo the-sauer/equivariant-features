@@ -17,7 +17,7 @@
 import torch
 
 
-class NonSingularLoss(torch.nn.Module):
+class NonSingular(torch.nn.Module):
     def __init__(self, sigma=1e-4):
         super().__init__()
         self.sigma = sigma

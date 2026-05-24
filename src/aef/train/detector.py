@@ -106,12 +106,14 @@ def process_batch_homographic_detector_for_image_loss(model, data, criterion, au
         transformed = (H[i].unsqueeze(0) @ torch.cat((b[i], torch.ones(b.size(1), b.size(2), 1, device=device)), dim=-1).unsqueeze(-1)).squeeze(-1)
         b_t[i] = transformed[..., :2] / transformed[..., 2:3]
 
-    return criterion({
-        "pred": (homogenize(features, b), img),
-        "target": (homogenize(features_t, b_t), img_t),
-        "H": H,
-        "descriptor_model": model.descriptor_model
-    })
+    return {
+        n: (criterion({
+            "pred": (homogenize(features, b), img),
+            "target": (homogenize(features_t, b_t), img_t),
+            "H": H,
+            "descriptor_model": model.descriptor_model
+        }), weight, report) for n, (criterion, weight, report) in criterion.items()
+    }
 
 
 def process_batch_homographic_detector_for_transform_loss(model, data, criterion, augmentation, device, cfg):

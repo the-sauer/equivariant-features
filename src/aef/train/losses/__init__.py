@@ -18,48 +18,11 @@ import pytorch_metric_learning.losses as pml_losses
 import omegaconf
 import torch
 
-from .contrastive import ContrastiveLoss
-from .determinant import DeterminantLoss, NonSingularLoss
+from .contrastive import Contrastive
+from .determinant import DeterminantLoss, NonSingular
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
-from .image_generation_loss import ImageGenerationLoss
+from .image_generation_loss import ImageGeneration
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
-from .reprojection_loss import HomographyReprojectionLoss
+from .reprojection_loss import Reprojection
 from ...evaluate import fpr
-
-
-_LOSSES = {
-    "triplet_margin": pml_losses.TripletMarginLoss,
-    "npairs": pml_losses.NPairsLoss,
-    "supcon": pml_losses.SupConLoss,
-    "mse": torch.nn.MSELoss,
-    "rel": RELScaleLoss,
-    "rel_squared": RELScaleLossSquared,
-    "geodesic": GeodesicLoss,
-    "reprojection": HomographyReprojectionLoss,
-    "img_gen": ImageGenerationLoss,
-    "fpr": fpr,
-    "epipolar": EpipolarLoss,
-    "non_singular": NonSingularLoss,
-    "determinant": DeterminantLoss,
-    "ContrastiveLoss": ContrastiveLoss
-}
-
-
-class Loss(torch.nn.Module):
-    def __init__(self, *args, **kwargs):
-        super(Loss, self).__init__()
-        if len(args) == 1 and isinstance(args[0], str):
-            [arg] = args
-            self.losses = [(1, _LOSSES[arg](**kwargs.get("params", {})))]
-        elif isinstance(args[0], dict | omegaconf.ListConfig):
-            self.losses = [
-                (loss_cfg.get("weight", 1), _LOSSES[loss_cfg["name"]](**loss_cfg.get("params", {})))
-                for loss_cfg in args[0]
-            ]
-        elif isinstance(args[0], dict | omegaconf.DictConfig):
-            [loss_cfg] = args
-            self.losses = [loss_cfg.get("weight", 1), _LOSSES[loss_cfg["name"]](**loss_cfg.get("params", {}))]
-
-    def forward(self, *args):
-        return sum(w * loss(*args) for w, loss in self.losses)
