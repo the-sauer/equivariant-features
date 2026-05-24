@@ -37,8 +37,8 @@ class Reprojection(torch.nn.Module):
         if isinstance(target, tuple):
             target = target[0]
         gt = homogenize(linearize_homography(H, pred.shape[1:-2], stride=self.stride).unsqueeze(1).reshape(-1, 2, 2))
-        pred = pred[:, ::self.stride, ::self.stride].reshape(-1, 3, 3)
-        target = target[:, ::self.stride, ::self.stride].reshape(-1, 3, 3)
+        pred = homogenize(pred[:, ::self.stride, ::self.stride, :2, :2].reshape(-1, 2, 2))
+        target = homogenize(target[:, ::self.stride, ::self.stride, :2, :2].reshape(-1, 2, 2))
 
         non_singular_mask = torch.linalg.det(pred) > 1e-6
         if non_singular_mask.int().sum() < 0.01 * pred.size(0):

@@ -85,7 +85,7 @@ def test_geodesic_loss_matches_right_angle_rotation():
 @pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
 def test_homography_reprojection_loss_identity_is_zero(reduction):
     identity = torch.eye(3, dtype=torch.float32).reshape(1, 1, 1, 3, 3)
-    loss = HomographyReprojectionLoss(reduction=reduction, stride=1)({
+    loss = Reprojection(reduction=reduction, stride=1)({
         "pred": identity,
         "target": identity,
         "H": identity,
@@ -102,7 +102,7 @@ def test_homography_reprojection_loss_rejects_unknown_metric():
     identity = torch.eye(3, dtype=torch.float32).reshape(1, 1, 1, 3, 3)
 
     with pytest.raises(ValueError, match="Unsupported distance metric"):
-        HomographyReprojectionLoss(distance_metric="cosine", stride=1)({
+        Reprojection(distance_metric="cosine", stride=1)({
             "pred": identity,
             "target": identity,
             "H": identity,
