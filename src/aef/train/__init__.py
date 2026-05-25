@@ -19,6 +19,7 @@ import logging
 import os
 from typing import Callable
 
+from matplotlib import pyplot as plt
 import omegaconf
 import torch
 from torchvision.transforms import v2
@@ -179,11 +180,16 @@ def train_func(process_batch: ProcessBatchType):
             best_loss
         ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
 
+        x = []
+        y_train = {n: [] for n in criterion.keys() if criterion[n][2]}
+        y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
+
         for epoch in range(start_epoch, cfg.training.num_epochs):
             loop = tqdm(train_loader, leave=True)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             model.train()
             cumulative_loss = 0.0
+            cumulative_losses = {n: 0.0 for n in criterion.keys() if criterion[n][2]}
             for i, data in enumerate(loop):
                 for opt in optimizer.values():
                     opt.zero_grad()
@@ -191,13 +197,28 @@ def train_func(process_batch: ProcessBatchType):
                 losses = process_batch(model, data, criterion, augmentation, device, cfg)
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
+                cumulative_losses = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item()
                 loss.backward()
                 for opt in optimizer.values():
                     opt.step()
-                if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0:
+                if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
                     average_loss = cumulative_loss / (i + 1)
                     logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), average_loss)
+            avg_losses = {n: v / len(train_dataset) for n, v in cumulative_losses.items()}
+            logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
+            x += [epoch]
+            for n, v in y_train.items():
+                v += [avg_losses[n]]
+            _, ax = plt.subplots()
+            for n, v in y_train.items():
+                ax.plot(x, v, label=n)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Average Training Loss")
+            ax.set_xlim(0, cfg.training.num_epochs)
+            ax.legend()
+            plt.savefig(os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_train_losses.png"))
+            plt.close()
 
             loop = tqdm(validation_loader, leave=True)
             loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
@@ -205,16 +226,26 @@ def train_func(process_batch: ProcessBatchType):
             with torch.no_grad():
                 model.eval()
                 cumulative_loss = 0.0
-                cumulative_losses = {n: 0.0 for n in validation_criterion.keys()}
+                cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
                 for data in loop:
                     losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
                     loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
-                    for n, (l, _, r) in losses.items():
-                        cumulative_losses[n] += l.item() * data[0].size(0)
+
+                    cumulative_losses[n] = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
                     cumulative_loss += loss.item() * data[0].size(0)
                     loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-
+                y_val = {n: v / len(validation_dataset) for n, v in cumulative_losses.items()}
                 logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))
+
+                _, ax = plt.subplots()
+                for n, v in y_val.items():
+                    ax.plot(x, v, label=n)
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("Average Validation Loss")
+                ax.set_xlim(0, cfg.training.num_epochs)
+                ax.legend()
+                plt.savefig(os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_validation_losses.png"))
+                plt.close()
 
                 if checkpoint_dir is not None:
                     average_loss = cumulative_loss / len(validation_dataset)
