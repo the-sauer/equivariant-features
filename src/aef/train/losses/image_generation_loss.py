@@ -58,14 +58,14 @@ class ImageGeneration(torch.nn.Module):
         # assert target[0].dim() == 4
         assert target[1].dim() == 4
         if (torch.linalg.det(pred[0]) > 1e-6).int().sum() < 0.01 * pred[0].size(0) * pred[0].size(1) or torch.any(torch.sum((torch.linalg.det(pred[0]) > 1e-6).int(), dim=1) == 0):
-            logging.warning("Warning: More than 99%% of predicted transforms are degenerate.")
+            logging.warning("More than 99%% of predicted transforms are degenerate.")
             # We will try to increase the determinants first
-            return 1e9
+            return torch.Tensor([1e9]).to(pred[0].device)
         pred_transform, pred_image = pred
-        pred_transform = pred_transform[:,::16,::16].reshape(pred_transform.size(0), -1, 3, 3)
+        pred_transform = pred_transform[:, ::16, ::16].reshape(pred_transform.size(0), -1, 3, 3)
         target_transform, target_image = target
-        target_transform = target_transform[:,::16,::16].reshape(target_transform.size(0), -1, 3, 3)
-        pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6)  & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
+        target_transform = target_transform[:, ::16, ::16].reshape(target_transform.size(0), -1, 3, 3)
+        pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6) & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
         pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
             torchvision.transforms.functional.gaussian_blur(
                 pred_image[i].unsqueeze(0),

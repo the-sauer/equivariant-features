@@ -42,8 +42,8 @@ class Reprojection(torch.nn.Module):
 
         non_singular_mask = torch.linalg.det(pred) > 1e-6
         if non_singular_mask.int().sum() < 0.01 * pred.size(0):
-            logging.warning("Warning: More than 99%% of predicted transforms are degenerate.")
-            return 1e9
+            logging.warning("More than 99%% of predicted transforms are degenerate.")
+            return torch.Tensor([1e9]).to(pred.device)
 
         rel_t = target[non_singular_mask] @ torch.linalg.inv(pred[non_singular_mask])   # use linalg.solve
 

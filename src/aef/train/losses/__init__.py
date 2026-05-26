@@ -19,7 +19,7 @@ import omegaconf
 import torch
 
 from .contrastive import Contrastive
-from .determinant import DeterminantLoss, NonSingular
+from .determinant import Determinant, NonSingular
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
 from .image_generation_loss import ImageGeneration

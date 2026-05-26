@@ -25,15 +25,15 @@ class NonSingular(torch.nn.Module):
     def forward(self, x):
         pred = x["pred"]
         ε = 1e-6
-        return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε))
+        return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε)).reshape(1)
 
 
-class DeterminantLoss(torch.nn.Module):
+class Determinant(torch.nn.Module):
     def forward(self, x):
         pred = x["pred"][0]
         if "scale" in x:
             scale = x["scale"][0]
             scale = scale.view(-1, 1, 1)
         else:
-            scale = 1.0
+            scale = 8.0
         return torch.mean((torch.linalg.det(pred) - scale) ** 2)

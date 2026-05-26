@@ -59,9 +59,9 @@ class Contrastive(torch.nn.Module):
         # assert target[0].dim() == 4
         assert target[1].dim() == 4
         if (torch.linalg.det(pred[0]) > 1e-6).int().sum() < 0.01 * pred[0].size(0) * pred[0].size(1) or torch.any(torch.sum((torch.linalg.det(pred[0]) > 1e-6).int(), dim=1) == 0):
-            logging.warning("Warning: More than 99%% of predicted transforms are degenerate.")
+            logging.warning("More than 99%% of predicted transforms are degenerate.")
             # We will try to increase the determinants first
-            return 1e9
+            return torch.Tensor([1e9]).to(pred[0].device)
         pred_transform, pred_image = pred
         pred_transform = pred_transform[:, ::16, ::16].reshape(pred_transform.size(0), -1, 3, 3)
         target_transform, target_image = target

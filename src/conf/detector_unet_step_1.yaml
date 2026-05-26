@@ -14,10 +14,10 @@ training:
       lr: 1e-4
       weight_decay: 1e-4
   loss:
-    - name: determinant
+    - name: Determinant
   num_epochs: 10
 validation:
   loss:
-    - name: determinant
+    - name: Determinant
 
 experiment_name: detector_unet_step_1

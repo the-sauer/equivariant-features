@@ -196,7 +196,7 @@ def train_func(process_batch: ProcessBatchType):
 
                 losses = process_batch(model, data, criterion, augmentation, device, cfg)
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-                loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
+                loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                 cumulative_losses = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item()
                 loss.backward()
@@ -217,7 +217,7 @@ def train_func(process_batch: ProcessBatchType):
             ax.set_ylabel("Average Training Loss")
             ax.set_xlim(0, cfg.training.num_epochs)
             ax.legend()
-            plt.savefig(os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_train_losses.png"))
+            plt.savefig(os.path.join(checkpoint_dir, "..", f"train_losses.svg"))
             plt.close()
 
             loop = tqdm(validation_loader, leave=True)
@@ -229,12 +229,12 @@ def train_func(process_batch: ProcessBatchType):
                 cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
                 for data in loop:
                     losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
-                    loss = torch.sum(torch.stack([l * w for (l, w, _) in losses.values()]))
+                    loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
 
-                    cumulative_losses[n] = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
+                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
                     cumulative_loss += loss.item() * data[0].size(0)
                     loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-                y_val = {n: v / len(validation_dataset) for n, v in cumulative_losses.items()}
+                y_val = {n: y_val[n] + [v / len(validation_dataset)] for n, v in cumulative_losses.items()}
                 logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))
 
                 _, ax = plt.subplots()
@@ -244,7 +244,7 @@ def train_func(process_batch: ProcessBatchType):
                 ax.set_ylabel("Average Validation Loss")
                 ax.set_xlim(0, cfg.training.num_epochs)
                 ax.legend()
-                plt.savefig(os.path.join(checkpoint_dir, f"epoch_{epoch:03d}_validation_losses.png"))
+                plt.savefig(os.path.join(checkpoint_dir, "..", f"validation_losses.svg"))
                 plt.close()
 
                 if checkpoint_dir is not None:
