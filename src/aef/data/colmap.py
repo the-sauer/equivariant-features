@@ -127,8 +127,8 @@ class ColmapData(torch.utils.data.Dataset):
             pts1.append(img1_obj.points2D[idx1].xy)
             pts2.append(img2_obj.points2D[idx2].xy)
 
-        pts1 = torch.tensor(pts1, dtype=torch.float32)
-        pts2 = torch.tensor(pts2, dtype=torch.float32)
+        pts1 = torch.tensor(np.array(pts1), dtype=torch.float32)
+        pts2 = torch.tensor(np.array(pts2), dtype=torch.float32)
 
         # Scale and normalize point coordinates
         pts1[:, 0] = (pts1[:, 0] * scale_w1) / new_w
