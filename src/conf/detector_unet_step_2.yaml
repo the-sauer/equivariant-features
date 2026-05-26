@@ -3,15 +3,15 @@ defaults:
   - _self_
 
 training:
+  dataset:
+    name: ColmapData
+    params:
+      images: /data/datasets/south-building
+      image_size: [512, 512]
   num_epochs: 120
   loss:
-    - name: ImageGeneration
-      weight: 0.5
-    - name: Reprojection
-      weight: 0.02
     - name: Contrastive
-    - name: NonSingular
-      report: false
+  process_batch: process_batch_colmap_detector
   epochs: 60
   continue_from_checkpoint: /data/logs/detector_unet_step_2_second_run/checkpoints/epoch_059.pth
   optimizer:
@@ -24,4 +24,9 @@ validation:
     - name: Contrastive
       params:
         contrastive_loss: fpr
+  dataset:
+    name: ColmapData
+    params:
+      images: /data/datasets/south-building
+      image_size: [512, 512]
 experiment_name: detector_unet_step_2

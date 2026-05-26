@@ -197,7 +197,7 @@ def train_func(process_batch: ProcessBatchType):
                 losses = process_batch(model, data, criterion, augmentation, device, cfg)
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-                cumulative_losses = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
+                cumulative_losses = {n: cumulative_losses[n] + l.item() * data["image1"].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item()
                 loss.backward()
                 for opt in optimizer.values():
@@ -231,7 +231,7 @@ def train_func(process_batch: ProcessBatchType):
                     losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
                     loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
 
-                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data[0].size(0) for n, (l, _, r) in losses.items() if r}
+                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data["image1"].size(0) for n, (l, _, r) in losses.items() if r}
                     cumulative_loss += loss.item() * data[0].size(0)
                     loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 y_val = {n: y_val[n] + [v / len(validation_dataset)] for n, v in cumulative_losses.items()}

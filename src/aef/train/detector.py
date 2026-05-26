@@ -203,7 +203,13 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         flat_map = feature_map.reshape(feature_map.size(0), 4, feature_h, feature_w)
         sampled = torch.nn.functional.grid_sample(flat_map, grid, mode="bilinear", align_corners=True)
         sampled = sampled.squeeze(-1).transpose(1, 2)
-        return sampled.reshape(sampled.size(0), sampled.size(1), 2, 2)
+        return (
+            homogenize(sampled.reshape(sampled.size(0), sampled.size(1), 2, 2))
+            @ homogenize(
+                torch.eye(2, device=feature_map.device).unsqueeze(0).expand(sampled.size(0), sampled.size(1), -1, -1),
+                b=torch.stack((x, y), dim=-1)
+            )
+        )
 
     aff_1 = sample_affines(feature_map_1, pts1_px)
     aff_2 = sample_affines(feature_map_2, pts2_px)
@@ -215,13 +221,15 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         & (pts2_px[..., 1] >= 0) & (pts2_px[..., 1] < feature_h)
     )
 
-    E = data.get("fundamental_matrix", data.get("essential_matrix")).to(device)
-    if E.dim() == 2:
-        E = E.unsqueeze(0)
+    F = data["fundamental_matrix"].to(device)
+    if F.dim() == 2:
+        F = F.unsqueeze(0)
 
     rel_list = []
     pt_list = []
-    E_list = []
+    F_list = []
+    detections_1_list = []
+    detections_2_list = []
     for i in range(pts1_px.size(0)):
         valid_i = valid[i]
         if not torch.any(valid_i):
@@ -231,7 +239,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         aff_2_i = aff_2[i, valid_i]
 
         det = torch.linalg.det(aff_1_i)
-        non_singular = det.abs() > 1e-6
+        non_singular = (det.abs() > 1e-6) & (torch.linalg.det(aff_2_i).abs() > 1e-6)
         if not torch.any(non_singular):
             continue
 
@@ -242,16 +250,23 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         rel_i = aff_2_i @ torch.linalg.inv(aff_1_i)
         rel_list.append(rel_i)
         pt_list.append(pts1_i)
-        E_list.append(E[i].expand(rel_i.size(0), -1, -1))
+        F_list.append(F[i].expand(rel_i.size(0), -1, -1))
 
-    if not rel_list:
-        return torch.tensor(0.0, device=device, requires_grad=True)
+        detections_1_list.append(aff_1_i)
+        detections_2_list.append(aff_2_i)
 
-    rel = torch.cat(rel_list, dim=0)
-    pts = torch.cat(pt_list, dim=0)
-    E = torch.cat(E_list, dim=0)
+    F = torch.cat(F_list, dim=0)
 
-    return criterion(homogenize(rel), E, pts)
+    return {
+        n: (criterion({
+            "img_1": img_1,
+            "img_2": img_2,
+            "F": F,
+            "descriptor_model": model.descriptor_model,
+            "detections_1": detections_1_list,
+            "detections_2": detections_2_list,
+        }), weight, report) for n, (criterion, weight, report) in criterion.items()
+    }
 
 
 def train_absolute(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
