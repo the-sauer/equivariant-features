@@ -123,7 +123,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                     logging.error(f"Error loading scheduler state dict for {n}: {e}")
 
         start_epoch = checkpoint["epoch"] + 1
-        best_loss = checkpoint["best_loss"]
+        best_loss = float("inf") #checkpoint["best_loss"]
     else:
         start_epoch = 0
         best_loss = float("inf")
@@ -131,12 +131,14 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
-        shuffle=True
+        shuffle=False,
+        collate_fn=train_dataset.get_collate_func()
     )
     validation_loader = torch.utils.data.DataLoader(
         validation_dataset,
         batch_size=cfg.validation.batch_size,
-        shuffle=True
+        shuffle=True,
+        collate_fn=validation_dataset.get_collate_func()
     )
 
     criterion = {
@@ -200,7 +202,7 @@ def train_func(process_batch: ProcessBatchType):
                     continue
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-                cumulative_losses = {n: cumulative_losses[n] + l.item() * data["image1"].size(0) for n, (l, _, r) in losses.items() if r}
+                cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item()
                 loss.backward()
                 for opt in optimizer.values():
@@ -238,8 +240,8 @@ def train_func(process_batch: ProcessBatchType):
                         continue
                     loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
 
-                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data["image1"].size(0) for n, (l, _, r) in losses.items() if r}
-                    cumulative_loss += loss.item() * data[0].size(0)
+                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
+                    cumulative_loss += loss.item() * data["keypoints"].size(0)
                     loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 y_val = {n: y_val[n] + [v / len(validation_dataset)] for n, v in cumulative_losses.items()}
                 logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))

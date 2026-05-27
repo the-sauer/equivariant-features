@@ -16,6 +16,7 @@
 
 import kornia
 import torch
+import torchvision
 from tqdm import tqdm
 
 
@@ -170,101 +171,48 @@ def process_batch_gt(model, data, criterion, augmentation, device, cfg):
 
 
 def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg):
-    img_1 = data["image1"].to(device)
-    img_2 = data["image2"].to(device)
+    keypoints = data["keypoints"].to(device)
+    coords = data["keypoint_coords"].to(device)
+    sorting = keypoints[:, 0].argsort()
+    keypoints = keypoints[sorting]
+    coords = coords[sorting]
+    img_ids = keypoints[:, 0].unique().tolist()
 
-    img_1 = augmentation(img_1)
-    img_2 = augmentation(img_2)
+    imgs = torch.stack([data["images"][img_id] for img_id in img_ids])
+    image_batch = cfg.training.image_batch_size
 
-    feature_map_1 = model(img_1)
-    feature_map_2 = model(img_2)
-
-    pts1 = data["pts1"].to(device)
-    pts2 = data["pts2"].to(device)
-
-    if pts1.dim() == 2:
-        pts1 = pts1.unsqueeze(0)
-        pts2 = pts2.unsqueeze(0)
-    if pts1.dim() != 3:
-        raise ValueError("Expected pts1/pts2 with 2 or 3 dimensions")
-
-    feature_h, feature_w = feature_map_1.shape[-2:]
-    pts1_px = pts1.clone()
-    pts2_px = pts2.clone()
-    pts1_px[..., 0] = pts1_px[..., 0] * (feature_w - 1)
-    pts1_px[..., 1] = pts1_px[..., 1] * (feature_h - 1)
-    pts2_px[..., 0] = pts2_px[..., 0] * (feature_w - 1)
-    pts2_px[..., 1] = pts2_px[..., 1] * (feature_h - 1)
-
-    def sample_affines(feature_map: torch.Tensor, pts_px: torch.Tensor) -> torch.Tensor:
-        x = (pts_px[..., 0] / (feature_w - 1)) * 2 - 1
-        y = (pts_px[..., 1] / (feature_h - 1)) * 2 - 1
-        grid = torch.stack((x, y), dim=-1).unsqueeze(2)
-        flat_map = feature_map.reshape(feature_map.size(0), 4, feature_h, feature_w)
-        sampled = torch.nn.functional.grid_sample(flat_map, grid, mode="bilinear", align_corners=True)
-        sampled = sampled.squeeze(-1).transpose(1, 2)
-        return (
-            homogenize(sampled.reshape(sampled.size(0), sampled.size(1), 2, 2))
-            @ homogenize(
-                torch.eye(2, device=feature_map.device).unsqueeze(0).expand(sampled.size(0), sampled.size(1), -1, -1),
-                b=torch.stack((x, y), dim=-1)
+    out = []
+    features = []
+    indices = []
+    for i, img in enumerate(imgs.split(image_batch)):
+        img_aug = augmentation(img.to(device))
+        out = model(img_aug)
+        for j, img_id in enumerate(img_ids[i * image_batch:(i+1) * image_batch]):
+            kp_mask = keypoints[:, 0] == img_id
+            xy = coords[kp_mask]
+            xy_rounded = xy.round().int()
+            detections = out[j, ..., xy_rounded[:, 0], xy_rounded[:, 1]].permute(2, 0, 1).view(-1, 2, 2)
+            transforms = homogenize(detections, b=(detections @ (xy - 0.5).unsqueeze(-1)).squeeze(-1))
+            if transforms.size(0) < 2:
+                continue
+            patches = kornia.geometry.transform.warp_perspective(
+                torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]).unsqueeze(0).expand(transforms.size(0), -1, -1, -1),
+                torch.linalg.inv(transforms),
+                dsize=(32, 32),
             )
-        )
-
-    aff_1 = sample_affines(feature_map_1, pts1_px)
-    aff_2 = sample_affines(feature_map_2, pts2_px)
-
-    valid = (
-        (pts1_px[..., 0] >= 0) & (pts1_px[..., 0] < feature_w)
-        & (pts1_px[..., 1] >= 0) & (pts1_px[..., 1] < feature_h)
-        & (pts2_px[..., 0] >= 0) & (pts2_px[..., 0] < feature_w)
-        & (pts2_px[..., 1] >= 0) & (pts2_px[..., 1] < feature_h)
-    )
-
-    F = data["fundamental_matrix"].to(device)
-    if F.dim() == 2:
-        F = F.unsqueeze(0)
-
-    rel_list = []
-    pt_list = []
-    F_list = []
-    detections_1_list = []
-    detections_2_list = []
-    for i in range(pts1_px.size(0)):
-        valid_i = valid[i]
-        if not torch.any(valid_i):
-            continue
-        pts1_i = pts1_px[i, valid_i]
-        aff_1_i = aff_1[i, valid_i]
-        aff_2_i = aff_2[i, valid_i]
-
-        det = torch.linalg.det(aff_1_i)
-        non_singular = (det.abs() > 1e-6) & (torch.linalg.det(aff_2_i).abs() > 1e-6)
-        if not torch.any(non_singular):
-            continue
-
-        pts1_i = pts1_i[non_singular]
-        aff_1_i = aff_1_i[non_singular]
-        aff_2_i = aff_2_i[non_singular]
-
-        rel_i = aff_2_i @ torch.linalg.inv(aff_1_i)
-        rel_list.append(rel_i)
-        pt_list.append(pts1_i)
-        F_list.append(F[i].expand(rel_i.size(0), -1, -1))
-
-        detections_1_list.append(aff_1_i)
-        detections_2_list.append(aff_2_i)
-
-    F = torch.cat(F_list, dim=0)
+            features.append(model.descriptor_model(patches.to(device))[0])
+            indices.append(keypoints[kp_mask][:, 1])
 
     return {
         n: (criterion({
-            "img_1": img_1,
-            "img_2": img_2,
-            "F": F,
-            "descriptor_model": model.descriptor_model,
-            "detections_1": detections_1_list,
-            "detections_2": detections_2_list,
+            "features": torch.cat(features, dim=0).to(device),
+            "indices": torch.cat(indices, dim=0).to(device),
+            # "img_1": img_1,
+            # "img_2": img_2,
+            # "F": F,
+            # "descriptor_model": model.descriptor_model,
+            # "detections_1": detections_1_list,
+            # "detections_2": detections_2_list,
         }), weight, report) for n, (criterion, weight, report) in criterion.items()
     }
 

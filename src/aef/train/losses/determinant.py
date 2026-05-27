@@ -36,4 +36,4 @@ class Determinant(torch.nn.Module):
             scale = scale.view(-1, 1, 1)
         else:
             scale = 8.0
-        return torch.mean((torch.linalg.det(pred) - scale) ** 2)
+        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), scale)) - scale) ** 2)

@@ -20,4 +20,4 @@ validation:
   loss:
     - name: Determinant
 
-experiment_name: detector_unet_step_1
+experiment_name: detector_unet_step_1_second_run

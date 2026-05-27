@@ -26,3 +26,12 @@ from .image_generation_loss import ImageGeneration
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import Reprojection
 from ...evaluate import fpr
+
+
+class Supcon(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.criterion = pml_losses.SupConLoss(**kwargs)
+
+    def forward(self, x, **_):
+        return self.criterion(x["features"], x["indices"])

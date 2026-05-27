@@ -3,17 +3,19 @@ defaults:
   - _self_
 
 training:
+  image_batch_size: 8
   dataset:
     name: ColmapData
     params:
       images: /data/datasets/south-building
       image_size: [512, 512]
-  num_epochs: 120
+  num_epochs: 600
+  batch_size: 30000
   loss:
-    - name: Contrastive
+    - name: Supcon
+      report: true
   process_batch: process_batch_colmap_detector
-  epochs: 60
-  continue_from_checkpoint: /data/logs/detector_unet_step_2_second_run/checkpoints/epoch_059.pth
+  continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
   optimizer:
     name: adamw
     params:
@@ -29,4 +31,5 @@ validation:
     params:
       images: /data/datasets/south-building
       image_size: [512, 512]
-experiment_name: detector_unet_step_2
+  batch_size: 30000
+experiment_name: detector_unet_step_2_colmap

@@ -11,11 +11,11 @@ training:
     params:
       name: image-matching-challenge-2025
       image_size: [512, 512]
-      transform_params:
-        scaling_amplitude: 0.05
-        perspective_amplitude_x: 0.05
-        perspective_amplitude_y: 0.05
-        max_angle: "π / 8"
+      # transform_params:
+      #   scaling_amplitude: 0.05
+      #   perspective_amplitude_x: 0.05
+      #   perspective_amplitude_y: 0.05
+      #   max_angle: "π / 8"
 validation:
   dataset:
     name: KaggleHomographyData

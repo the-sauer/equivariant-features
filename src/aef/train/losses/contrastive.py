@@ -54,6 +54,9 @@ class Contrastive(torch.nn.Module):
         self,
         x
     ) -> torch.Tensor:
+        if "features" in x and "indices" in x:
+            return self.contrastive_loss(x["features"], x["indices"])
+
         descriptor_model = x["descriptor_model"]
         if "pred" in x and "target" in x:
             patch_scale = self.patch_scale.to(pred[0].device)
