@@ -15,20 +15,20 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import pytorch_metric_learning.losses as pml_losses
-import omegaconf
 import torch
 
-from .contrastive import Contrastive
+from .contrastive import Contrastive, FPR95
 from .determinant import Determinant, NonSingular
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
 from .image_generation_loss import ImageGeneration
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import Reprojection
+from .sift import SiftScaleLoss
 from ...evaluate import fpr
 
 
-class Supcon(torch.nn.Module):
+class SupCon(torch.nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         self.criterion = pml_losses.SupConLoss(**kwargs)

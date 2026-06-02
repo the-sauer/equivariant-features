@@ -70,7 +70,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)
         logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
-        logging.basicConfig(filename=logfile, level=logging.INFO, force=True)
+        logging.basicConfig(filename=logfile, level=logging.DEBUG, force=True)
 
         with open(os.path.join(cfg.logging.dir, experiment_name, "cfg.yaml"), "w", encoding="utf-8") as f:
             f.write(omegaconf.OmegaConf.to_yaml(cfg))
@@ -208,8 +208,7 @@ def train_func(process_batch: ProcessBatchType):
                 for opt in optimizer.values():
                     opt.step()
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
-                    average_loss = cumulative_loss / (i + 1)
-                    logging.info("epoch [%d/%d] batch [%d/%d] loss: %f", epoch, cfg.training.num_epochs, i, len(train_loader), average_loss)
+                    logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, len(train_loader), ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
             avg_losses = {n: v / len(train_dataset) for n, v in cumulative_losses.items()}
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
@@ -221,6 +220,7 @@ def train_func(process_batch: ProcessBatchType):
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
             ax.set_xlim(0, cfg.training.num_epochs)
+            ax.set_ylim(bottom=0)
             ax.legend()
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
@@ -252,6 +252,7 @@ def train_func(process_batch: ProcessBatchType):
                 ax.set_xlabel("Epoch")
                 ax.set_ylabel("Average Validation Loss")
                 ax.set_xlim(0, cfg.training.num_epochs)
+                ax.set_ylim(bottom=0)
                 ax.legend()
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()

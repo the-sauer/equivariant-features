@@ -17,23 +17,12 @@
 import torch
 
 
-class NonSingular(torch.nn.Module):
-    def __init__(self, sigma=1e-4):
-        super().__init__()
-        self.sigma = sigma
+class SiftScaleLoss(torch.nn.Module):
+    def forward(self, x, **_):
+        detections = x["detections"]
+        scales = x["scales"] * 2
+        assert torch.all(scales > 0), "Scales must be positive"
+        detected_scales = torch.linalg.det(detections[:, :2, :2])
+        detected_scales_mask = torch.isnan(detected_scales)
 
-    def forward(self, x):
-        pred = x["detections"] if "detections" in x else x["pred"]
-        ε = 1e-6
-        return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε)).reshape(1)
-
-
-class Determinant(torch.nn.Module):
-    def forward(self, x):
-        pred = x["detections"] if "detections" in x else x["pred"][0]
-        if "scale" in x:
-            scale = x["scale"][0]
-            scale = scale.view(-1, 1, 1)
-        else:
-            scale = 8.0
-        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), scale)) - scale) ** 2)
+        return torch.mean((detected_scales[~detected_scales_mask] - scales[~detected_scales_mask] ** 2) ** 2)

@@ -55,7 +55,10 @@ class Contrastive(torch.nn.Module):
         x
     ) -> torch.Tensor:
         if "features" in x and "indices" in x:
-            return self.contrastive_loss(x["features"], x["indices"])
+            return self.contrastive_loss(
+                torch.cat(x["features"]),
+                torch.cat(x["indices"])
+            )
 
         descriptor_model = x["descriptor_model"]
         if "pred" in x and "target" in x:
@@ -112,3 +115,8 @@ class Contrastive(torch.nn.Module):
             torch.cat([torch.arange(features_pred.size(0)), torch.arange(features_target.size(0))], dim=0).to(features.device)
         )
         return loss
+
+
+class FPR95(Contrastive):
+    def __init__(self, **kwargs):
+        super().__init__(contrastive_loss="fpr", **kwargs)

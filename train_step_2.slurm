@@ -14,4 +14,6 @@ source /etc/profile
 source /root/.bashrc
 source /root/.profile
 source /.venv/bin/activate 
-/.venv/bin/python /workspace/affine-equivariant-features/src/run_training.py --config-name scale_dgx
+cd /workspace/affine-equivariant-features
+pip install -r requirements.txt
+/.venv/bin/python /workspace/affine-equivariant-features/src/run_training.py --config-name detector_unet_step_2

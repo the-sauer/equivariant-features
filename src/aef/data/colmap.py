@@ -16,9 +16,11 @@
 
 import os
 
+from aef.train.detector import homogenize
 import kagglehub
 import numpy as np
 import pycolmap
+import sqlite3
 import torch
 import torchvision
 
@@ -42,6 +44,11 @@ def compute_epipolar_fundamental(pose1, pose2, cam1, cam2):
     F = np.linalg.inv(K2.T) @ E @ np.linalg.inv(K1)
 
     return E, F
+
+
+def blob_to_array(blob, dtype, shape=(-1,)):
+    np_blob = np.frombuffer(blob, dtype=dtype).reshape(shape)
+    return torch.Tensor(np_blob.copy())
 
 
 class ColmapData(torch.utils.data.Dataset):
@@ -69,43 +76,85 @@ class ColmapData(torch.utils.data.Dataset):
         else:
             self.reconstruction = pycolmap.Reconstruction(sparse_dir)
 
-        # self.pairs = []
+        conn = sqlite3.connect(os.path.join(images, "database.db"))
+        cursor = conn.cursor()
+
+        img_ids = list(self.reconstruction.images.keys())
         if suffix == "train":
-            img_ids = list(filter(lambda id: id % 10 > 0, self.reconstruction.images.keys()))
+            img_ids = img_ids[:int(len(img_ids) * 0.9)]
+        elif suffix == "test":
+            img_ids = img_ids[int(len(img_ids) * 0.9):]
         else:
-            img_ids = list(filter(lambda id: id % 10 == 0, self.reconstruction.images.keys()))
+            ValueError("suffix must be one of ['train', 'validation']")
 
-        # # Build pairs with co-visible points
-        # for i in range(len(img_ids)):
-        #     for j in range(i + 1, len(img_ids)):
-        #         img1_id, img2_id = img_ids[i], img_ids[j]
-        #         img1, img2 = self.reconstruction.images[img1_id], self.reconstruction.images[img2_id]
-
-        #         # Intersect valid points 3D
-        #         p3d_1 = {p.point3D_id: idx for idx, p in enumerate(img1.points2D) if p.has_point3D()}
-        #         p3d_2 = {p.point3D_id: idx for idx, p in enumerate(img2.points2D) if p.has_point3D()}
-
-        #         common_3d = set(p3d_1.keys()).intersection(set(p3d_2.keys()))
-        #         if len(common_3d) > 20:
-        #             self.pairs.append((img1_id, img2_id, list(common_3d)))
         self.images = {}
         keypoint_list = []
         keypoint_coords = []
+        scale_list = []
+        img_scaling_factor = {}
+        coord_normalizations = {}
         for img_id in img_ids:
+            cursor.execute("SELECT rows, cols, data FROM keypoints WHERE image_id=?", (img_id,))
+            rows, cols, blob = cursor.fetchone()
+            sift_detections = blob_to_array(blob, dtype=np.float32, shape=(rows, cols))
+
             img_temp = torchvision.io.read_image(os.path.join(self.images_dir, self.reconstruction.image(img_id).name))
+            orig_size = img_temp.shape[-2], img_temp.shape[-1]
+            if orig_size[0] < orig_size[1]:
+                offset_x = (orig_size[1] - orig_size[0]) // 2
+                offset_y = 0
+            else:
+                offset_x = 0
+                offset_y = (orig_size[0] - orig_size[1]) // 2
+            img_temp = torchvision.transforms.functional.crop(img_temp, offset_y, offset_x, min(orig_size), min(orig_size))
+
             self.images[img_id] = self.resize_transform(img_temp).to(torch.float32) / 255.0
             points2D = list(filter(lambda p: p.has_point3D(), self.reconstruction.image(img_id).points2D))
             if len(points2D) < 20:
                 continue
             points3D = torch.Tensor(list(map(lambda p: p.point3D_id, points2D))).to(torch.int64)
-            coords = torch.Tensor(np.stack(list(map(lambda p: p.xy, points2D)))) / torch.Tensor([img_temp.shape[-1], img_temp.shape[-2]]).to(torch.float32).unsqueeze(0) * torch.Tensor([*self.image_size]).to(torch.float32).unsqueeze(0)
+            coords_raw = torch.Tensor(np.stack(list(map(lambda p: p.xy, points2D))))
+            scales = torch.empty(coords_raw.size(0), dtype=torch.float32)
+            for i, xy in enumerate(coords_raw):
+                scales[i] = sift_detections[torch.argsort(torch.norm(coords_raw - xy, dim=1))[0], 2]
+            scales = scales * min(self.image_size) / min(orig_size)
+            img_scaling_factor[img_id] = torch.Tensor([min(orig_size), min(orig_size)]).to(torch.float32) * torch.Tensor([*self.image_size]).to(torch.float32)
+            coordinate_normalization = torch.diag(torch.tensor([self.image_size[0] / min(orig_size), self.image_size[1] / min(orig_size), 1], dtype=torch.float32)) @ homogenize(torch.eye(2, dtype=torch.float32).unsqueeze(0), b=torch.Tensor([-offset_x, -offset_y]).unsqueeze(0))
+            coords = coordinate_normalization @ torch.stack((coords_raw[..., 0], coords_raw[..., 1], torch.ones_like(coords_raw[:, 0])), dim=-1).unsqueeze(-1)
+            coord_normalizations[img_id] = coordinate_normalization
+            coords = (coords[:, :2] / coords[:, 2:]).squeeze(-1)
+            coord_mask = (coords.round() >= 0).all(dim=1) & (coords.round() < torch.Tensor(self.image_size)).all(dim=1)
+            coords = coords[coord_mask]
+            scales = scales[coord_mask]
             img_ids_tensor = torch.Tensor([img_id]).to(torch.int64).expand(points3D.size(0))
-            keypoint_list.append(torch.stack([img_ids_tensor, points3D], dim=1))
+            keypoint_list.append(torch.stack([img_ids_tensor, points3D], dim=1)[coord_mask])
             keypoint_coords.append(coords)
+            scale_list.append(scales)
         self.keypoints = torch.cat(keypoint_list, dim=0)
         self.keypoint_coords = torch.cat(keypoint_coords, dim=0)
+        self.scales = torch.cat(scale_list, dim=0)
 
+        ordering = self.keypoints[:, 1].argsort()
+        self.keypoints = self.keypoints[ordering]
+        self.keypoint_coords = self.keypoint_coords[ordering]
+        self.scales = self.scales[ordering]
+
+        self.fundamental = torch.empty((max(img_ids) + 1, max(img_ids) + 1, 3, 3), dtype=torch.float32)
+        for img_id_1 in img_ids:
+            for img_id_2 in img_ids:
+                if img_id_1 < img_id_2:
+                    T_1 = torch.linalg.inv(coord_normalizations[img_id_1])
+                    T_2 = torch.linalg.inv(coord_normalizations[img_id_2])
+                    self.fundamental[img_id_1, img_id_2] = ((T_2).transpose(-2, -1) @
+                        torch.Tensor(compute_epipolar_fundamental(
+                            self.reconstruction.image(img_id_1).cam_from_world(),
+                            self.reconstruction.image(img_id_2).cam_from_world(),
+                            self.reconstruction.camera(self.reconstruction.image(img_id_1).camera_id),
+                            self.reconstruction.camera(self.reconstruction.image(img_id_2).camera_id),
+                        )[1]) @ T_1
+                    )
         self.c = 3
+        conn.close()
 
     def __len__(self):
         return self.keypoints.size(0)
@@ -114,24 +163,40 @@ class ColmapData(torch.utils.data.Dataset):
         return {
             "keypoint":  self.keypoints[idx],
             "keypoint_coords": self.keypoint_coords[idx],
-            # "essential_matrix": torch.tensor(E, dtype=torch.float32),
-            # "fundamental_matrix": torch.tensor(F, dtype=torch.float32),
-            # "img": {
-            #     img_id: self.resize_transform(torchvision.io.read_image(os.path.join(self.images_dir, self.reconstruction.image(img_id).name)))
-            #     for img_id in self.reconstruction.images.keys()
-            # }
+            "scale": self.scales[idx],
         }
     
     def get_collate_func(self):
         def collate_colmap(batch):
             keypoints = torch.stack([item["keypoint"] for item in batch])
             coords = torch.stack([item["keypoint_coords"] for item in batch])
+            scales = torch.stack([item["scale"] for item in batch])
             return {
                 "keypoints": keypoints,
                 "keypoint_coords": coords,
-                "images":{
-                    img_id: self.resize_transform(torchvision.io.read_image(os.path.join(self.images_dir, self.reconstruction.image(img_id).name))).to(torch.float32) / 255.0
-                    for img_id in keypoints[:, 0].unique().tolist()
-                }
+                "scales": scales,
+                "images": self.images,
+                "fundamental": self.fundamental
             }
         return collate_colmap
+
+    def img_id_ordering(self, img_ids):
+        min_matches = None
+        match_mat = torch.zeros(len(img_ids), len(img_ids), dtype=int)
+        for i in range(len(img_ids)):
+            img_1_features = set(map(lambda p: p.point3D_id, filter(lambda p: p.has_point3D(), self.reconstruction.image(img_ids[i]).points2D)))
+            for j in range(i+1, len(img_ids)):
+                img_2_features = set(map(lambda p: p.point3D_id, filter(lambda p: p.has_point3D(), self.reconstruction.image(img_ids[j]).points2D)))
+                num_matches = len(img_1_features & img_2_features)
+                match_mat[i, j] = num_matches
+                match_mat[j, i] = num_matches
+                if min_matches is None or num_matches < match_mat[*min_matches]:
+                    min_matches = i, j
+        ordered_imgs = []
+        curr = min_matches[0]
+        while len(ordered_imgs) < len(img_ids):
+            ordered_imgs.append(img_ids[curr])
+            match_mat[:, curr] = 0
+            curr = torch.argmax(match_mat[curr])
+            print(f"next image {img_ids[curr]} with {torch.max(match_mat[curr])} matches")
+        return ordered_imgs

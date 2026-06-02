@@ -9,7 +9,7 @@ import torch
 
 from aef.data.colmap import ColmapData
 
-def visualize_epipolar_lines(img1, img2, pts1, pts2, F, num_lines=15):
+def visualize_epipolar_lines(img1, img2, pts1, pts2, F, num_lines=15, name=None):
     """
     Shows image pairs with annotated matches and epipolar lines.
     """
@@ -33,13 +33,6 @@ def visualize_epipolar_lines(img1, img2, pts1, pts2, F, num_lines=15):
     cmap = plt.get_cmap('hsv', len(indices))
 
     h, w = img1_np.shape[:2]
-    # p1 = pts1[indices]
-    # axes[0].scatter(p1[:,0], p1[:,1], color=cmap, s=30, marker='x', zorder=5)
-
-    # l2 = F.unsqueeze(0) @ torch.stack([p1[:,0], p1[:,1], torch.ones(len(p1))], dim=-1).unsqueeze(-1)
-    # x_vals = torch.tensor([0, w]).unsqueeze(0)
-    # y_vals_2 = -(l2[:,0] * x_vals + l2[:,2]) / l2[:,1]
-    # axes[1].plot(x_vals.expand(len(p1), -1), y_vals_2, cmap=cmap, linewidth=1)
 
     for idx_c, i in enumerate(indices):
         p1 = pts1[i].numpy()
@@ -71,28 +64,42 @@ def visualize_epipolar_lines(img1, img2, pts1, pts2, F, num_lines=15):
     axes[1].set_ylim(h, 0)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"/data/debug_imgs/epipolar_lines_{name}.png")
+    plt.close()
 
 if __name__ == "__main__":
     dotenv.load_dotenv()
-    path = "./data/datasets"
-    if not os.path.exists(path):
-        kagglehub.competition_download('image-matching-challenge-2025', output_dir=path, force_download=True)
+    path = "/data/datasets"
 
     scene_dir = os.path.join(path, "south-building")
     dataset = ColmapData(scene_dir, image_size=(512, 512))
 
-    print(f"Dataset has {len(dataset)} valid pairs with >20 common 3D points.")
+    sample_idx = random.randint(0, len(dataset) - 1)
+    sample = dataset.get_collate_func()([dataset[i] for i in range(len(dataset))])
 
-    # Display N samples
-    N = 3
-    for _ in range(min(N, len(dataset))):
-        sample_idx = random.randint(0, len(dataset) - 1)
-        sample = dataset[sample_idx]
-        visualize_epipolar_lines(
-            sample["image1"],
-            sample["image2"],
-            sample["pts1"],
-            sample["pts2"],
-            sample["fundamental_matrix"]
-        )
+    feature_ids = sample["keypoints"][:, 1].unique().tolist()
+
+    for feature_id in feature_ids:
+        feature_mask = sample["keypoints"][:, 1] == feature_id
+        if feature_mask.sum() < 2:
+            continue
+
+        img_ids = sample["keypoints"][feature_mask][:, 0].unique().tolist()
+        for indices in torch.triu_indices(len(img_ids), len(img_ids), offset=1).T:
+            img_1_id = img_ids[indices[0]]
+            img_2_id = img_ids[indices[1]]
+            pt_1 = sample["keypoint_coords"][feature_mask][sample["keypoints"][feature_mask][:, 0] == img_1_id][0]
+            pt_2 = sample["keypoint_coords"][feature_mask][sample["keypoints"][feature_mask][:, 0] == img_2_id][0]
+            F = sample["fundamental"][img_1_id, img_2_id]
+            e = torch.abs(torch.tensor([pt_1[0], pt_1[1], 1]).unsqueeze(0) @ F @ torch.tensor([pt_2[0], pt_2[1], 1]).unsqueeze(1)).item()
+            if e < 2:
+                continue
+            print(f"{img_1_id=}, {img_2_id=}, {feature_id=}, {e=}")
+            visualize_epipolar_lines(
+                sample["images"][img_1_id],
+                sample["images"][img_2_id],
+                pt_1.unsqueeze(0),
+                pt_2.unsqueeze(0),
+                F,
+                name=f"{img_1_id}_{img_2_id}_{feature_id}"
+            )

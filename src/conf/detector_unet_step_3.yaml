@@ -9,20 +9,19 @@ training:
     params:
       images: /data/datasets/south-building
       image_size: [512, 512]
-  num_epochs: 400
+  num_epochs: 800
   batch_size: 10000
   loss:
+    - name: SupCon
+      report: true
     - name: SiftScaleLoss
       report: true
     - name: EpipolarLoss
       report: true
-      weight: 10
       params:
         n_samples: 10
-    - name: NonSingular
-      weight: 0.01
   process_batch: process_batch_colmap_detector
-  continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
+  continue_from_checkpoint: /data/logs/detector_unet_step_2_colmap/checkpoints/epoch_399.pth
   optimizer:
     name: adamw
     params:
@@ -34,7 +33,6 @@ validation:
       report: true
     - name: EpipolarLoss
       report: true
-      weight: 10
       params:
         n_samples: 10
   dataset:
@@ -43,6 +41,4 @@ validation:
       images: /data/datasets/south-building
       image_size: [512, 512]
   batch_size: 60000
-experiment_name: detector_unet_step_2_colmap
-logging:
-  interval: 1
+experiment_name: detector_unet_step_3_colmap

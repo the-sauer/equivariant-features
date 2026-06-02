@@ -29,7 +29,7 @@ class L2Norm(nn.Module):
 
 
 class HardNet(nn.Module):
-    def __init__(self, patch_size=32, shallow=False, slim=False):
+    def __init__(self, in_channels=1, patch_size=32, shallow=False, slim=False):
         super(HardNet, self).__init__()
 
         # model processing patches of size [32 x 32] and giving description vectors of length 2**7
@@ -47,11 +47,12 @@ class HardNet(nn.Module):
             pool = 32
         else:
             raise ValueError(f"Unsupported patch size {patch_size}")
+        self.patch_size = patch_size
 
         depths = [16, 32, 64] if slim else [32, 64, 128]
         if shallow:
             self.features = nn.Sequential(
-                nn.Conv2d(1, depths[0], kernel_size=kernel_size, padding=padding, bias=False),
+                nn.Conv2d(in_channels, depths[0], kernel_size=kernel_size, padding=padding, bias=False),
                 nn.BatchNorm2d(depths[0], affine=False),
                 nn.ReLU(),
                 nn.Conv2d(depths[0], depths[0], kernel_size=kernel_size, padding=padding, bias=False),
@@ -70,7 +71,7 @@ class HardNet(nn.Module):
             )
         else:
             self.features = nn.Sequential(
-                nn.Conv2d(1, depths[0], kernel_size=kernel_size, padding=padding, bias=False),
+                nn.Conv2d(in_channels, depths[0], kernel_size=kernel_size, padding=padding, bias=False),
                 nn.BatchNorm2d(depths[0], affine=False),
                 nn.ReLU(),
                 nn.Conv2d(depths[0], depths[0], kernel_size=kernel_size, padding=padding, bias=False),
@@ -109,7 +110,7 @@ class HardNet(nn.Module):
     def forward(self, patches):
         x_features = self.features(self.input_norm(patches))
         x = x_features.view(x_features.size(0), -1)
-        return L2Norm()(x), patches
+        return L2Norm()(x)
 
 
 def weights_init(m):

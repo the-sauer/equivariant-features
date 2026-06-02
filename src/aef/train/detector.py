@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import logging
+
 import kornia
 import torch
 import torchvision
@@ -170,13 +172,25 @@ def process_batch_gt(model, data, criterion, augmentation, device, cfg):
     return criterion(feature_map, gt)
 
 
-def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg):
-    keypoints = data["keypoints"].to(device)
+def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg, max_imgs_per_batch=56):
+    patch_size = model.descriptor_model.patch_size
+    keypoints = data["keypoints"].to(torch.long).to(device)
     coords = data["keypoint_coords"].to(device)
     sorting = keypoints[:, 0].argsort()
     keypoints = keypoints[sorting]
     coords = coords[sorting]
     img_ids = keypoints[:, 0].unique().tolist()
+    gt_scales = data["scales"].to(device)[sorting]
+    if len(img_ids) > max_imgs_per_batch:
+        # TODO: Sort by number of features descending
+        logging.warning(f"Number of unique images in batch {len(img_ids)} exceeds max_imgs_per_batch {max_imgs_per_batch}")   
+        img_ids = img_ids[:max_imgs_per_batch]
+        img_mask = torch.any(torch.stack([keypoints[:, 0] == img_id for img_id in img_ids], dim=-1), dim=-1)
+        keypoints = keypoints[img_mask]
+        coords = coords[img_mask]
+        gt_scales = gt_scales[img_mask]
+
+    feature_ids = keypoints[:, 1].unique().tolist()
 
     imgs = torch.stack([data["images"][img_id] for img_id in img_ids])
     image_batch = cfg.training.image_batch_size
@@ -184,6 +198,10 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     out = []
     features = []
     indices = []
+    detection_list = []
+    pts = []
+    img_id_list = []
+    scales = []
     for i, img in enumerate(imgs.split(image_batch)):
         img_aug = augmentation(img.to(device))
         out = model(img_aug)
@@ -191,28 +209,45 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             kp_mask = keypoints[:, 0] == img_id
             xy = coords[kp_mask]
             xy_rounded = xy.round().int()
-            detections = out[j, ..., xy_rounded[:, 0], xy_rounded[:, 1]].permute(2, 0, 1).view(-1, 2, 2)
-            transforms = homogenize(detections, b=(detections @ (xy - 0.5).unsqueeze(-1)).squeeze(-1))
-            if transforms.size(0) < 2:
-                continue
-            patches = kornia.geometry.transform.warp_perspective(
-                torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]).unsqueeze(0).expand(transforms.size(0), -1, -1, -1),
-                torch.linalg.inv(transforms),
-                dsize=(32, 32),
-            )
-            features.append(model.descriptor_model(patches.to(device))[0])
+            detections = out[j, ..., xy_rounded[:, 1], xy_rounded[:, 0]].permute(2, 0, 1).view(-1, 2, 2)
+            transforms = homogenize(detections, b=xy)
+            if False:   # TODO: Decide based on losses
+                patches = kornia.geometry.transform.warp_perspective(
+                    torchvision.transforms.functional.gaussian_blur(torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]), kernel_size=19, sigma=3.0).unsqueeze(0).expand(transforms.size(0), -1, -1, -1),
+                    (
+                        torch.diag(torch.Tensor([patch_size, patch_size, 1]).to(device)).unsqueeze(0)
+                        @ homogenize(torch.eye(2).to(device), b=torch.tensor([0.5, 0.5]).to(device)).unsqueeze(0)
+                        @ torch.linalg.inv(transforms)
+                    ),
+                    dsize=(patch_size, patch_size),
+                )
+
+            detection_list.append(transforms)
+            if False:   # TODO: Decide based on losses
+                features.append(model.descriptor_model(patches.to(device)))
             indices.append(keypoints[kp_mask][:, 1])
+            pts.append(xy)
+            img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(xy.size(0)))
+            scales.append(gt_scales[kp_mask])
+
+    matches = []
+    for feature_id in feature_ids:
+        match_indices = (torch.cat(indices, dim=0) == feature_id).nonzero(as_tuple=False).squeeze(1)
+        if match_indices.size(0) < 2:
+            continue
+        x, y = torch.triu_indices(len(match_indices), len(match_indices), offset=1)
+        matches.append(torch.stack((match_indices[x], match_indices[y]), dim=1))
 
     return {
         n: (criterion({
-            "features": torch.cat(features, dim=0).to(device),
-            "indices": torch.cat(indices, dim=0).to(device),
-            # "img_1": img_1,
-            # "img_2": img_2,
-            # "F": F,
-            # "descriptor_model": model.descriptor_model,
-            # "detections_1": detections_1_list,
-            # "detections_2": detections_2_list,
+            "features": torch.cat(features, dim=0) if False else None,
+            "indices": torch.cat(indices, dim=0),
+            "scales": torch.cat(scales, dim=0).to(device),
+            "detections": torch.cat(detection_list, dim=0),
+            "img_ids": torch.cat(img_id_list, dim=0),
+            "matches": torch.cat(matches, dim=0),
+            "pts": torch.cat(pts, dim=0),
+            "fundamental": data["fundamental"].to(device),
         }), weight, report) for n, (criterion, weight, report) in criterion.items()
     }
 
