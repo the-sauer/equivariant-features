@@ -1,0 +1,17 @@
+[BASIC]
+
+good-names=H, A, B, E, F, W, DoG, N, D
+
+good-names-rgxs=H[a-z0-9_]{1,30}$, K[a-z0-9_]{1,30}$, N[a-z0-9_]{1,30}$, R[a-z0-9_]{1,30}$
+
+
+[MESSAGES CONTROL]
+
+disable=
+    missing-function-docstring,
+    missing-class-docstring,
+    missing-module-docstring,
+    too-few-public-methods,
+
+[FORMAT]
+max-line-length=120

@@ -14,7 +14,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import omegaconf
+import torch
+
+try:
+    from .blobboards import *
+except ImportError as e:
+    print("Could not import blobboards dataset. Make sure to install the BlobBoards.jl python bindings and to have the Julia package installed. Error was:", e)
+from .colmap import *
+from .constant import *
+from .kaggle import *
+
+
+def get_dataset(dataset_cfg):
+    if isinstance(dataset_cfg, omegaconf.ListConfig):
+        return torch.utils.data.ConcatDataset(*(get_dataset(c) for c in dataset_cfg))
+    else:
+        return eval(f"{dataset_cfg.name}(**dataset_cfg.params)")

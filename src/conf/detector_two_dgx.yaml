@@ -1,0 +1,12 @@
+defaults:
+  - detector_two
+  - dgx
+  - _self_
+
+training:
+  num_epochs: 2
+  batch_size: 2
+validation:
+  batch_size: 2
+logging:
+  interval: 40

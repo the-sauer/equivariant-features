@@ -1,9 +1,14 @@
+hydra-core >= 1.3, < 2
+kagglehub >= 1.0, < 2
+kornia >= 0.8, < 1
+matplotlib
+pycolmap >= 4.0, < 5
 python-dotenv
 pytorch-metric-learning >= 1.2, < 2
 torch >= 2.11, < 3
 torchvision >= 0.26, < 1
-kornia >= 0.8, < 1
+tqdm >= 4.67, < 5
 juliacall >= 0.9, < 1
 git+https://github.com/the-sauer/sesn
-asel[rbf] @ git+https://github.com/the-sauer/EquivarLayer
+asel[rbf] @ git+https://github.com/the-sauer/EquivarLayer@feat/upconvolution
 -e./deps/BlobBoards.jl/python

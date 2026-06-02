@@ -14,7 +14,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import torch
+
+
+class ConstantData(torch.utils.data.Dataset):
+    def __init__(self, value, image_size: tuple[int, int], n: int, c: int, **_):
+        if value == "identity":
+            self.value = torch.eye(2).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(n, -1, -1, *image_size)
+        else:
+            raise ValueError(f"Unsupported value: {value}")
+        self.image_size = image_size
+        self.c = c
+
+    def __len__(self):
+        return self.value.shape[0]
+
+    def __getitem__(self, idx):
+        return torch.rand(self.c, *self.image_size), self.value[idx]

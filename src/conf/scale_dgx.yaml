@@ -1,0 +1,10 @@
+defaults:
+  - scale
+  - dgx
+  - _self_
+
+training:
+  batch_size: 32
+
+validation:
+  batch_size: 32

@@ -1,0 +1,23 @@
+defaults:
+  - detector_unet_dgx
+  - _self_
+
+model:
+  params:
+    scale_space:
+      name: ConstantScaleSpace
+      params: {}
+training:
+  optimizer:
+    name: adamw
+    params:
+      lr: 1e-4
+      weight_decay: 1e-4
+  loss:
+    - name: Determinant
+  num_epochs: 10
+validation:
+  loss:
+    - name: Determinant
+
+experiment_name: detector_unet_step_1_second_run

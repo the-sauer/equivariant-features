@@ -1,0 +1,43 @@
+defaults:
+  - config
+  - _self_
+
+model:
+  name: ScaleSpaceSESN
+  params:
+    factor: 6.5
+    num_scales: 4
+    min_scale: 2.0
+    effective_size: 5
+training:
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      image_size: [128, 128]
+      num_boards: 80
+      polarity: "random"
+      transform_params:
+        scaling_amplitude: 1
+  optimizer:
+    name: adam
+    params:
+      lr: 1e-3
+      weight_decay: 1e-4
+    scheduler:
+      name: multistep
+      params:
+        milestones: [20, 40]
+        gamma: 0.1
+  loss: "rel_squared"
+validation:
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      image_size: [128, 128]
+      num_boards: 10
+      polarity: "random"
+      transform_params:
+        scaling_amplitude: 1
+  loss: rel_squared
+logging:
+  interval: 1

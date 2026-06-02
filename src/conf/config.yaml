@@ -1,0 +1,36 @@
+training:
+  batch_size: 1
+  num_epochs: 60
+  feature_sampling:
+    num_features: 1000
+    # stride: 12
+    # detector: harris
+  dataset:
+    data_dir: ./data/datasets
+    params:
+      suffix: train
+      image_size: [256, 256]
+  augmentation:
+    color_jitter:
+      brightness: 0.5
+      contrast: 0.5
+      saturation: 0.5
+      hue: 0.5
+    gaussian_blur:
+      kernel_size: 5
+      sigma: 1.0
+    gaussian_noise:
+      mean: 0.0
+      sigma: 0.1
+validation:
+  batch_size: 1
+  dataset:
+    data_dir: ./data/datasets
+    params:
+      image_size: [256, 256]
+      suffix: test
+  feature_sampling:
+    num_features: 1000
+logging:
+  dir: ./data/logs
+  interval: 100

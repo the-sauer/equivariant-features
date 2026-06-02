@@ -15,6 +15,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
+This module contains the implementations of the models used in this thesis.
 """
+
+from .approach_one import *
+from .approach_two import *
+from .hardnet import *
+from .scale import *
+from .unet import *

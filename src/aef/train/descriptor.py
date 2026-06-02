@@ -16,30 +16,27 @@
 
 from enum import Enum
 import logging
-from typing import Iterable, Union
+from typing import Iterable
 
 import kornia
-from pytorch_metric_learning import losses
 import torch
-from torchvision.transforms import v2
-
 
 class Detector(Enum):
     DoG = 1
-    Harris = 2
+    HARRIS = 2
 
 
-def detect(img: torch.Tensor, detector: Detector = Detector.Harris, threshold: float = 0.0001) -> Iterable[torch.Tensor]:
+def detect(img: torch.Tensor, detector: Detector = Detector.HARRIS, threshold: float = 1e-4) -> Iterable[torch.Tensor]:
     img = torch.mean(img, dim=1, keepdim=True)
     if detector == Detector.DoG:
         response_map = kornia.feature.dog_response(img)
-    elif detector == Detector.Harris:
+    elif detector == Detector.HARRIS:
         response_map = kornia.feature.harris_response(img)
     else:
         raise ValueError("Unknown detector")
 
     b, _, x, y = torch.where(response_map > threshold)
-    logging.info(f"Detected {b.size(0)} features")
+    logging.info("Detected %d features", b.size(0))
     splits = list(map(lambda i: int(torch.sum(b == i).item()), range(img.shape[0])))
 
     return torch.split(torch.stack((x, y), dim=1).to(img.device), split_size_or_sections=splits, dim=0)
@@ -50,83 +47,164 @@ def warp_detections(detections: Iterable[torch.Tensor], H: torch.Tensor) -> Iter
         H, c = e
         if len(c) == 0:
             return c
-        c_h = torch.cat((c.to(torch.float32), torch.tensor([[1.0]], device=c.device).expand(c.size(0), 1)), dim=1).unsqueeze(2)
+        c_h = torch.cat(
+            (c.to(torch.float32), torch.tensor([[1.0]], device=c.device).expand(c.size(0), 1)),
+            dim=1
+        ).unsqueeze(2)
         c_warped = (H.unsqueeze(0) @ c_h).squeeze(2)
         return torch.round(c_warped[:, :2] / c_warped[:, 2:]).to(torch.int)
     return map(coordinate_map, zip(H, detections))
 
 
-def train(model, dataset, batch_size=100, feature_choice: Union[str, int] = 10):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def process_batch_homographic_descriptor(model, data, criterion, augmentation, device, cfg):
+    img, img_t, H, H_inv = data
+    img = augmentation(img.to(device))
+    img_t = augmentation(img_t.to(device))
 
-    model = model.to(device)
+    feature_map = model(img)
+    feature_map_t = model(img_t)
 
-    optimizer = torch.optim.Adam(model.parameters())
-    train_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
-    criterion = losses.TripletMarginLoss()
+    if "detector" in cfg.training.feature_sampling:
+        # TODO: Fix this
+        H = H.to(device)
+        detections = detect(img)
+        detections_t = warp_detections(detections, H)
 
-    augmentation = v2.Compose([
-        v2.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5),
-        v2.GaussianBlur(kernel_size=3),
-        v2.GaussianNoise(),
-    ])
+        valid_detections = map(
+            lambda ds:
+                (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
+                & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
+            detections_t
+        )
 
-    for (img, img_t, H, H_inv) in train_loader:
-        img = img.to(device)
-        img_t = augmentation(img_t.to(device))
-        optimizer.zero_grad()
+        detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
+        detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
+        features = torch.empty(sum(map(len, detections)), model.feature_size)
+        features_t = torch.empty(sum(map(len, detections)), model.feature_size)
 
-        feature_map = model(img)
-        feature_map_t = model(img_t)
+        i = 0
+        for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
+            for d, d_t in zip(ds, ds_t):
+                features[i, :] = feature_map[j, :, *d].squeeze()
+                features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
+                i += 1
 
-        if isinstance(feature_choice, str):
-            # TODO: Fix this
-            H = H.to(device)
-            detections = detect(img)
-            detections_t = warp_detections(detections, H)
-
-            valid_detections = map(
-                lambda ds:
-                    (ds[:, 0] >= 0) & (ds[:, 0] < img.shape[2])
-                    & (ds[:, 1] >= 0) & (ds[:, 1] < img.shape[3]),
-                detections_t
-            )
-
-            detections = map(lambda e: e[0][e[1]], zip(detections, valid_detections))
-            detections_t = map(lambda e: e[0][e[1]], zip(detections_t, valid_detections))
-            features = torch.empty(sum(map(len, detections)), model.feature_size)
-            features_t = torch.empty(sum(map(len, detections)), model.feature_size)
-
-            i = 0
-            for j, (ds, ds_t) in enumerate(zip(detections, detections_t)):
-                for d, d_t in zip(ds, ds_t):
-                    features[i, :] = feature_map[j, :, *d].squeeze()
-                    features_t[i, :] = feature_map_t[j, :, *d_t].squeeze()
-                    i += 1
-
-            y = torch.cat((features, features_t))
-            labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+        y = torch.cat((features, features_t))
+        labels = torch.cat((torch.arange(features.size(0)), torch.arange(features_t.size(0)))).to(device)
+    else:
+        if "stride" in cfg.training.feature_sampling:
+            feature_stride = cfg.training.feature_sampling.stride
+        elif "num_features" in cfg.training.feature_sampling:
+            feature_stride = img.size(2) * img.size(3) // cfg.training.feature_sampling.num_features
         else:
-            feature_stride = feature_map.size(2) // feature_choice
-            H_inv = H_inv.to(device)
-            feature_map_t = kornia.geometry.transform.warp_perspective(feature_map, H_inv, dsize=feature_map.shape[2:])
+            raise ValueError("No valid feature sampling method")
 
-            y = torch.cat((
-                feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.size(1))[::feature_stride, :],
-                feature_map_t.permute(0, 2, 3, 1).reshape(-1, feature_map_t.size(1))[::feature_stride, :]
-            ))
-            assert y.size(0) % 2 == 0
-            labels = torch.cat((
-                torch.arange(y.size(0) // 2),
-                torch.arange(y.size(0) // 2)
-            )).to(device)
+        H_inv = H_inv.to(device)
+        feature_map_t = kornia.geometry.transform.warp_perspective(
+            feature_map_t,
+            H_inv,
+            dsize=feature_map.shape[2:]
+        )
+        mask = kornia.geometry.transform.warp_perspective(
+            torch.ones(1, 1, 1, 1).to(device).expand(feature_map.size()),
+            H_inv,
+            dsize=feature_map.shape[2:]
+        ) > 0.5
+        features = torch.where(mask, feature_map, 0).permute(0, 2, 3, 1).flatten(end_dim=-2)[::feature_stride]
+        features_t = torch.where(mask, feature_map_t, 0).permute(0, 2, 3, 1).flatten(end_dim=-2)[::feature_stride]
+        y = torch.cat((features, features_t))
+        assert y.size(0) % 2 == 0
+        labels = torch.cat((
+            torch.arange(y.size(0) // 2),
+            torch.arange(y.size(0) // 2)
+        )).to(device)
 
-        loss = criterion(y, labels)
+    return criterion(y, labels)
 
-        logging.info(f"Loss: {loss.item()}")
-        loss.backward()
-        optimizer.step()
+
+def process_batch_colmap_descriptor(model, data, criterion, augmentation, device, cfg):
+    img_1 = data["image1"].to(device)
+    img_2 = data["image2"].to(device)
+    
+    batch_size = img_1.shape[0]
+
+    # Apply augmentation
+    img_1 = augmentation(img_1)
+    img_2 = augmentation(img_2)
+
+    # Get feature maps from model
+    feature_map_1 = model(img_1)
+    feature_map_2 = model(img_2)
+
+    # Get normalized point coordinates [0, 1]
+    pts1 = data["pts1"].to(device)
+    pts2 = data["pts2"].to(device)
+
+    # Convert normalized coordinates to feature map coordinates
+    feature_h, feature_w = feature_map_1.shape[-2:]
+    pts1[:, 0] = pts1[:, 0] * (feature_w - 1)
+    pts1[:, 1] = pts1[:, 1] * (feature_h - 1)
+
+    pts2[:, 0] = pts2[:, 0] * (feature_w - 1)
+    pts2[:, 1] = pts2[:, 1] * (feature_h - 1)
+
+    # Extract features at point locations
+    features_1 = []
+    features_2 = []
+    labels = []
+    offset = 0
+
+    def sample_features(feature_map: torch.Tensor, pts: torch.Tensor) -> torch.Tensor:
+        if pts.numel() == 0:
+            return torch.empty((0, feature_map.size(1)), device=feature_map.device)
+        x = (pts[:, 0] / (feature_w - 1)) * 2 - 1
+        y = (pts[:, 1] / (feature_h - 1)) * 2 - 1
+        grid = torch.stack((x, y), dim=-1).view(1, -1, 1, 2)
+        sampled = torch.nn.functional.grid_sample(
+            feature_map,
+            grid,
+            mode="bilinear",
+            align_corners=True
+        )
+        return sampled.squeeze(0).squeeze(-1).transpose(0, 1)
+
+    for i in range(batch_size):
+        if pts1.dim() == 3:
+            pts1_i = pts1[i]
+            pts2_i = pts2[i]
+        elif pts1.dim() == 2:
+            pts1_i = pts1
+            pts2_i = pts2
+        else:
+            raise ValueError("Expected pts1/pts2 with 2 or 3 dimensions")
+
+        valid = (
+            (pts1_i[:, 0] >= 0) & (pts1_i[:, 0] < feature_w)
+            & (pts1_i[:, 1] >= 0) & (pts1_i[:, 1] < feature_h)
+            & (pts2_i[:, 0] >= 0) & (pts2_i[:, 0] < feature_w)
+            & (pts2_i[:, 1] >= 0) & (pts2_i[:, 1] < feature_h)
+        )
+        pts1_i = pts1_i[valid]
+        pts2_i = pts2_i[valid]
+        if pts1_i.numel() == 0:
+            continue
+
+        f1 = sample_features(feature_map_1[i].unsqueeze(0), pts1_i)
+        f2 = sample_features(feature_map_2[i].unsqueeze(0), pts2_i)
+
+        features_1.append(f1)
+        features_2.append(f2)
+        labels.append(torch.arange(f1.size(0), device=device) + offset)
+        offset += f1.size(0)
+
+    if len(features_1) == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    features_1 = torch.cat(features_1, dim=0)
+    features_2 = torch.cat(features_2, dim=0)
+    labels = torch.cat(labels, dim=0)
+
+    y = torch.cat((features_1, features_2), dim=0)
+    labels = torch.cat((labels, labels), dim=0)
+
+    return criterion(y, labels)

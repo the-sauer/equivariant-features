@@ -14,7 +14,19 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import os
+
+import kagglehub
+
+from .homography import HomographyData
+
+
+class KaggleHomographyData(HomographyData):
+    def __init__(self, name: str, data_dir=None, suffix="", **kwargs):
+        if data_dir is None:
+            data_dir = "./data/datasets"
+        data_dir = os.path.join(data_dir, name)
+        if not os.path.exists(data_dir) or os.path.exists(os.path.join(data_dir, f"{name}.archive")):
+            data_dir = kagglehub.competition_download(name, output_dir=data_dir, force_download=True)
+        data_dir = os.path.join(data_dir, suffix)
+        super().__init__(data_dir, **kwargs)

@@ -14,7 +14,26 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import torch
+
+
+class NonSingular(torch.nn.Module):
+    def __init__(self, sigma=1e-4):
+        super().__init__()
+        self.sigma = sigma
+
+    def forward(self, x):
+        pred = x["detections"] if "detections" in x else x["pred"]
+        ε = 1e-6
+        return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε)).reshape(1)
+
+
+class Determinant(torch.nn.Module):
+    def forward(self, x):
+        pred = x["detections"] if "detections" in x else x["pred"][0]
+        if "scale" in x:
+            scale = x["scale"][0]
+            scale = scale.view(-1, 1, 1)
+        else:
+            scale = 8.0
+        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), scale)) - scale) ** 2)

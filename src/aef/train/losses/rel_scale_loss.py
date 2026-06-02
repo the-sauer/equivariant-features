@@ -14,7 +14,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import torch
+
+
+class RELScaleLoss(torch.nn.Module):
+    def __init__(self):
+        super(RELScaleLoss, self).__init__()
+
+    def forward(self, pred, gt):
+        return torch.mean(torch.abs(pred - gt) / (gt + 1e-8))
+
+
+class RELScaleLossSquared(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred, gt):
+        return torch.mean(((pred - gt) / (gt + 1e-8)) ** 2)

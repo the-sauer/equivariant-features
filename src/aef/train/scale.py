@@ -15,15 +15,17 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-import blobboards
+import logging
+import os
+
 import kornia
 import torch
+from tqdm import tqdm
 
-from ..data.blobboards import BlobBoardData
-from ..models.scale import NeuralScaleSpace
+from ..train import prepare_training
 
 
-def compute_scale(H, size):
+def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
     N = H.shape[0]
     device = H.device
 
@@ -73,36 +75,94 @@ def compute_scale(H, size):
     return scale.view(N, 1, size[0], size[1])
 
 
-def train_scale(model, dataset, pattern_size=(256, 256), batch_size=100):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def process_batch_scale_homographic(model, data, criterion, augmentation, device, cfg):
+    b, b_t, H, H_inv = map(lambda x: x.to(device), data)
+    b = augmentation(b)
+    b_t = augmentation(b_t)
+    gt = compute_scale(H, b.shape[2:])
 
-    model = model.to(device)
+    o = model(b)
+    o_t = model(b_t)
+    o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, b.shape[2:])
 
-    optimizer = torch.optim.Adam(model.parameters())
-
-    loss_func = torch.nn.MSELoss()
-
-    training_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
-    for data in training_loader:
-        b, b_t, H, H_inv = map(lambda x: x.to(device), data)
-        gt = compute_scale(H, pattern_size)
-        optimizer.zero_grad()
-
-        o = model(b)
-        o_t = model(b_t)
-        o_t = kornia.geometry.transform.warp_perspective(o_t, H_inv, pattern_size)
-
-        loss = loss_func(o_t / o, gt)
-        loss.backward()
-        optimizer.step()
-
-        print(f"loss {loss.item()}", flush=True)
+    return criterion(o_t / o, gt)
 
 
-if __name__ == "__main__":
-    model = NeuralScaleSpace(1)
-    train_scale(model, 100, batch_size=10)
+# TODO: Implement using train_func
+def train_scale_absolute(
+    model: torch.nn.Module,
+    train_dataset: torch.utils.data.Dataset,
+    validation_dataset: torch.utils.data.Dataset,
+    cfg, experiment_name="default"
+):
+    (
+        model,
+        optimizer,
+        scheduler,
+        criterion,
+        train_loader,
+        validation_loader,
+        augmentation,
+        device,
+        checkpoint_dir
+    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+
+    for epoch in range(cfg.training.num_epochs):
+        loop = tqdm(train_loader, leave=True)
+        cumulative_loss = 0.0
+        for b, gt, num_blobs in loop:
+            b: torch.Tensor = b.to(device)
+            gt: torch.Tensor = gt.to(device)
+            num_blobs: torch.Tensor = num_blobs.to(device)
+
+            for opt in optimizer:
+                opt.zero_grad()
+
+            b = augmentation(b)
+            scale_field: torch.Tensor = model(b)
+            out = []
+            for i in range(b.size(0)):
+                out.append(
+                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
+                )
+            out = torch.cat(out, dim=0).flatten()
+            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
+
+            loss = criterion(out, gt)
+            loss.backward()
+            for opt in optimizer:
+                opt.step()
+            cumulative_loss += loss.item() * b.size(0)
+
+            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
+            loop.set_postfix(loss=loss.item())
+
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
+
+        loop = tqdm(validation_loader, leave=True)
+        cumulative_loss = 0.0
+        for b, gt, num_blobs in loop:
+            b = b.to(device)
+            gt = gt.to(device)
+            num_blobs = num_blobs.to(device)
+
+            scale_field: torch.Tensor = model(b)
+            out = []
+            for i in range(b.size(0)):
+                out.append(
+                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
+                )
+            out = torch.cat(out, dim=0).flatten()
+            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
+
+            loss = criterion(out, gt)
+
+            cumulative_loss += loss.item() * b.size(0)
+
+            loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
+            loop.set_postfix(loss=loss.item())
+
+        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(validation_dataset))
+
+        for sch in scheduler:
+            sch.step()

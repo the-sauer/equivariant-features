@@ -1,0 +1,51 @@
+defaults:
+  - config
+  - _self_
+
+model:
+  name: AffineFeatureNetOne
+  params:
+    conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
+    basic_block_params:
+      option: B
+    scale_space:
+      name: NeuralScaleSpaceSESN
+      params:
+        num_scales: 5
+training:
+  process_batch: process_batch_homographic_descriptor
+  dataset:
+    name: KaggleHomographyData
+    params:
+      data_dir: ./data/datasets/
+      name: image-matching-challenge-2025
+      in_memory: false
+  optimizer:
+    scale_space:
+      name: adam
+      params:
+        lr: 1e-3
+        weight_decay: 5e-5
+      scheduler:
+        name: multistep
+        params:
+          milestones: [20, 40]
+          gamma: 0.1
+    feature_net:
+      name: adamw
+      params:
+        lr: 2e-3
+      scheduler:
+        name: cosine
+        params:
+          T_max: 50
+  loss: npairs
+validation:
+  dataset:
+    name: KaggleHomographyData
+    params:
+      name: image-matching-challenge-2025
+      data_dir: ./data/datasets/
+      params:
+        in_memory: false
+  loss: fpr

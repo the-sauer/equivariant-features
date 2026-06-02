@@ -14,7 +14,15 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
-Neural Networks\".
-"""
+import torch
+
+
+class SiftScaleLoss(torch.nn.Module):
+    def forward(self, x, **_):
+        detections = x["detections"]
+        scales = x["scales"] * 2
+        assert torch.all(scales > 0), "Scales must be positive"
+        detected_scales = torch.linalg.det(detections[:, :2, :2])
+        detected_scales_mask = torch.isnan(detected_scales)
+
+        return torch.mean((detected_scales[~detected_scales_mask] - scales[~detected_scales_mask] ** 2) ** 2)

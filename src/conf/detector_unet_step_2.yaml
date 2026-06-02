@@ -1,0 +1,48 @@
+defaults:
+  - detector_unet_dgx
+  - _self_
+
+training:
+  image_batch_size: 8
+  dataset:
+    name: ColmapData
+    params:
+      images: /data/datasets/south-building
+      image_size: [512, 512]
+  num_epochs: 400
+  batch_size: 10000
+  loss:
+    - name: SiftScaleLoss
+      report: true
+    - name: EpipolarLoss
+      report: true
+      weight: 10
+      params:
+        n_samples: 10
+    - name: NonSingular
+      weight: 0.01
+  process_batch: process_batch_colmap_detector
+  continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
+  optimizer:
+    name: adamw
+    params:
+      lr: 1e-4
+      weight_decay: 1e-4
+validation:
+  loss:
+    - name: SiftScaleLoss
+      report: true
+    - name: EpipolarLoss
+      report: true
+      weight: 10
+      params:
+        n_samples: 10
+  dataset:
+    name: ColmapData
+    params:
+      images: /data/datasets/south-building
+      image_size: [512, 512]
+  batch_size: 60000
+experiment_name: detector_unet_step_2_colmap
+logging:
+  interval: 1

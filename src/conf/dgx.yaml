@@ -1,0 +1,10 @@
+training:
+  dataset:
+    params:
+      data_dir: /data/datasets
+validation:
+  dataset:
+    params:
+      data_dir: /data/datasets
+logging:
+  dir: /data/logs
