@@ -22,6 +22,7 @@ import torchvision
 
 from . import scale
 from .hardnet import HardNet
+from .sift import SIFTNet
 from ..configuration import ComponentConfig
 
 
@@ -67,7 +68,7 @@ class AffineEquivariantUNet(torch.nn.Module):
             ])
         ])
         self.out_layer = asel.affine.EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
-        self.descriptor_model = HardNet()
+        self.descriptor_model = SIFTNet() #HardNet(in_channels=3, patch_size=64)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residuals = []
