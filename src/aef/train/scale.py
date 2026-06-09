@@ -14,15 +14,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-
-import logging
-import os
-
 import kornia
 import torch
-from tqdm import tqdm
-
-from ..train import prepare_training
 
 
 def compute_scale(H: torch.Tensor, size: tuple) -> torch.Tensor:
@@ -88,81 +81,26 @@ def process_batch_scale_homographic(model, data, criterion, augmentation, device
     return criterion(o_t / o, gt)
 
 
-# TODO: Implement using train_func
-def train_scale_absolute(
-    model: torch.nn.Module,
-    train_dataset: torch.utils.data.Dataset,
-    validation_dataset: torch.utils.data.Dataset,
-    cfg, experiment_name="default"
-):
-    (
-        model,
-        optimizer,
-        scheduler,
-        criterion,
-        train_loader,
-        validation_loader,
-        augmentation,
-        device,
-        checkpoint_dir
-    ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+def process_batch_scale_colmap(model, data, criterion, augmentation, device, cfg):
+    scales = data["scales"].to(device)
+    keypoints = data["keypoints"].to(device)
+    coords = data["keypoint_coords"].to(device)
 
-    for epoch in range(cfg.training.num_epochs):
-        loop = tqdm(train_loader, leave=True)
-        cumulative_loss = 0.0
-        for b, gt, num_blobs in loop:
-            b: torch.Tensor = b.to(device)
-            gt: torch.Tensor = gt.to(device)
-            num_blobs: torch.Tensor = num_blobs.to(device)
+    img_ids = keypoints[:, 0].long().unique()
 
-            for opt in optimizer:
-                opt.zero_grad()
+    pred_list = []
+    gt_list = []
+    for i in range(0, len(img_ids), cfg.training.image_batch_size):
+        img_batch_ids = img_ids[i:min(i+cfg.training.image_batch_size, len(img_ids))]
+        img_batch = augmentation(torch.stack([data["images"][img_id.item()] for img_id in img_batch_ids]).to(device))
+        out = model(img_batch)
+        for j in range(img_batch.size(0)):
+            mask = keypoints[:, 0] == img_batch_ids[j]
+            xy = coords[mask].round().long()
+            pred_list.append(out[j, 0, xy[:, 1], xy[:, 0]])
+            gt_list.append(scales[mask])
 
-            b = augmentation(b)
-            scale_field: torch.Tensor = model(b)
-            out = []
-            for i in range(b.size(0)):
-                out.append(
-                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
-                )
-            out = torch.cat(out, dim=0).flatten()
-            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
-
-            loss = criterion(out, gt)
-            loss.backward()
-            for opt in optimizer:
-                opt.step()
-            cumulative_loss += loss.item() * b.size(0)
-
-            loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
-            loop.set_postfix(loss=loss.item())
-
-        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"epoch_{epoch:04d}.pth"))
-
-        loop = tqdm(validation_loader, leave=True)
-        cumulative_loss = 0.0
-        for b, gt, num_blobs in loop:
-            b = b.to(device)
-            gt = gt.to(device)
-            num_blobs = num_blobs.to(device)
-
-            scale_field: torch.Tensor = model(b)
-            out = []
-            for i in range(b.size(0)):
-                out.append(
-                    scale_field[i, 0, gt[i, :num_blobs[i], 0].round().int(), gt[i, :num_blobs[i], 1].round().int()]
-                )
-            out = torch.cat(out, dim=0).flatten()
-            gt = torch.cat([gt[i, :num_blobs[i], 2] for i in range(b.size(0))], dim=0).flatten()
-
-            loss = criterion(out, gt)
-
-            cumulative_loss += loss.item() * b.size(0)
-
-            loop.set_description(f"Validation [{epoch}/{cfg.training.num_epochs}]")
-            loop.set_postfix(loss=loss.item())
-
-        logging.info("finished epoch %d, avg loss: %f", epoch, cumulative_loss / len(validation_dataset))
-
-        for sch in scheduler:
-            sch.step()
+    return {
+        n: (criterion({"pred_scales": torch.cat(pred_list), "scales": torch.cat(gt_list)}), w, r)
+        for n, (criterion, w, r) in criterion.items()
+    }

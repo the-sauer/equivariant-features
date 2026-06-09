@@ -20,6 +20,15 @@ import sesn
 import torch
 
 
+class LambdaLayer(torch.nn.Module):
+    def __init__(self, func):
+        super().__init__()
+        self.func = func
+
+    def forward(self, x):
+        return self.func(x)
+
+
 def NeuralScaleSpaceSESN(
     in_channels: int = 1,
     factor: float = 2.0,
@@ -27,13 +36,14 @@ def NeuralScaleSpaceSESN(
     min_scale: float = 1.0,
     effective_size: int = 5,
     scale_size: int = 5,
+    scale_output_factor: float = 1,
     **_
 ) -> torch.nn.Module:
     """
     Neural Scale Field based on Scale-Equivariant Steerable Networks (SESN).
     """
-    if min_scale < 1:
-        raise ValueError("min_scale must be at least 1.")
+    # if min_scale < 1:
+    #     raise ValueError("min_scale must be at least 1.")
     q = factor ** (1 / (num_scales - 1))
     scales = [min_scale * q**i for i in range(num_scales)]
     kernel_size = ceil(effective_size * max(scales))
@@ -45,8 +55,10 @@ def NeuralScaleSpaceSESN(
         sesn.SESConv_Z2_H(in_channels, 8, **layer_kwargs),
         sesn.SESConv_H_H(8, 16, scale_size, **layer_kwargs),
         sesn.SESConv_H_H(16, 32, scale_size, **layer_kwargs),
-        sesn.SESConv_H_H_1x1(32, 1, num_scales=num_scales),
-        sesn.SESArgMaxProjection(scales)
+        sesn.SESConv_H_H(32, 64, scale_size, **layer_kwargs),
+        sesn.SESConv_H_H_1x1(64, 1, num_scales=num_scales),
+        sesn.SESArgMaxProjection(scales),
+        LambdaLayer(lambda x: x * scale_output_factor)
     )
 
 

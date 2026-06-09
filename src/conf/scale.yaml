@@ -3,21 +3,26 @@ defaults:
   - _self_
 
 model:
-  name: ScaleSpaceSESN
+  name: NeuralScaleSpaceSESN
   params:
-    factor: 6.5
-    num_scales: 4
-    min_scale: 2.0
+    factor: 12
+    num_scales: 8
+    min_scale: 1
     effective_size: 5
+    scale_output_factor: 0.25
+
 training:
+  num_epochs: 120
+  process_batch: process_batch_scale_colmap
+  # continue_from_checkpoint: /data/logs/NeuralScaleSpaceSESN_SiftScaleLoss_2026_06_02_22_47_40/checkpoints/epoch_022.pth
   dataset:
-    name: BlobBoardHomographyData
+    name: ColmapData
     params:
-      image_size: [128, 128]
-      num_boards: 80
-      polarity: "random"
-      transform_params:
-        scaling_amplitude: 1
+      images: /data/datasets/south-building
+      image_size: [512, 512]
+  loss: 
+    - name: SiftScaleLoss
+      report: true
   optimizer:
     name: adam
     params:
@@ -26,18 +31,18 @@ training:
     scheduler:
       name: multistep
       params:
-        milestones: [20, 40]
+        milestones: [40, 80]
         gamma: 0.1
-  loss: "rel_squared"
+
 validation:
   dataset:
-    name: BlobBoardHomographyData
+    name: ColmapData
     params:
-      image_size: [128, 128]
-      num_boards: 10
-      polarity: "random"
-      transform_params:
-        scaling_amplitude: 1
-  loss: rel_squared
+      images: /data/datasets/south-building
+      image_size: [512, 512]
+  loss: 
+    - name: SiftScaleLoss
+      report: true
+
 logging:
   interval: 1

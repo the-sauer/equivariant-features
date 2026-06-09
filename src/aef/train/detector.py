@@ -21,6 +21,8 @@ import torch
 import torchvision
 from tqdm import tqdm
 
+from .losses.contrastive import Contrastive
+
 
 def homogenize(A, b=None):
     *B, H, W = A.size()
@@ -172,7 +174,7 @@ def process_batch_gt(model, data, criterion, augmentation, device, cfg):
     return criterion(feature_map, gt)
 
 
-def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg, max_imgs_per_batch=56):
+def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg, max_imgs_per_batch=200):
     patch_size = model.descriptor_model.patch_size
     keypoints = data["keypoints"].to(torch.long).to(device)
     coords = data["keypoint_coords"].to(device)
@@ -195,6 +197,9 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     imgs = torch.stack([data["images"][img_id] for img_id in img_ids])
     image_batch = cfg.training.image_batch_size
 
+    needs_features = any(isinstance(criterion, Contrastive) for criterion, _, _ in criterion.values())
+    print(f"{needs_features=}")
+
     out = []
     features = []
     indices = []
@@ -210,25 +215,31 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             xy = coords[kp_mask]
             xy_rounded = xy.round().int()
             detections = out[j, ..., xy_rounded[:, 1], xy_rounded[:, 0]].permute(2, 0, 1).view(-1, 2, 2)
-            transforms = homogenize(detections, b=xy)
-            if False:   # TODO: Decide based on losses
+            non_singular_mask = torch.linalg.det(detections) > 1e-6
+            detections = detections[non_singular_mask]
+            # detections_normalized = detections[non_singular_mask] / torch.sqrt(torch.linalg.det(detections[non_singular_mask])).unsqueeze(-1).unsqueeze(-1)
+            # detections_scaled = detections_normalized * gt_scales[kp_mask][non_singular_mask].unsqueeze(-1).unsqueeze(-1)
+            transforms = homogenize(detections, b=xy[non_singular_mask])
+            if not torch.any(non_singular_mask):
+                print(f"Skipping image with id {img_id} because there were no valid detections")
+                continue
+            if needs_features:   # TODO: Decide based on losses
                 patches = kornia.geometry.transform.warp_perspective(
-                    torchvision.transforms.functional.gaussian_blur(torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]), kernel_size=19, sigma=3.0).unsqueeze(0).expand(transforms.size(0), -1, -1, -1),
+                    torchvision.transforms.functional.gaussian_blur(torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]), kernel_size=19, sigma=3.0).unsqueeze(0).expand(detections_scaled.size(0), -1, -1, -1),
                     (
-                        torch.diag(torch.Tensor([patch_size, patch_size, 1]).to(device)).unsqueeze(0)
-                        @ homogenize(torch.eye(2).to(device), b=torch.tensor([0.5, 0.5]).to(device)).unsqueeze(0)
-                        @ torch.linalg.inv(transforms)
+                        torch.diag(torch.Tensor([1 / patch_size, 1 / patch_size, 1]).to(device)).unsqueeze(0)
+                        @ homogenize(torch.eye(2).to(device), b=torch.tensor([-0.5, -0.5]).to(device)).unsqueeze(0)
+                        @ transforms
                     ),
                     dsize=(patch_size, patch_size),
                 )
-
-            detection_list.append(transforms)
-            if False:   # TODO: Decide based on losses
                 features.append(model.descriptor_model(patches.to(device)))
-            indices.append(keypoints[kp_mask][:, 1])
-            pts.append(xy)
-            img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(xy.size(0)))
-            scales.append(gt_scales[kp_mask])
+
+            detection_list.append(torch.linalg.inv(transforms))
+            indices.append(keypoints[kp_mask][non_singular_mask][:, 1])
+            pts.append(xy[non_singular_mask])
+            img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(non_singular_mask.sum()))
+            scales.append(gt_scales[kp_mask][non_singular_mask])
 
     matches = []
     for feature_id in feature_ids:
@@ -240,7 +251,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
 
     return {
         n: (criterion({
-            "features": torch.cat(features, dim=0) if False else None,
+            "features": torch.cat(features, dim=0) if needs_features else None,
             "indices": torch.cat(indices, dim=0),
             "scales": torch.cat(scales, dim=0).to(device),
             "detections": torch.cat(detection_list, dim=0),

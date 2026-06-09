@@ -4,7 +4,8 @@ defaults:
   - _self_
 
 training:
-  batch_size: 32
+  image_batch_size: 50
+  batch_size: 320000
 
 validation:
-  batch_size: 32
+  batch_size: 320000

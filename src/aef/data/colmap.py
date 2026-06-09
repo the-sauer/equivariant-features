@@ -134,11 +134,6 @@ class ColmapData(torch.utils.data.Dataset):
         self.keypoint_coords = torch.cat(keypoint_coords, dim=0)
         self.scales = torch.cat(scale_list, dim=0)
 
-        ordering = self.keypoints[:, 1].argsort()
-        self.keypoints = self.keypoints[ordering]
-        self.keypoint_coords = self.keypoint_coords[ordering]
-        self.scales = self.scales[ordering]
-
         self.fundamental = torch.empty((max(img_ids) + 1, max(img_ids) + 1, 3, 3), dtype=torch.float32)
         for img_id_1 in img_ids:
             for img_id_2 in img_ids:

@@ -29,7 +29,7 @@ from . import losses
 
 from .descriptor import *
 from .detector import *
-# from .scale import *
+from .scale import *
 
 
 ProcessBatchType = Callable[
@@ -195,11 +195,11 @@ def train_func(process_batch: ProcessBatchType):
             for i, data in enumerate(loop):
                 for opt in optimizer.values():
                     opt.zero_grad()
-                try:
-                    losses = process_batch(model, data, criterion, augmentation, device, cfg)
-                except Exception as e:
-                    logging.error(f"Error processing batch {i} in epoch {epoch}: {e}")
-                    continue
+                # try:
+                losses = process_batch(model, data, criterion, augmentation, device, cfg)
+                # except Exception as e:
+                #     logging.error(f"Error processing batch {i} in epoch {epoch}: {e}")
+                #     continue
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                 cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
@@ -233,11 +233,11 @@ def train_func(process_batch: ProcessBatchType):
                 cumulative_loss = 0.0
                 cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
                 for data in loop:
-                    try:
-                        losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
-                    except Exception as e:
-                        logging.error(f"Error processing validation batch in epoch {epoch}: {e}")
-                        continue
+                    # try:
+                    losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
+                    # except Exception as e:
+                    #     logging.error(f"Error processing validation batch in epoch {epoch}: {e}")
+                    #     continue
                     loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
 
                     cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
