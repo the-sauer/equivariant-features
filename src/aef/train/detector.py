@@ -208,6 +208,15 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     img_id_list = []
     scales = []
     for i, img in enumerate(imgs.split(image_batch)):
+        scale_field = torch.zeros(img.size(0), 1, img.size(2), img.size(3), device=device)
+        for j in range(img.size(0)):
+            kp_mask = keypoints[:, 0] == img_ids[i * image_batch + j]
+            xy = coords[kp_mask]
+            xy_rounded = xy.round().int()
+            scale_field[j, 0, xy_rounded[:, 1], xy_rounded[:, 0]] = gt_scales[kp_mask]
+            scale_field = torchvision.transforms.functional.gaussian_blur(scale_field, kernel_size=7, sigma=1.0)
+
+        model.inject_scale_field(scale_field)
         img_aug = augmentation(img.to(device))
         out = model(img_aug)
         for j, img_id in enumerate(img_ids[i * image_batch:(i+1) * image_batch]):
@@ -215,7 +224,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             xy = coords[kp_mask]
             xy_rounded = xy.round().int()
             detections = out[j, ..., xy_rounded[:, 1], xy_rounded[:, 0]].permute(2, 0, 1).view(-1, 2, 2)
-            non_singular_mask = torch.linalg.det(detections) > 1e-6
+            non_singular_mask = torch.linalg.det(detections) > 1e-6 if needs_features else torch.full((1,), True, device=device, dtype=torch.bool).expand(detections.size(0))
             detections = detections[non_singular_mask]
             # detections_normalized = detections[non_singular_mask] / torch.sqrt(torch.linalg.det(detections[non_singular_mask])).unsqueeze(-1).unsqueeze(-1)
             # detections_scaled = detections_normalized * gt_scales[kp_mask][non_singular_mask].unsqueeze(-1).unsqueeze(-1)
@@ -256,7 +265,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             "scales": torch.cat(scales, dim=0).to(device),
             "detections": torch.cat(detection_list, dim=0),
             "img_ids": torch.cat(img_id_list, dim=0),
-            "matches": torch.cat(matches, dim=0),
+            "matches": torch.cat(matches, dim=0) if matches else None,
             "pts": torch.cat(pts, dim=0),
             "fundamental": data["fundamental"].to(device),
         }), weight, report) for n, (criterion, weight, report) in criterion.items()

@@ -21,6 +21,7 @@ import torchvision
 
 from . import scale
 from .asel.affine import EquivarLayer
+from .hardnet import HardNet
 from .sift import SIFTNet
 
 
@@ -70,7 +71,6 @@ class AffineEquivariantUNet(torch.nn.Module):
                 ),
                 EquivarLayer(
                     channels[0] * 2, channels[0],
-        # scale_field = self.scale_gain(self.scale_space(x))
                     type=["0", "0"],
                     conv_layer=torch.nn.ConvTranspose2d,
                     kernel_size=2,
@@ -80,9 +80,15 @@ class AffineEquivariantUNet(torch.nn.Module):
         ])
         self.out_layer = EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
         self.descriptor_model = SIFTNet()
+        self.injected_scale_field = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residuals = []
+        if self.injected_scale_field is not None:
+            scale_field = self.injected_scale_field.to(x.device)
+            self.injected_scale_field = None
+        else:
+            scale_field = self.scale_space(x)
         for conv in self.conv_down:
             x = conv(x.unsqueeze(1)).squeeze(1)
             residuals.append(x)
@@ -94,5 +100,8 @@ class AffineEquivariantUNet(torch.nn.Module):
             res = residuals.pop()
             x = torch.cat([x, res], dim=1)
             x = conv(x.unsqueeze(1)).squeeze(1)
-        x = self.out_layer(x.unsqueeze(1)).squeeze(1)
+        x = self.out_layer((x.unsqueeze(1), scale_field))[0].squeeze(1)
         return x
+
+    def inject_scale_field(self, scale_field):
+        self.injected_scale_field = scale_field
