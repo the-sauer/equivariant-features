@@ -14,16 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import asel
 import omegaconf
 import torch
 import torchvision
 
 
 from . import scale
-from .hardnet import HardNet
+from .asel.affine import EquivarLayer
 from .sift import SIFTNet
-from ..configuration import ComponentConfig
 
 
 class AffineEquivariantUNet(torch.nn.Module):
@@ -39,40 +37,52 @@ class AffineEquivariantUNet(torch.nn.Module):
 
         self.conv_down = torch.nn.ModuleList([
             torch.nn.Sequential(
-                asel.affine.EquivarLayer(c_in, c_out),
-                asel.affine.EquivarLayer(c_out, c_out)
+                EquivarLayer(c_in, c_out),
+                EquivarLayer(c_out, c_out)
             ) for c_in, c_out in zip([3] + channels[:-1], channels)
         ])
 
         self.bottleneck = torch.nn.Sequential(
-            asel.affine.EquivarLayer(channels[-1], channels[-1] * 2),
-            asel.affine.EquivarLayer(channels[-1] * 2, channels[-1] * 2)
+            EquivarLayer(channels[-1], channels[-1] * 2),
+            EquivarLayer(channels[-1] * 2, channels[-1] * 2)
         )
 
         self.conv_up = torch.nn.ModuleList([
             torch.nn.ModuleList([
                 torch.nn.Sequential(
-                    asel.affine.EquivarLayer(c_out * 2, c_out),
-                    asel.affine.EquivarLayer(c_out, c_out)
+                    EquivarLayer(c_out * 2, c_out),
+                    EquivarLayer(c_out, c_out)
                 ),
-                asel.affine.EquivarLayer(c_out * 2, c_out, type=["0", "0"], conv_layer=torch.nn.ConvTranspose2d, kernel_size=2, up_stride=2)
+                EquivarLayer(
+                    c_out * 2, c_out,
+                    type=["0", "0"],
+                    conv_layer=torch.nn.ConvTranspose2d,
+                    kernel_size=2,
+                    up_stride=2
+                )
             ])
             for c_out in reversed(channels[1:])
         ] + [
             torch.nn.ModuleList([
                 torch.nn.Sequential(
-                    asel.affine.EquivarLayer(channels[0] * 2, channels[0], conv_layer=torch.nn.ConvTranspose2d),
-                    asel.affine.EquivarLayer(channels[0], channels[0], conv_layer=torch.nn.ConvTranspose2d)   
+                    EquivarLayer(channels[0] * 2, channels[0], conv_layer=torch.nn.ConvTranspose2d),
+                    EquivarLayer(channels[0], channels[0], conv_layer=torch.nn.ConvTranspose2d)
                 ),
-                asel.affine.EquivarLayer(channels[0] * 2, channels[0], type=["0", "0"], conv_layer=torch.nn.ConvTranspose2d, kernel_size=2, up_stride=2)
+                EquivarLayer(
+                    channels[0] * 2, channels[0],
+        # scale_field = self.scale_gain(self.scale_space(x))
+                    type=["0", "0"],
+                    conv_layer=torch.nn.ConvTranspose2d,
+                    kernel_size=2,
+                    up_stride=2
+                )
             ])
         ])
-        self.out_layer = asel.affine.EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
-        self.descriptor_model = SIFTNet() #HardNet(in_channels=3, patch_size=64)
+        self.out_layer = EquivarLayer(channels[0], 4, type=["0", "c"], conv_layer=torch.nn.ConvTranspose2d)
+        self.descriptor_model = SIFTNet()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residuals = []
-        # scale_field = self.scale_gain(self.scale_space(x))
         for conv in self.conv_down:
             x = conv(x.unsqueeze(1)).squeeze(1)
             residuals.append(x)

@@ -16,7 +16,7 @@
 
 from math import ceil
 
-import sesn
+from .sesn import SESConv_Z2_H, SESConv_H_H, SESConv_H_H_1x1, SESArgMaxProjection
 import torch
 
 
@@ -52,12 +52,12 @@ def NeuralScaleSpaceSESN(
     padding = kernel_size // 2
     layer_kwargs = {"effective_size": effective_size, "kernel_size": kernel_size, "scales": scales, "padding": padding}
     return torch.nn.Sequential(
-        sesn.SESConv_Z2_H(in_channels, 8, **layer_kwargs),
-        sesn.SESConv_H_H(8, 16, scale_size, **layer_kwargs),
-        sesn.SESConv_H_H(16, 32, scale_size, **layer_kwargs),
-        sesn.SESConv_H_H(32, 64, scale_size, **layer_kwargs),
-        sesn.SESConv_H_H_1x1(64, 1, num_scales=num_scales),
-        sesn.SESArgMaxProjection(scales),
+        SESConv_Z2_H(in_channels, 8, **layer_kwargs),
+        SESConv_H_H(8, 16, scale_size, **layer_kwargs),
+        SESConv_H_H(16, 32, scale_size, **layer_kwargs),
+        SESConv_H_H(32, 64, scale_size, **layer_kwargs),
+        SESConv_H_H_1x1(64, 1, num_scales=num_scales),
+        SESArgMaxProjection(scales),
         LambdaLayer(lambda x: x * scale_output_factor)
     )
 

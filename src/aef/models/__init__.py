@@ -18,8 +18,8 @@
 This module contains the implementations of the models used in this thesis.
 """
 
-from .approach_one import *
-from .approach_two import *
-from .hardnet import *
-from .scale import *
-from .unet import *
+from .approach_one import AffineFeatureNetCanonicalOne, AffineFeatureNetOne
+from .approach_two import AffineFeatureNetCanonicalTwo
+from .hardnet import HardNet
+from .scale import NeuralScaleSpaceSESN
+from .unet import AffineEquivariantUNet

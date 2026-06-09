@@ -14,8 +14,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import asel
 import torch
+
+from .asel.affine import BasicBlock, EquivarLayer, LearnedSaliencyLayer
 
 
 class AffineFeatureNetCanonicalTwo(torch.nn.Module):
@@ -41,11 +42,11 @@ class AffineFeatureNetCanonicalTwo(torch.nn.Module):
             basic_block_params = {}
 
         self.feature_net = torch.nn.Sequential(
-            asel.affine.BasicBlock(in_channels, conv_depths[0], scales=scale_list, **basic_block_params),
-            *(asel.affine.BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params)
+            BasicBlock(in_channels, conv_depths[0], scales=scale_list, **basic_block_params),
+            *(BasicBlock(conv_depths[i], conv_depths[i+1], scales=scale_list, **basic_block_params)
               for i in range(len(conv_depths)-1)),
-            asel.affine.EquivarLayer(conv_depths[-1], 4, scales=scale_list, type=["0", "c"]),
-            asel.affine.LearnedSaliencyLayer(scales=scale_list),
+            EquivarLayer(conv_depths[-1], 4, scales=scale_list, type=["0", "c"]),
+            LearnedSaliencyLayer(scales=scale_list),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
