@@ -101,7 +101,7 @@ class AffineEquivariantUNet(torch.nn.Module):
             x = torch.nn.functional.max_pool2d(x, 2)
         x = self.bottleneck(x.unsqueeze(1)).squeeze(1)
         if torch.isnan(x).any():
-            print(f"\033[93mWarning: Found NaN values in the feature maps after bottleneck\033[0m")
+            print("\033[93mWarning: Found NaN values in the feature maps after bottleneck\033[0m")
             print(f"{torch.isnan(x).any()=}, {torch.isinf(x).any()=}, {x.shape=}")
         for i, (conv, up) in enumerate(self.conv_up):
             x = up(x.unsqueeze(1)).squeeze(1)

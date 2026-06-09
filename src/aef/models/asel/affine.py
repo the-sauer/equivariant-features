@@ -24,7 +24,7 @@ def compute_affine_invariants(u):
     inv2 = normalize(inv2)
     inv345 = normalize(torch.cat((inv3, inv4, inv5), 1))
     if u.shape[1] > 1:
-        inv6 = normalize(inv6)         
+        inv6 = normalize(inv6)
 
     return torch.cat((inv1, inv2, inv345, inv6), 1)
 
@@ -34,7 +34,7 @@ class EquivarLayer(nn.Module):
     def __init__(self, in_channels, out_channels, hid_channels=None, type=["0", "0"], stride=1):
         super(EquivarLayer, self).__init__()
         num_inv = 6 * in_channels - 3
-        if hid_channels == None:
+        if hid_channels is None:
             hid_channels = max(in_channels, out_channels)
         self.conv1 = torch.nn.Conv2d(num_inv, hid_channels, kernel_size=1)
         self.conv2 = torch.nn.Conv2d(hid_channels, out_channels, kernel_size=1)
@@ -73,14 +73,14 @@ class EqMatrixLayer(nn.Module):
 
         relative_inv = uxx * uyy - uxy * uxy
         Su = relative_inv.abs().view(x.shape[0], -1).max(dim=-1)[0]
-        Su[Su==0] = 1
+        Su[Su == 0] = 1
         Su = Su.view(x.shape[0], 1, 1, 1) ** 0.5
 
         eq_matrix11 = self.conv1((uxx * uy - uxy * ux) / Su)
         eq_matrix12 = self.conv1(ux)
         eq_matrix21 = self.conv1((uxy * uy - uyy * ux) / Su)
         eq_matrix22 = self.conv1(uy)
-        
+
         return torch.cat(
                 (eq_matrix11, eq_matrix12, eq_matrix21, eq_matrix22),
                 dim=1)
@@ -118,8 +118,8 @@ class BasicBlock(nn.Module):
 class EquivarLayer_affine_resnet32(nn.Module):
     def __init__(self,
                  in_shape,
-                 beta = 10,
-                 block = BasicBlock,
+                 beta=10,
+                 block=BasicBlock,
                  num_blocks=[5, 5, 5],
                  ):
         super(EquivarLayer_affine_resnet32, self).__init__()
@@ -143,7 +143,7 @@ class EquivarLayer_affine_resnet32(nn.Module):
 
     def det_pool(self, x):
         b, _, h, w = x.shape
-        det = (x[:,0,:,:] * x[:,3,:,:] - x[:,1,:,:] * x[:,2,:,:]).abs()
+        det = (x[:, 0, :, :] * x[:, 3, :, :] - x[:, 1, :, :] * x[:, 2, :, :]).abs()
         det_onehot = torch.nn.functional.one_hot(
             torch.argmax(det.view(b, -1), dim=-1), h*w
         ).view(b, h, w).float()
@@ -151,7 +151,7 @@ class EquivarLayer_affine_resnet32(nn.Module):
             self.beta * det.view(b, -1), dim=-1
         ).view(b, h, w)
         det_weight = det_onehot + det_soft - det_soft.detach()
-        pool_x = torch.sum(det_weight.unsqueeze(1) * x, dim=(-2,-1))
+        pool_x = torch.sum(det_weight.unsqueeze(1) * x, dim=(-2, -1))
         return pool_x.view(b, 2, 2)
 
     def forward(self, x):
