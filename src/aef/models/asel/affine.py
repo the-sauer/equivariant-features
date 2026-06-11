@@ -136,9 +136,7 @@ class EqMatrixLayer(nn.Module):
         super(EqMatrixLayer, self).__init__()
         self.in_channels = in_channels
         self.scales = scales
-        self.conv1 = torch.nn.Conv2d(
-            in_channels, out_channels // 4, kernel_size=1, bias=False
-        )
+        self.conv1 = torch.nn.Conv2d(in_channels, out_channels // 4, kernel_size=1, bias=False)
 
     def forward(self, x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]):
         if isinstance(x, tuple):
@@ -146,7 +144,13 @@ class EqMatrixLayer(nn.Module):
         else:
             Su = None
 
-        b, s, _, h, w = x.shape
+        if x.dim() == 4:
+            b, _, h, w = x.shape
+            s = 1
+        elif x.dim() == 5:
+            b, s, _, h, w = x.shape
+        else:
+            raise ValueError("Input must be 4D (B,C,H,W) or 5D (B,S,C,H,W).")
 
         diff = Diff(scales=self.scales).to(x.device)
         ux, uy, uxx, uyy, uxy = diff(x)
@@ -168,13 +172,10 @@ class EqMatrixLayer(nn.Module):
             )
             eq_matrix21 = self.conv1(uy.view(b * s, -1, h, w)).view(b, s, -1, h, w)
         else:
-            eq_matrix11 = self.conv1(
-                ((uxx * uy - uxy * ux) / Su).view(b * s, -1, h, w)
-            ).view(b, s, -1, h, w)
+            Su = Su.unsqueeze(1)
+            eq_matrix11 = self.conv1(((uxx * uy - uxy * ux) / Su).view(b * s, -1, h, w)).view(b, s, -1, h, w)
             eq_matrix12 = self.conv1(ux.view(b * s, -1, h, w)).view(b, s, -1, h, w)
-            eq_matrix22 = self.conv1(
-                ((uxy * uy - uyy * ux) / Su).view(b * s, -1, h, w)
-            ).view(b, s, -1, h, w)
+            eq_matrix22 = self.conv1(((uxy * uy - uyy * ux) / Su).view(b * s, -1, h, w)).view(b, s, -1, h, w)
             eq_matrix21 = self.conv1(uy.view(b * s, -1, h, w)).view(b, s, -1, h, w)
 
         return torch.cat((eq_matrix11, eq_matrix12, eq_matrix21, eq_matrix22), dim=2)

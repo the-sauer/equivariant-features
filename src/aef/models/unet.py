@@ -89,17 +89,30 @@ class AffineEquivariantUNet(torch.nn.Module):
             self.injected_scale_field = None
         else:
             scale_field = self.scale_space(x)
-        for conv in self.conv_down:
+        scale_field += 1e-6  # Avoid zero scales
+        for i, conv in enumerate(self.conv_down):
             x = conv(x.unsqueeze(1)).squeeze(1)
+            if torch.isnan(x).any():
+                print(f"\033[93mWarning: Found NaN values in the feature maps after conv_down layer {i}\033[0m")
+                print(f"{torch.isnan(x).any()=}, {torch.isinf(x).any()=}, {x.shape=}")
             residuals.append(x)
             x = torchvision.transforms.functional.gaussian_blur(x, kernel_size=3, sigma=1.0)
             x = torch.nn.functional.max_pool2d(x, 2)
         x = self.bottleneck(x.unsqueeze(1)).squeeze(1)
-        for conv, up in self.conv_up:
+        if torch.isnan(x).any():
+            print(f"\033[93mWarning: Found NaN values in the feature maps after bottleneck\033[0m")
+            print(f"{torch.isnan(x).any()=}, {torch.isinf(x).any()=}, {x.shape=}")
+        for i, (conv, up) in enumerate(self.conv_up):
             x = up(x.unsqueeze(1)).squeeze(1)
+            if torch.isnan(x).any():
+                print(f"\033[93mWarning: Found NaN values in the feature maps after upsampling layer {i}\033[0m")
+                print(f"{torch.isnan(x).any()=}, {torch.isinf(x).any()=}, {x.shape=}")
             res = residuals.pop()
             x = torch.cat([x, res], dim=1)
             x = conv(x.unsqueeze(1)).squeeze(1)
+            if torch.isnan(x).any():
+                print(f"\033[93mWarning: Found NaN values in the feature maps after conv_up layer {i}\033[0m")
+                print(f"{torch.isnan(x).any()=}, {torch.isinf(x).any()=}, {x.shape=}")
         x = self.out_layer((x.unsqueeze(1), scale_field))[0].squeeze(1)
         return x
 

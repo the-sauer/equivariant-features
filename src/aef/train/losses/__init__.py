@@ -14,10 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import pytorch_metric_learning.losses as pml_losses
-import torch
-
-from .contrastive import Contrastive, FPR95
+from .contrastive import Contrastive, FPR95, SupCon
 from .determinant import Determinant, NonSingular
 from .epipolar import EpipolarLoss
 from .geodesic_loss import GeodesicLoss
@@ -25,13 +22,3 @@ from .image_generation_loss import ImageGeneration
 from .rel_scale_loss import RELScaleLoss, RELScaleLossSquared
 from .reprojection_loss import Reprojection
 from .sift import SiftScaleLoss
-from ...evaluate import fpr
-
-
-class SupCon(torch.nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.criterion = pml_losses.SupConLoss(**kwargs)
-
-    def forward(self, x, **_):
-        return self.criterion(x["features"], x["indices"])

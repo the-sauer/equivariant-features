@@ -35,6 +35,9 @@ class EpipolarLoss(torch.nn.Module):
             raise ValueError(f"Unsupported reduction: {reduction}")
 
     def forward(self, x) -> torch.Tensor:
+        if matches := x.get("matches") is None:
+            logging.warning("No matches found in input, returning zero loss")
+            return torch.tensor(0.0, device=x["indices"].device)
         if "indices" in x:
             assert torch.all(x["indices"][x["matches"][:, 0]] == x["indices"][x["matches"][:, 1]])
 
@@ -75,8 +78,9 @@ class EpipolarLoss(torch.nn.Module):
         pt_2 = torch.stack((pt_2[..., 0], pt_2[..., 1], torch.ones_like(pt_2[:, :, 1])), dim=-1).unsqueeze(-1)
         pt_2_t = pt_2.transpose(-2, -1)
         mismatched = ((pt_2_t.squeeze(1) @ F @ pt_1.squeeze(1)) > 2).squeeze()
-        if torch.any(mismatched):
-            logging.error("Found (%d/%d) mismatched points with epipolar error > 2", mismatched.int().sum(), mismatched.size(0))
+        if torch.any(mismatched) and mismatched.dim() > 0:
+            logging.error("Found (%d/%d) mismatched points with epipolar error > 2", mismatched.int().sum(), len(mismatched))
+            print(f"\033[91mFound ({mismatched.int().sum()}/{len(mismatched)}) mismatched points with epipolar error > 2\033[0m")
 
         pt_1 = pt_1.repeat(1, self.n_samples, 1, 1)
         pt_1[:, :, :2] += self.sampling_distribution.sample((pt_1.shape[0], self.n_samples, 2, 1)).to(pt_1.device)

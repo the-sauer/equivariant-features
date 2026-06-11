@@ -17,7 +17,7 @@
 import logging
 
 import kornia
-import pytorch_metric_learning
+import pytorch_metric_learning.losses as pml_losses
 import torch
 import torchvision
 
@@ -37,7 +37,7 @@ class Contrastive(torch.nn.Module):
             self.contrastive_loss = fpr()
         else:
             try:
-                self.contrastive_loss = getattr(pytorch_metric_learning.losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
+                self.contrastive_loss = getattr(pml_losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
             except AttributeError:
                 raise ValueError(f"Unsupported distance metric: {contrastive_loss}")
         self.patch_size = patch_size
@@ -55,10 +55,7 @@ class Contrastive(torch.nn.Module):
         x
     ) -> torch.Tensor:
         if "features" in x and "indices" in x:
-            return self.contrastive_loss(
-                torch.cat(x["features"]),
-                torch.cat(x["indices"])
-            )
+            return self.contrastive_loss((x["features"]), x["indices"])
 
         descriptor_model = x["descriptor_model"]
         if "pred" in x and "target" in x:
@@ -120,3 +117,8 @@ class Contrastive(torch.nn.Module):
 class FPR95(Contrastive):
     def __init__(self, **kwargs):
         super().__init__(contrastive_loss="fpr", **kwargs)
+
+
+class SupCon(Contrastive):
+    def __init__(self, **kwargs):
+        super().__init__(contrastive_loss="SupConLoss", **kwargs)

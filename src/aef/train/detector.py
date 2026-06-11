@@ -198,12 +198,12 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     image_batch = cfg.training.image_batch_size
 
     needs_features = any(isinstance(criterion, Contrastive) for criterion, _, _ in criterion.values())
-    print(f"{needs_features=}")
 
     out = []
     features = []
     indices = []
     detection_list = []
+    detection_unfiltered_list = []
     pts = []
     img_id_list = []
     scales = []
@@ -224,17 +224,19 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             xy = coords[kp_mask]
             xy_rounded = xy.round().int()
             detections = out[j, ..., xy_rounded[:, 1], xy_rounded[:, 0]].permute(2, 0, 1).view(-1, 2, 2)
+            detections_unfiltered = detections
+            # detection_unfiltered_list.append(detections)
             non_singular_mask = torch.linalg.det(detections) > 1e-6 if needs_features else torch.full((1,), True, device=device, dtype=torch.bool).expand(detections.size(0))
             detections = detections[non_singular_mask]
             # detections_normalized = detections[non_singular_mask] / torch.sqrt(torch.linalg.det(detections[non_singular_mask])).unsqueeze(-1).unsqueeze(-1)
             # detections_scaled = detections_normalized * gt_scales[kp_mask][non_singular_mask].unsqueeze(-1).unsqueeze(-1)
             transforms = homogenize(detections, b=xy[non_singular_mask])
             if not torch.any(non_singular_mask):
-                print(f"Skipping image with id {img_id} because there were no valid detections")
+                print(f"\033[93mSkipping image with id {img_id} because there were no valid detections\033[0m")
                 continue
-            if needs_features:   # TODO: Decide based on losses
+            if needs_features:
                 patches = kornia.geometry.transform.warp_perspective(
-                    torchvision.transforms.functional.gaussian_blur(torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]), kernel_size=19, sigma=3.0).unsqueeze(0).expand(detections_scaled.size(0), -1, -1, -1),
+                    torchvision.transforms.functional.gaussian_blur(torchvision.transforms.functional.rgb_to_grayscale(img_aug[j]), kernel_size=19, sigma=3.0).unsqueeze(0).expand(transforms.size(0), -1, -1, -1),
                     (
                         torch.diag(torch.Tensor([1 / patch_size, 1 / patch_size, 1]).to(device)).unsqueeze(0)
                         @ homogenize(torch.eye(2).to(device), b=torch.tensor([-0.5, -0.5]).to(device)).unsqueeze(0)
@@ -245,10 +247,11 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
                 features.append(model.descriptor_model(patches.to(device)))
 
             detection_list.append(torch.linalg.inv(transforms))
+            detection_unfiltered_list.append(detections_unfiltered)
             indices.append(keypoints[kp_mask][non_singular_mask][:, 1])
             pts.append(xy[non_singular_mask])
             img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(non_singular_mask.sum()))
-            scales.append(gt_scales[kp_mask][non_singular_mask])
+            scales.append(gt_scales[kp_mask])
 
     matches = []
     for feature_id in feature_ids:
@@ -257,6 +260,8 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             continue
         x, y = torch.triu_indices(len(match_indices), len(match_indices), offset=1)
         matches.append(torch.stack((match_indices[x], match_indices[y]), dim=1))
+    if not matches:
+        print("\033[93mNo matches found in batch, skipping epipolar loss\033[0m")
 
     return {
         n: (criterion({
@@ -264,6 +269,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
             "indices": torch.cat(indices, dim=0),
             "scales": torch.cat(scales, dim=0).to(device),
             "detections": torch.cat(detection_list, dim=0),
+            "detections_unfiltered": torch.cat(detection_unfiltered_list, dim=0),
             "img_ids": torch.cat(img_id_list, dim=0),
             "matches": torch.cat(matches, dim=0) if matches else None,
             "pts": torch.cat(pts, dim=0),

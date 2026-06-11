@@ -31,9 +31,9 @@ class NonSingular(torch.nn.Module):
 class Determinant(torch.nn.Module):
     def forward(self, x):
         pred = x["detections"] if "detections" in x else x["pred"][0]
-        if "scale" in x:
-            scale = x["scale"][0]
-            scale = scale.view(-1, 1, 1)
-        else:
-            scale = 8.0
-        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), scale)) - scale) ** 2)
+        # if "scale" in x:
+        #     scale = x["scale"][0]
+        #     scale = scale.view(-1, 1, 1)
+        # else:
+        #     scale = 1.0
+        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), 1)) - 1) ** 2)

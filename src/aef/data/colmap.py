@@ -85,7 +85,7 @@ class ColmapData(torch.utils.data.Dataset):
         elif suffix == "test":
             img_ids = img_ids[int(len(img_ids) * 0.9):]
         else:
-            ValueError("suffix must be one of ['train', 'validation']")
+            img_ids = img_ids
 
         self.images = {}
         keypoint_list = []
