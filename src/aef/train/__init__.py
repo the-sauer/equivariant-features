@@ -32,6 +32,19 @@ from .detector import *
 from .scale import *
 
 
+class chain:
+    def __init__(self, *args):
+        self.iterators = args
+
+    def __iter__(self):
+        for it in self.iterators:
+            for b in it:
+                yield b
+
+    def __len__(self):
+        return sum(map(len, self.iterators))
+
+
 ProcessBatchType = Callable[
     [
         torch.nn.Module,
@@ -128,18 +141,18 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         start_epoch = 0
         best_loss = float("inf")
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
+    train_loader = [torch.utils.data.DataLoader(
+        d,
         batch_size=cfg.training.batch_size,
         shuffle=False,
-        collate_fn=train_dataset.get_collate_func()
-    )
-    validation_loader = torch.utils.data.DataLoader(
-        validation_dataset,
+        collate_fn=d.get_collate_func()
+    ) for d in train_dataset]
+    validation_loader = [torch.utils.data.DataLoader(
+        d,
         batch_size=cfg.validation.batch_size,
         shuffle=True,
-        collate_fn=validation_dataset.get_collate_func()
-    )
+        collate_fn=d.get_collate_func()
+    ) for d in validation_dataset]
 
     criterion = {
         loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.training.loss
@@ -187,7 +200,7 @@ def train_func(process_batch: ProcessBatchType):
         y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
 
         for epoch in range(start_epoch, cfg.training.num_epochs):
-            loop = tqdm(train_loader, leave=True)
+            loop = tqdm(chain(*train_loader), leave=True)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             model.train()
             cumulative_loss = 0.0
@@ -225,7 +238,7 @@ def train_func(process_batch: ProcessBatchType):
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
 
-            loop = tqdm(validation_loader, leave=True)
+            loop = tqdm(chain(*validation_loader), leave=True)
             loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
 
             with torch.no_grad():

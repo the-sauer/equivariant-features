@@ -15,7 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import omegaconf
-import torch
 
 try:
     from .blobboards import *
@@ -28,6 +27,8 @@ from .kaggle import *
 
 def get_dataset(dataset_cfg):
     if isinstance(dataset_cfg, omegaconf.ListConfig):
-        return torch.utils.data.ConcatDataset(*(get_dataset(c) for c in dataset_cfg))
+        return [get_dataset(c) for c in dataset_cfg]
+    elif "foreach" in dataset_cfg:
+        return [globals[dataset_cfg.name](**dataset_cfg.params, path=os.path.join(dataset_cfg.foreach, d)) for d in os.listdir(dataset_cfg.foreach)]
     else:
-        return eval(f"{dataset_cfg.name}(**dataset_cfg.params)")
+        return [eval(f"{dataset_cfg.name}(**dataset_cfg.params)")]

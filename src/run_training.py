@@ -48,7 +48,7 @@ def train(cfg) -> None:
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
     validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
-    model_kwargs["in_channels"] = train_dataset.c
+    model_kwargs["in_channels"] = train_dataset[0].c
     Model = eval(cfg.model.name)
     model = Model(**model_kwargs)
     train_func(eval(cfg.training.process_batch))(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
