@@ -174,7 +174,7 @@ def process_batch_gt(model, data, criterion, augmentation, device, cfg):
     return criterion(feature_map, gt)
 
 
-def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg, max_imgs_per_batch=200):
+def process_batch_colmap_detector(model, data, criterion, augmentation, device, cfg, max_imgs_per_batch=40):
     patch_size = model.descriptor_model.patch_size
     keypoints = data["keypoints"].to(torch.long).to(device)
     coords = data["keypoint_coords"].to(device)
@@ -182,7 +182,7 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
     keypoints = keypoints[sorting]
     coords = coords[sorting]
     img_ids = keypoints[:, 0].unique().tolist()
-    gt_scales = data["scales"].to(device)[sorting]
+    gt_scales = data["scales"].to(device)[sorting] if "scales" in data else torch.ones(keypoints.size(0), device=device)
     if len(img_ids) > max_imgs_per_batch:
         # TODO: Sort by number of features descending
         logging.warning(f"Number of unique images in batch {len(img_ids)} exceeds max_imgs_per_batch {max_imgs_per_batch}")   
@@ -222,6 +222,8 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         for j, img_id in enumerate(img_ids[i * image_batch:(i+1) * image_batch]):
             kp_mask = keypoints[:, 0] == img_id
             xy = coords[kp_mask]
+            coordinate_in_bound_mask = (xy >= 0).all(dim=1) & (xy[:, 0] < img_aug.size(3)) & (xy[:, 1] < img_aug.size(2))
+            xy = xy[coordinate_in_bound_mask]
             xy_rounded = xy.round().int()
             detections = out[j, ..., xy_rounded[:, 1], xy_rounded[:, 0]].permute(2, 0, 1).view(-1, 2, 2)
             detections_unfiltered = detections
@@ -248,9 +250,9 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
 
             detection_list.append(torch.linalg.inv(transforms))
             detection_unfiltered_list.append(detections_unfiltered)
-            indices.append(keypoints[kp_mask][non_singular_mask][:, 1])
+            indices.append(keypoints[kp_mask][coordinate_in_bound_mask][non_singular_mask][:, 1])
             pts.append(xy[non_singular_mask])
-            img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(non_singular_mask.sum()))
+            img_id_list.append(torch.tensor([img_id], dtype=torch.long).to(device).expand(xy.size(0)))
             scales.append(gt_scales[kp_mask])
 
     matches = []
@@ -267,13 +269,13 @@ def process_batch_colmap_detector(model, data, criterion, augmentation, device, 
         n: (criterion({
             "features": torch.cat(features, dim=0) if needs_features else None,
             "indices": torch.cat(indices, dim=0),
-            "scales": torch.cat(scales, dim=0).to(device),
+            "scales": torch.cat(scales, dim=0).to(device) if scales else None,
             "detections": torch.cat(detection_list, dim=0),
             "detections_unfiltered": torch.cat(detection_unfiltered_list, dim=0),
             "img_ids": torch.cat(img_id_list, dim=0),
             "matches": torch.cat(matches, dim=0) if matches else None,
             "pts": torch.cat(pts, dim=0),
-            "fundamental": data["fundamental"].to(device),
+            "fundamental": data["fundamental"].to(device) if "fundamental" in data else None,
         }), weight, report) for n, (criterion, weight, report) in criterion.items()
     }
 

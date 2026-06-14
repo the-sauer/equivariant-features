@@ -32,4 +32,4 @@ class SiftScaleLoss(torch.nn.Module):
         else:
             raise ValueError("Input must contain either 'detections_unfiltered' or 'pred_scales'")
 
-        return torch.mean((detected_scales[~detected_scales_mask] - (1 /scales[~detected_scales_mask])) ** 2)
+        return torch.mean(torch.log(detected_scales[~detected_scales_mask] / scales[~detected_scales_mask]) ** 2)

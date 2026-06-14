@@ -81,9 +81,13 @@ class HomographyData(torch.utils.data.Dataset):
     def __init__(
         self,
         images: Union[str, torch.Tensor],
-        image_size: tuple[int, int] = (128, 128),
+        image_size: tuple[int, int] = (512, 512),
         in_memory=True,
         transform_params=None,
+        transforms_per_image=1,
+        sift_batch_size=100,
+        sift_min_response_threshold=0.03,
+        features_per_image=500,
         **_
     ):
         super().__init__()
@@ -103,9 +107,10 @@ class HomographyData(torch.utils.data.Dataset):
                 self.resize = torchvision.transforms.Resize(image_size)
                 self.c = torchvision.io.decode_image(self.images[0]).size(0)
 
-        self.transforms = torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(len(self.images))])
+        self.transforms = torch.stack([torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(transforms_per_image)]) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
         if in_memory or isinstance(self.images, torch.Tensor):
+            raise RuntimeError("not implemented")
             if self.images.size(1) == 1:
                 self.images_transformed = kornia.geometry.transform.warp_perspective(
                     self.images.expand(-1, 3, -1, -1),
@@ -124,39 +129,92 @@ class HomographyData(torch.utils.data.Dataset):
                 )
             else:
                 raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
+        
+        with torch.no_grad():
+            detector = kornia.feature.ScaleSpaceDetector(
+                num_features=features_per_image,
+                # # scale_pyr_module=kornia.geometry.transform.ScalePyramid(n_levels=3, init_sigma=1.6),
+                # resp_module=kornia.feature.BlobDoG(),
+                minima_are_also_good=True,
+                # mr_size=6.0
+            )
+            keypoints = []
+            keypoint_coord_list = []
+            keypoint_scale_list = []
+            for i in range(0, len(self.images), sift_batch_size):
+                if i + sift_batch_size > len(self.images):
+                    actual_sift_batch_size = len(self.images) - i
+                else:
+                    actual_sift_batch_size = sift_batch_size
+
+                if in_memory:
+                    img = self.images[i:i+actual_sift_batch_size].cuda()
+                else:
+                    img = torch.stack([self.resize(torchvision.io.decode_image(p).to(torch.float32) / 255) for p in self.images[i:i+sift_batch_size]], dim=0).cuda()
+                
+                img = torchvision.transforms.functional.rgb_to_grayscale(img)
+                lafs, responses = detector(img)
+
+                keypoint_coords = kornia.feature.get_laf_center(lafs)
+                keypoint_scales = kornia.feature.get_laf_scale(lafs).squeeze()
+                keypoint_mask = (responses > sift_min_response_threshold)
+                img_ids = torch.stack([torch.full((features_per_image,), (i + j) * (transforms_per_image + 1), dtype=torch.int64).cuda() for j in range(actual_sift_batch_size)], dim=0)
+                feature_ids = torch.stack([torch.arange(features_per_image, dtype=torch.int64).cuda() for _ in range(actual_sift_batch_size)], dim=0) + (img_ids << 32)
+
+                keypoints.append(torch.stack([img_ids, feature_ids], dim=-1)[keypoint_mask].cpu())
+                keypoint_coord_list.append(keypoint_coords[keypoint_mask].cpu())
+                keypoint_scale_list.append(keypoint_scales[keypoint_mask].cpu())
+
+            self.keypoints = torch.cat(keypoints)
+            self.keypoint_coords = torch.cat(keypoint_coord_list)
+            self.keypoint_scales = torch.cat(keypoint_scale_list)
+        avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)
+        print(f"{avg_keypoints_per_image=}")
 
     def __getitem__(self, index):
-        if not self.in_memory:
-            files = self.images[index]
-            if isinstance(files, str):
-                files = [files]
-            img = torch.stack([self.resize(torchvision.io.decode_image(p).to(torch.float32) / 255) for p in files], dim=0)
-            if img.size(1) == 1:
-                transformed = kornia.geometry.transform.warp_perspective(
-                    img.expand(-1, 3, -1, -1),
-                    self.transforms,
-                    self.size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )[:, :1, ...]
-            elif img.size(1) == 3:
-                transformed = kornia.geometry.transform.warp_perspective(
-                    img,
-                    self.transforms[index].view(-1, 3, 3),
-                    self.size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )
-            else:
-                raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
-            return (img.squeeze(0), transformed.squeeze(0), self.transforms[index], self.transforms_inv[index])
+        keypoint_i = index // (self.transforms.size(1) + 1)
+        homography_j = index % (self.transforms.size(1) + 1)
+        homography_i = self.keypoints[keypoint_i, 0] // (self.transforms.size(1) + 1)
+        if homography_j == self.transforms.size(1):
+            keypoint_coords = self.keypoint_coords[keypoint_i]
         else:
-            return (
-                self.images[index],
-                self.images_transformed[index],
-                self.transforms[index],
-                self.transforms_inv[index]
-            )
+            keypoint_coords = (self.transforms[homography_i, homography_j] @ torch.cat([self.keypoint_coords[keypoint_i], torch.ones((1,))], dim=-1).unsqueeze(-1))
+            keypoint_coords = (keypoint_coords[:2] / keypoint_coords[2:]).squeeze(-1)
+        return {
+            "keypoint": torch.stack([self.keypoints[keypoint_i, 0] + homography_j, self.keypoints[keypoint_i, 1]]),
+            "keypoint_coords": keypoint_coords,
+            "scales": self.keypoint_scales[keypoint_i],   # TODO: Adjust to scale after transformation
+            "homographies": self.transforms[homography_i, homography_j] if homography_j < self.transforms.size(1) else None,
+        }
 
     def __len__(self):
-        return len(self.images)
+        return len(self.keypoints) * (self.transforms.size(1) + 1)
+
+    def get_collate_func(self):
+        def collate_homography(batch):
+            img_ids = {item["keypoint"][0].item() for item in batch}
+            imgs = {}
+            for img_id in img_ids:
+                if img_id % (self.transforms.size(1) + 1) == 0:
+                    imgs[img_id] = self.resize(torchvision.io.decode_image(self.images[img_id // (self.transforms.size(1) + 1)]).to(torch.float32) / 255) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
+                else:
+                    if self.in_memory:
+                        img_pretransformed = self.images[img_id // (self.transforms.size(1) + 1)]
+                    else:
+                        img_pretransformed = self.resize(torchvision.io.decode_image(self.images[img_id // (self.transforms.size(1) + 1)]).to(torch.float32) / 255)
+                    imgs[img_id] = kornia.geometry.transform.warp_perspective(
+                        img_pretransformed.unsqueeze(0),
+                        torch.linalg.inv(self.transforms[img_id // (self.transforms.size(1) + 1), img_id % (self.transforms.size(1) + 1) - 1]).unsqueeze(0),
+                        self.size,
+                        padding_mode="fill",
+                        fill_value=torch.ones(3,)
+                    ).squeeze(0)
+
+            return {
+                "keypoints": torch.stack([item["keypoint"] for item in batch]),
+                "keypoint_coords": torch.stack([item["keypoint_coords"] for item in batch]),
+                # "scales": torch.stack([item["scales"] for item in batch]),
+                "images": imgs,
+            }
+
+        return collate_homography
