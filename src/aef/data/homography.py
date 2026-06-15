@@ -188,7 +188,7 @@ class HomographyData(torch.utils.data.Dataset):
             "keypoint": torch.stack([self.keypoints[keypoint_i, 0] + homography_j, self.keypoints[keypoint_i, 1]]),
             "keypoint_coords": keypoint_coords,
             "scales": self.keypoint_scales[keypoint_i],   # TODO: Adjust to scale after transformation
-            "homographies": self.transforms[homography_i, homography_j] if homography_j < self.transforms.size(1) else None,
+            "homographies": self.transforms[homography_i, homography_j] if homography_j < self.transforms.size(1) else torch.eye(3),
         }
 
     def __len__(self):

@@ -29,9 +29,16 @@ class Reprojection(torch.nn.Module):
         self.stride = stride
 
     def forward(self, x) -> torch.Tensor:
-        pred = x["pred"]
-        target = x["target"]
-        H = x["H"]
+        if "matches" in x:
+            pred = x["detections"][x["matches"][..., 0]]
+            target = x["detections"][x["matches"][..., 1]]
+            H1 = x["homographies"][x["indices"][x["matches"]][..., 0]]
+            H2 = x["homographies"][x["indices"][x["matches"]][..., 1]]
+            H = H2 @ torch.linalg.inv(H1)
+        else:
+            pred = x["pred"]
+            target = x["target"]
+            H = x["H"]
         if isinstance(pred, tuple):
             pred = pred[0]
         if isinstance(target, tuple):
