@@ -21,6 +21,7 @@ from typing import Iterable, Union
 import kornia
 import torch
 import torchvision
+from tqdm import tqdm
 
 from ..transforms.homography import sample_homography
 
@@ -85,7 +86,7 @@ class HomographyData(torch.utils.data.Dataset):
         in_memory=True,
         transform_params=None,
         transforms_per_image=1,
-        sift_batch_size=100,
+        sift_batch_size=1000,
         sift_min_response_threshold=0.03,
         features_per_image=500,
         **_
@@ -141,7 +142,10 @@ class HomographyData(torch.utils.data.Dataset):
             keypoints = []
             keypoint_coord_list = []
             keypoint_scale_list = []
-            for i in range(0, len(self.images), sift_batch_size):
+            loop = tqdm(range(0, len(self.images), sift_batch_size))
+            loop.set_description("Obtaining SIFT features")
+            for i in loop:
+                loop.set_description(f"Obtaining SIFT features [{i}/{len(self.images)}]")
                 if i + sift_batch_size > len(self.images):
                     actual_sift_batch_size = len(self.images) - i
                 else:
@@ -150,7 +154,7 @@ class HomographyData(torch.utils.data.Dataset):
                 if in_memory:
                     img = self.images[i:i+actual_sift_batch_size].cuda()
                 else:
-                    img = torch.stack([self.resize(torchvision.io.decode_image(p).to(torch.float32) / 255) for p in self.images[i:i+sift_batch_size]], dim=0).cuda()
+                    img = torch.stack([self.load_and_resize(p) for p in self.images[i:i+sift_batch_size]], dim=0).cuda()
                 
                 img = torchvision.transforms.functional.rgb_to_grayscale(img)
                 lafs, responses = detector(img)
@@ -190,13 +194,16 @@ class HomographyData(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.keypoints) * (self.transforms.size(1) + 1)
 
+    def load_and_resize(self, img_path):
+        return self.resize(torchvision.io.decode_image(img_path, torchvision.io.ImageReadMode.GRAY)).to(torch.float32) / 255
+
     def get_collate_func(self):
         def collate_homography(batch):
             img_ids = {item["keypoint"][0].item() for item in batch}
             imgs = {}
             for img_id in img_ids:
                 if img_id % (self.transforms.size(1) + 1) == 0:
-                    imgs[img_id] = self.resize(torchvision.io.decode_image(self.images[img_id // (self.transforms.size(1) + 1)]).to(torch.float32) / 255) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
+                    imgs[img_id] = self.load_and_resize(self.images[img_id // (self.transforms.size(1) + 1)]) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
                 else:
                     if self.in_memory:
                         img_pretransformed = self.images[img_id // (self.transforms.size(1) + 1)]
