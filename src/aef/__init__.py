@@ -15,6 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
-Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using  Equivariant
+Affine Equivariant Features, the main implementation of my master thesis \"Learning Local Features Using Equivariant
 Neural Networks\".
 """

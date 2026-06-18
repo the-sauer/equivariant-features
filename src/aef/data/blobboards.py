@@ -42,7 +42,7 @@ class BlobBoardHomographyData(HomographyData):
         num_boards,
         blobboard_params=None,
         image_size=(128, 128),
-        split="train",
+        suffix="train",
         polarity="dark",
         **kwargs
     ):
@@ -58,14 +58,27 @@ class BlobBoardHomographyData(HomographyData):
             assert polarity == "random", "Polarity must be 'dark', 'light', or 'random'."
             polarity = [random.choice(["dark", "light"]) for _ in range(num_boards)]
         kwargs["in_memory"] = True
+        boards = [blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params) for s, p in zip(get_seeds(num_boards, split=suffix), polarity)]
+        blobs = [board.blobs for board in boards]
+        max_blobs = max(map(len, blobs))
+        blob_mask = torch.stack([
+            torch.cat([
+                torch.tensor([True], dtype=torch.bool).expand(len(board.blobs)),
+                torch.tensor([False], dtype=torch.bool).expand(max_blobs-len(board.blobs))
+            ]) for i, board in enumerate(boards)
+        ])
+        blob_tensor = torch.stack([
+            torch.cat([
+                torch.tensor(board.blobs, dtype=torch.float32) - 1,     # Julia convention to 0-based indexing
+                torch.zeros((max_blobs-len(board.blobs), 3), dtype=torch.float32)
+            ]) for i, board in enumerate(boards)
+        ])
         super().__init__(
-            torch.stack([
-                torch.Tensor(
-                    blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params).pattern
-                ).unsqueeze(0)
-                for s, p in zip(get_seeds(num_boards, split=split), polarity)
-            ]),
+            torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards]),
             image_size=image_size,
+            gt_keypoint_coords=blob_tensor[..., :2],
+            gt_keypoint_scales=blob_tensor[..., 2],
+            gt_keypoint_mask=blob_mask,
             **kwargs
         )
 

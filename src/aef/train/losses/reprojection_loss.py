@@ -30,10 +30,13 @@ class Reprojection(torch.nn.Module):
 
     def forward(self, x) -> torch.Tensor:
         if "matches" in x:
+            if x["matches"] is None:
+                logging.warning("No matches found in batch, returning zero loss.")
+                return torch.Tensor([0]).to(x["device"])
             pred = x["detections"][x["matches"][..., 0]]
             target = x["detections"][x["matches"][..., 1]]
-            H1 = x["homographies"][x["indices"][x["matches"]][..., 0]]
-            H2 = x["homographies"][x["indices"][x["matches"]][..., 1]]
+            H1 = x["homographies"][x["matches"][..., 0]]
+            H2 = x["homographies"][x["matches"][..., 1]]
             H = H2 @ torch.linalg.inv(H1)
         else:
             pred = x["pred"]
@@ -43,9 +46,9 @@ class Reprojection(torch.nn.Module):
             pred = pred[0]
         if isinstance(target, tuple):
             target = target[0]
-        gt = homogenize(linearize_homography(H, pred.shape[1:-2], stride=self.stride).unsqueeze(1).reshape(-1, 2, 2))
-        pred = homogenize(pred[:, ::self.stride, ::self.stride, :2, :2].reshape(-1, 2, 2))
-        target = homogenize(target[:, ::self.stride, ::self.stride, :2, :2].reshape(-1, 2, 2))
+        gt = homogenize(linearize_homography(H, coords=pred, stride=self.stride).unsqueeze(1).reshape(-1, 2, 2))     # TODO: Remove hard code
+        # pred = homogenize(pred.reshape(-1, 2, 2))
+        # target = homogenize(target.reshape(-1, 2, 2))
 
         non_singular_mask = torch.linalg.det(pred) > 1e-6
         if non_singular_mask.int().sum() < 0.01 * pred.size(0):

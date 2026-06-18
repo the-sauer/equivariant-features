@@ -18,18 +18,22 @@ import torch
 
 
 class SiftScaleLoss(torch.nn.Module):
+    def __init__(self, scale_factor = 1, **_):
+        super().__init__()
+        self.scale_factor = scale_factor
+
     def forward(self, x, **_):
         scales = x["scales"]
         assert torch.all(scales > 0), "Scales must be positive"
-        if "detections_unfiltered" in x:
-            detections = x["detections_unfiltered"]
-            detected_scales = torch.sqrt(torch.linalg.det(detections[:, :2, :2]))
-            detected_scales_mask = torch.isnan(detected_scales)
-            scales = scales * 2
+        if "detections" in x:
+            detections = x["detections"][..., :2, :2]
+            detected_scales = torch.linalg.det(detections[:, :2, :2])
+            # detected_scales_mask = torch.isnan(detected_scales)
+            target_det = 1 / ((scales * self.scale_factor * 2) ** 2)
         elif "pred_scales" in x:
             detected_scales = x["pred_scales"]
             detected_scales_mask = torch.isnan(detected_scales)
         else:
             raise ValueError("Input must contain either 'detections_unfiltered' or 'pred_scales'")
 
-        return torch.mean(torch.log(detected_scales[~detected_scales_mask] / scales[~detected_scales_mask]) ** 2)
+        return torch.mean(((torch.abs(detected_scales) - target_det) / target_det) ** 2)

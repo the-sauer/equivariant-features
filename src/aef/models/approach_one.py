@@ -18,6 +18,7 @@ import torch
 
 from .asel.affine import BasicBlock, EquivarLayer
 from .scale import *
+from .sift import SIFTNet
 from .. import models
 
 
@@ -33,7 +34,7 @@ class AffineFeatureNetOne(torch.nn.Module):
     def __init__(self, conv_depths, in_channels=1, feature_size=128, scale_space=None, basic_block_params=None):
         super(AffineFeatureNetOne, self).__init__()
         if scale_space is None:
-            scale_space = {"name": "scale_space_sesn", "params": {}}
+            scale_space = {"name": models.scale.NeuralScaleSpaceSESN.__name__, "params": {}}
         if basic_block_params is None:
             basic_block_params = {}
         scale_space["params"]["in_channels"] = 1
@@ -66,7 +67,7 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
     def __init__(self, conv_depths, in_channels=1, scale_space=None, basic_block_params=None):
         super(AffineFeatureNetCanonicalOne, self).__init__()
         if scale_space is None:
-            scale_space = {"name": "scale_space_sesn", "params": {}}
+            scale_space = {"name": models.scale.NeuralScaleSpaceSESN.__name__, "params": {}}
         if basic_block_params is None:
             basic_block_params = {}
         scale_space["params"]["in_channels"] = 1
@@ -83,14 +84,22 @@ class AffineFeatureNetCanonicalOne(torch.nn.Module):
               for i in range(len(conv_depths)-1)),
         )
         self.canonicalization_layer = EquivarLayer(conv_depths[-1], 4, type=["0", "c"])
+        self.injected_scale_field = None
+        self.descriptor_model = SIFTNet()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        scale_field = self.scale_space(torch.mean(x, dim=1, keepdim=True))
-        scale_field = self.scale_gain(scale_field)
+        if self.injected_scale_field is None:
+            scale_field = self.scale_space(torch.mean(x, dim=1, keepdim=True))
+            scale_field = self.scale_gain(scale_field)
+        else:
+            scale_field = self.injected_scale_field
         if x.dim() == 4:
             x = x.unsqueeze(1)
         assert x.size(1) == 1
-        x, _ = self.feature_net((x, scale_field))
+        x = self.feature_net(x)
         x = torch.nn.functional.normalize(x, dim=3)
-        x = self.canonicalization_layer(x)
+        x = self.canonicalization_layer((x, scale_field))[0]
         return x.squeeze(1)
+
+    def inject_scale_field(self, scale_field):
+        self.injected_scale_field = scale_field

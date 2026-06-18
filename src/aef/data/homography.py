@@ -14,10 +14,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import concurrent
 import functools
 import os
 from typing import Iterable, Union
 
+from aef.train.detector import linearize_homography
 import kornia
 import torch
 import torchvision
@@ -89,6 +91,9 @@ class HomographyData(torch.utils.data.Dataset):
         sift_batch_size=1000,
         sift_min_response_threshold=0.03,
         features_per_image=500,
+        gt_keypoint_coords=None,
+        gt_keypoint_scales=None,
+        gt_keypoint_mask=None,
         **_
     ):
         super().__init__()
@@ -110,27 +115,7 @@ class HomographyData(torch.utils.data.Dataset):
 
         self.transforms = torch.stack([torch.stack([torch.Tensor(sample_homography(image_size, **transform_params)) for _ in range(transforms_per_image)]) for _ in range(len(self.images))])
         self.transforms_inv = torch.linalg.inv(self.transforms)
-        if in_memory or isinstance(self.images, torch.Tensor):
-            raise RuntimeError("not implemented")
-            if self.images.size(1) == 1:
-                self.images_transformed = kornia.geometry.transform.warp_perspective(
-                    self.images.expand(-1, 3, -1, -1),
-                    self.transforms,
-                    image_size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )[:, :1, ...]
-            elif self.images.size(1) == 3:
-                self.images_transformed = kornia.geometry.transform.warp_perspective(
-                    self.images,
-                    self.transforms,
-                    image_size,
-                    padding_mode="fill",
-                    fill_value=torch.ones((3,))
-                )
-            else:
-                raise ValueError(f"Unsupported number of image channels: c={self.images.size(1)}")
-        
+
         with torch.no_grad():
             detector = kornia.feature.ScaleSpaceDetector(
                 num_features=features_per_image,
@@ -155,13 +140,20 @@ class HomographyData(torch.utils.data.Dataset):
                     img = self.images[i:i+actual_sift_batch_size].cuda()
                 else:
                     img = torch.stack([self.load_and_resize(p) for p in self.images[i:i+sift_batch_size]], dim=0).cuda()
-                
-                img = torchvision.transforms.functional.rgb_to_grayscale(img)
-                lafs, responses = detector(img)
+                if gt_keypoint_coords is not None and gt_keypoint_scales is not None and gt_keypoint_mask is not None:
+                    keypoint_coords = gt_keypoint_coords[i:i+actual_sift_batch_size]
+                    keypoint_scales = gt_keypoint_scales[i:i+actual_sift_batch_size]
+                    keypoint_mask = gt_keypoint_mask[i:i+actual_sift_batch_size]
+                    features_per_image = gt_keypoint_coords.size(1)
+                else:
+                    img = torchvision.transforms.functional.rgb_to_grayscale(img)
+                    lafs, responses = detector(img)
 
-                keypoint_coords = kornia.feature.get_laf_center(lafs)
-                keypoint_scales = kornia.feature.get_laf_scale(lafs).squeeze()
-                keypoint_mask = (responses > sift_min_response_threshold)
+                    keypoint_coords = kornia.feature.get_laf_center(lafs)
+                    keypoint_coords = torch.stack([keypoint_coords[..., 1], keypoint_coords[..., 0]], dim=-1)
+                    keypoint_scales = kornia.feature.get_laf_scale(lafs).squeeze()
+                    keypoint_mask = (responses > sift_min_response_threshold)
+
                 img_ids = torch.stack([torch.full((features_per_image,), (i + j) * (transforms_per_image + 1), dtype=torch.int64).cuda() for j in range(actual_sift_batch_size)], dim=0)
                 feature_ids = torch.stack([torch.arange(features_per_image, dtype=torch.int64).cuda() for _ in range(actual_sift_batch_size)], dim=0) + (img_ids << 32)
 
@@ -181,13 +173,16 @@ class HomographyData(torch.utils.data.Dataset):
         homography_i = self.keypoints[keypoint_i, 0] // (self.transforms.size(1) + 1)
         if homography_j == self.transforms.size(1):
             keypoint_coords = self.keypoint_coords[keypoint_i]
+            scale_factor = torch.tensor(1.0)
         else:
             keypoint_coords = (self.transforms[homography_i, homography_j] @ torch.cat([self.keypoint_coords[keypoint_i], torch.ones((1,))], dim=-1).unsqueeze(-1))
+            scale_factor = linearize_homography(self.transforms[homography_i, homography_j].unsqueeze(0), coords=keypoint_coords.view(1, 1, 1, 3)).view(2, 2).det().abs().sqrt()
             keypoint_coords = (keypoint_coords[:2] / keypoint_coords[2:]).squeeze(-1)
+
         return {
             "keypoint": torch.stack([self.keypoints[keypoint_i, 0] + homography_j, self.keypoints[keypoint_i, 1]]),
             "keypoint_coords": keypoint_coords,
-            "scales": self.keypoint_scales[keypoint_i],   # TODO: Adjust to scale after transformation
+            "scales": self.keypoint_scales[keypoint_i] * scale_factor,   # TODO: Adjust to scale after transformation
             "homographies": self.transforms[homography_i, homography_j] if homography_j < self.transforms.size(1) else torch.eye(3),
         }
 
@@ -202,25 +197,21 @@ class HomographyData(torch.utils.data.Dataset):
             img_ids = {item["keypoint"][0].item() for item in batch}
             imgs = {}
             for img_id in img_ids:
-                if img_id % (self.transforms.size(1) + 1) == 0:
-                    imgs[img_id] = self.load_and_resize(self.images[img_id // (self.transforms.size(1) + 1)]) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
-                else:
-                    if self.in_memory:
-                        img_pretransformed = self.images[img_id // (self.transforms.size(1) + 1)]
-                    else:
-                        img_pretransformed = self.resize(torchvision.io.decode_image(self.images[img_id // (self.transforms.size(1) + 1)]).to(torch.float32) / 255)
-                    imgs[img_id] = kornia.geometry.transform.warp_perspective(
-                        img_pretransformed.unsqueeze(0),
-                        torch.linalg.inv(self.transforms[img_id // (self.transforms.size(1) + 1), img_id % (self.transforms.size(1) + 1) - 1]).unsqueeze(0),
+                img = self.load_and_resize(self.images[img_id // (self.transforms.size(1) + 1)]) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
+                if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
+                    img = kornia.geometry.transform.warp_perspective(
+                        img.unsqueeze(0),
+                        (self.transforms[img_id // (self.transforms.size(1) + 1), img_id % (self.transforms.size(1) + 1) - 1]).unsqueeze(0),
                         self.size,
-                        padding_mode="fill",
-                        fill_value=torch.ones(3,)
                     ).squeeze(0)
+                assert img.size(0) == 1
+                imgs[img_id] = img
 
             return {
                 "keypoints": torch.stack([item["keypoint"] for item in batch]),
                 "keypoint_coords": torch.stack([item["keypoint_coords"] for item in batch]),
-                # "scales": torch.stack([item["scales"] for item in batch]),
+                "scales": torch.stack([item["scales"] for item in batch]),
+                "homographies": torch.stack([item["homographies"] for item in batch]),
                 "images": imgs,
             }
 

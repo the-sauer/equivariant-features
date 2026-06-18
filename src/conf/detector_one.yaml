@@ -5,26 +5,29 @@ defaults:
 model:
   name: AffineFeatureNetCanonicalOne
   params:
-    process_batch: process_batch_homographic_detector
-    conv_depths: [16, 16, 16, 16, 16, 32, 32, 32, 32, 32, 64, 64, 64, 64, 64]
+    conv_depths: [16, 16, 32, 32, 64, 64]
     basic_block_params:
       option: B
-    scale_space:
-      name: NeuralScaleSpaceSESN
-      params:
-        factor: 6.5
-        num_scales: 4
-        min_scale: 2.0
-        effective_size: 5
-      pretrained: /data/logs/scale_space_sesn_blobboards_homographic_rel_squared_2026_05_15_15_25_41/checkpoints/best.pth
-      freeze: false
+    # scale_space:
+    #   name: NeuralScaleSpaceSESN
+    #   params:
+    #     factor: 6.5
+    #     num_scales: 4
+    #     min_scale: 2.0
+    #     effective_size: 5
+    #   pretrained: /data/logs/scale_space_sesn_blobboards_homographic_rel_squared_2026_05_15_15_25_41/checkpoints/best.pth
+    #   freeze: false
+
 training:
+  image_batch_size: 8
+  process_batch: process_batch_colmap_detector
   dataset:
     name: KaggleHomographyData
     params:
       name: image-matching-challenge-2025
-      image_size: [256, 256]
+      image_size: [512, 512]
       num_boards: 80
+      in_memory: false
       blobboard_params:
         cutoff: 2.0
       transform_params:
@@ -32,7 +35,8 @@ training:
         perspective_amplitude_x: 0.05
         perspective_amplitude_y: 0.05
         max_angle: "π / 8"
-  loss: img_gen
+  loss:
+    - name: SupCon
   optimizer:
     scale_space:
       name: adam
@@ -57,12 +61,15 @@ training:
         name: cosine
         params:
           T_max: 50
+
 validation:
+  process_batch: process_batch_homographic_detector
   dataset:
     name: KaggleHomographyData
     params:
+      in_memory: false
       name: image-matching-challenge-2025
-      image_size: [256, 256]
+      image_size: [512, 512]
       num_boards: 8
       blobboard_params:
         cutoff: 2.0
@@ -71,4 +78,5 @@ validation:
         perspective_amplitude_x: 0.05
         perspective_amplitude_y: 0.05
         max_angle: "π / 8"
-  loss: img_gen
+  loss:
+    - name: FPR95

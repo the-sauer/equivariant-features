@@ -2,22 +2,54 @@ defaults:
   - detector_unet_dgx
   - _self_
 
-model:
-  params:
-    scale_space:
-      name: ConstantScaleSpace
-      params: {}
 training:
-  optimizer:
-    name: adamw
+  image_batch_size: 8
+  augmentation: null
+  dataset:
+    name: BlobBoardHomographyData
     params:
-      lr: 1e-4
-      weight_decay: 1e-4
+      # images: /data/datasets/south-building
+      image_size: [512, 512]
+      num_boards: 100
+      in_memory: false
+      suffix: train
+  num_epochs: 400
+  batch_size: 20000
   loss:
-    - name: Determinant
-  num_epochs: 10
+    # - name: SupCon
+    # - name: NonSingular
+    - name: SiftScaleLoss
+      params:
+        scale_factor: 2.0
+      weight: 0
+    # - name: Reprojection
+    # - name: Determinant
+    #   weight: 0.1
+    # - name: ImageGeneration
+    - name: BlobLoss
+  process_batch: process_batch_colmap_detector
+  # continue_from_checkpoint: /data/logs/detector_unet_step_1/checkpoints/epoch_009.pth
+  optimizer:
+    name: AdamW
+    params:
+      lr: 1e-6
+      weight_decay: 1e-4
+
 validation:
   loss:
-    - name: Determinant
+    # - name: SiftScaleLoss
+    # - name: ImageGeneration
+    - name: BlobLoss
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      # images: /data/datasets/south-building
+      image_size: [512, 512]
+      num_boards: 10
+      in_memory: false
+      suffix: validation
+  batch_size: 160000
+# experiment_name: detector_unet_step_2_colmap
 
-experiment_name: detector_unet_step_1_second_run
+logging:
+  interval: 1

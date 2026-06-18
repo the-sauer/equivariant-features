@@ -23,17 +23,20 @@ class NonSingular(torch.nn.Module):
         self.sigma = sigma
 
     def forward(self, x):
-        pred = x["detections"] if "detections" in x else x["pred"]
+        if "detections_unfiltered" in x and x["detections_unfiltered"] is not None:
+            pred = x["detections_unfiltered"]
+        elif "pred" in x and x["pred"] is not None:
+            pred = x["pred"]
+        else:
+            return torch.Tensor([0]).to(x["device"])
         ε = 1e-6
         return torch.mean(-torch.log(torch.min(torch.linalg.svdvals(pred[0]), dim=-1)[0] + ε)).reshape(1)
 
 
 class Determinant(torch.nn.Module):
     def forward(self, x):
-        pred = x["detections"] if "detections" in x else x["pred"][0]
-        # if "scale" in x:
-        #     scale = x["scale"][0]
-        #     scale = scale.view(-1, 1, 1)
-        # else:
-        #     scale = 1.0
-        return torch.mean((torch.min(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), 1)) - 1) ** 2)
+        pred = x["detections_unfiltered"] if "detections_unfiltered" in x else x["pred"][0]
+        ε = 1e-6
+        pred = pred[..., :2, :2].view(-1, 2, 2)
+        return torch.mean(torch.maximum(-pred + ε, torch.zeros_like(pred)))
+        return torch.mean(-torch.log(torch.minimum(torch.linalg.det(pred), torch.full_like(torch.linalg.det(pred), 1)) + ε))

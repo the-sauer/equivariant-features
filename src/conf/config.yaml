@@ -6,9 +6,9 @@ training:
     # stride: 12
     # detector: harris
   dataset:
-    data_dir: ./data/datasets
     params:
-      suffix: train
+      data_dir: /data/datasets
+      suffix: train #ILSVRC/Data/CLS-LOC/train
       image_size: [256, 256]
   augmentation:
     color_jitter:
@@ -25,12 +25,12 @@ training:
 validation:
   batch_size: 1
   dataset:
-    data_dir: ./data/datasets
     params:
+      data_dir: /data/datasets
       image_size: [256, 256]
-      suffix: test
+      suffix: test #ILSVRC/Data/CLS-LOC/val
   feature_sampling:
     num_features: 1000
 logging:
-  dir: ./data/logs
+  dir: /data/logs
   interval: 100

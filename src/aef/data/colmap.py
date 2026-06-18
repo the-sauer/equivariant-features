@@ -98,7 +98,7 @@ class ColmapData(torch.utils.data.Dataset):
             rows, cols, blob = cursor.fetchone()
             sift_detections = blob_to_array(blob, dtype=np.float32, shape=(rows, cols))
 
-            img_temp = torchvision.io.read_image(os.path.join(self.images_dir, self.reconstruction.image(img_id).name))
+            img_temp = torchvision.io.read_image(os.path.join(self.images_dir, self.reconstruction.image(img_id).name), torchvision.io.ImageReadMode.GRAY)
             orig_size = img_temp.shape[-2], img_temp.shape[-1]
             if orig_size[0] < orig_size[1]:
                 offset_x = (orig_size[1] - orig_size[0]) // 2
@@ -160,7 +160,7 @@ class ColmapData(torch.utils.data.Dataset):
             "keypoint_coords": self.keypoint_coords[idx],
             "scale": self.scales[idx],
         }
-    
+
     def get_collate_func(self):
         def collate_colmap(batch):
             keypoints = torch.stack([item["keypoint"] for item in batch])

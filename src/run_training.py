@@ -40,7 +40,7 @@ def experiment_name_from_cfg(cfg: Config) -> str:
         loss_name: str = "_".join(loss_cfg if isinstance(loss_cfg, str) else loss_cfg.name for loss_cfg in cfg.training.loss)
     else:   # isinstance(cfg.training.loss, omegaconf.DictConfig):
         loss_name = cfg.training.loss.name
-    return f"{cfg.model.name}_{loss_name}_{date}"
+    return f"{date}_{cfg.model.name}_{loss_name}"
 
 
 def train(cfg) -> None:
@@ -56,10 +56,11 @@ def train(cfg) -> None:
 
 @hydra.main(version_base=None, config_path="conf", config_name="scale")
 def main(cfg: Config):
+    torch.autograd.set_detect_anomaly(True)
     dotenv.load_dotenv()
 
-    experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
-    print(f"Running experiment \033[1m{experiment_name}\033[0m")
+    # experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
+    # print(f"Running experiment \033[1m{experiment_name}\033[0m")
     train(cfg)
 
 

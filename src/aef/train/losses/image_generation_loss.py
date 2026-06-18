@@ -22,16 +22,36 @@ import torch
 import torchvision
 
 
+class BatchVarianceLoss(torch.nn.Module):
+    def __init__(self):
+        super(BatchVarianceLoss, self).__init__()
+
+    def forward(self, x):
+        """
+        x: Tensor of shape [B, C, H, W] representing the aligned patches.
+           B = number of patches/images to align simultaneously.
+        """
+        # Calculate the variance along the batch dimension (dim=0)
+        # correction=0 provides the maximum likelihood variance estimator
+        var_per_pixel = torch.var(x, dim=0, correction=0)
+        
+        # Mean over channels, height, and width to get a single scalar loss
+        loss = torch.mean(var_per_pixel)
+        return loss
+    
+
 class ImageGeneration(torch.nn.Module):
     def __init__(
         self,
-        distance_metric: str = "mse",
+        distance_metric: str = "batch_variance",
         patch_size: tuple[int, int] = (32, 32),
         sigma: float = 1,
         **_
     ):
         super().__init__()
-        if distance_metric == "mse":
+        if distance_metric == "batch_variance":
+            self.image_distance_metric = BatchVarianceLoss()
+        elif distance_metric == "mse":
             self.image_distance_metric = torch.nn.functional.mse_loss
         else:
             raise ValueError(f"Unsupported image distance metric: {distance_metric}")
@@ -49,6 +69,15 @@ class ImageGeneration(torch.nn.Module):
         self,
         x
     ) -> torch.Tensor:
+        if "patches" in x and x["patches"] is not None:
+            return self.image_distance_metric(
+                torch.cat([
+                    x["patches"][x["indices"] == feature_id] for feature_id in x["indices"].unique()
+                ])
+            )
+        else:
+            return torch.tensor(0.0).to(x["device"])
+
         pred = x["pred"]
         target = x["target"]
 

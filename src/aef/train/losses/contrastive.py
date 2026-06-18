@@ -55,6 +55,9 @@ class Contrastive(torch.nn.Module):
         x
     ) -> torch.Tensor:
         if "features" in x and "indices" in x:
+            if x["features"] is None:
+                logging.warning("No features found in batch, returning zero loss.")
+                return torch.Tensor([0]).to(x["device"])
             return self.contrastive_loss((x["features"]), x["indices"])
 
         descriptor_model = x["descriptor_model"]
@@ -69,7 +72,7 @@ class Contrastive(torch.nn.Module):
             if (torch.linalg.det(pred[0]) > 1e-6).int().sum() < 0.01 * pred[0].size(0) * pred[0].size(1) or torch.any(torch.sum((torch.linalg.det(pred[0]) > 1e-6).int(), dim=1) == 0):
                 logging.warning("More than 99%% of predicted transforms are degenerate.")
                 # We will try to increase the determinants first
-                return torch.Tensor([1e9]).to(pred[0].device)
+                return torch.Tensor([0]).to(pred[0].device)
             pred_transform, pred_image = pred
             pred_transform = pred_transform[:, ::16, ::16].reshape(pred_transform.size(0), -1, 3, 3)
             target_transform, target_image = target

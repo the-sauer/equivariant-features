@@ -26,7 +26,7 @@ from .sift import SIFTNet
 
 
 class AffineEquivariantUNet(torch.nn.Module):
-    def __init__(self, channels=None, scale_space=None, **_):
+    def __init__(self, in_channels, channels=None, scale_space=None, **_):
         super().__init__()
         if channels is None:
             channels = [10, 20, 40, 80]
@@ -40,7 +40,7 @@ class AffineEquivariantUNet(torch.nn.Module):
             torch.nn.Sequential(
                 EquivarLayer(c_in, c_out),
                 EquivarLayer(c_out, c_out)
-            ) for c_in, c_out in zip([3] + channels[:-1], channels)
+            ) for c_in, c_out in zip([in_channels + 1] + channels[:-1], channels)
         ])
 
         self.bottleneck = torch.nn.Sequential(
@@ -90,6 +90,7 @@ class AffineEquivariantUNet(torch.nn.Module):
         else:
             scale_field = self.scale_space(x)
         scale_field += 1e-6  # Avoid zero scales
+        x = torch.cat([x, scale_field], dim=1)
         for i, conv in enumerate(self.conv_down):
             x = conv(x.unsqueeze(1)).squeeze(1)
             if torch.isnan(x).any():

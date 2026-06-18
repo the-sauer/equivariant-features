@@ -45,39 +45,12 @@ class chain:
         return sum(map(len, self.iterators))
 
 
-ProcessBatchType = Callable[
-    [
-        torch.nn.Module,
-        tuple[torch.Tensor, ...],
-        Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        Callable[[torch.Tensor], torch.Tensor],
-        torch.device,
-        omegaconf.DictConfig
-    ],
-    torch.Tensor
-]
-
-
-OPTIMIZERS = {
-    "adam": torch.optim.Adam,
-    "adamw": torch.optim.AdamW,
-    "sgd": torch.optim.SGD
-}
-
-
-SCHEDULERS = {
-    "step": torch.optim.lr_scheduler.StepLR,
-    "multistep": torch.optim.lr_scheduler.MultiStepLR,
-    "exponential": torch.optim.lr_scheduler.ExponentialLR,
-    "cosine": torch.optim.lr_scheduler.CosineAnnealingLR
-}
-
-
 def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name):
     """
     Prepares the training by setting up logging, device, model, optimizer, scheduler, data loaders, criterion and
     augmentation.
     """
+    print(f"Preparing experiment \033[1m{experiment_name}\033[0m")
     if hasattr(cfg, "logging") and cfg.logging is not None:
         os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
         checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
@@ -96,28 +69,28 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
     opt_cfg = cfg.training.optimizer
     if hasattr(opt_cfg, "name"):
-        optimizer = {"main": OPTIMIZERS[opt_cfg.name](model.parameters(), **opt_cfg.get("params", {}))}
+        optimizer = {"main": getattr(torch.optim, opt_cfg.name)(model.parameters(), **opt_cfg.get("params", {}))}
         if hasattr(opt_cfg, "scheduler"):
             sched_cfg = opt_cfg.scheduler
-            scheduler = {"main": SCHEDULERS[sched_cfg.name](optimizer["main"], **sched_cfg.get("params", {}))}
+            scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], **sched_cfg.get("params", {}))}
         else:
             scheduler = {}
     else:
         optimizer = {
-            n: OPTIMIZERS[o.name](
-                (getattr(model, o.model_params).parameters()
-                    if isinstance(o.model_params, str)
-                    else itertools.chain(*(getattr(model, mp).parameters() for mp in o.model_params)))
-                if hasattr(o, "model_params") else model.parameters(),
-                **o.get("params", {})
+            o_name: getattr(torch.optim, o_cfg.name)(
+                (getattr(model, o_cfg.model_params).parameters()
+                    if isinstance(o_cfg.model_params, str)
+                    else itertools.chain(*(getattr(model, mp).parameters() for mp in o_cfg.model_params)))
+                if hasattr(o_cfg, "model_params") else model.parameters(),
+                **o_cfg.get("params", {})
             )
-            for n, o in opt_cfg.items()
+            for o_name, o_cfg in opt_cfg.items()
         }
         scheduler = {}
         for n, o in opt_cfg.items():
             if hasattr(o, "scheduler"):
                 sched_cfg = o.scheduler
-                scheduler[n] = SCHEDULERS[sched_cfg.name](optimizer[n], **sched_cfg.get("params", {}))
+                scheduler[n] = getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer[n], **sched_cfg.get("params", {}))
 
     if hasattr(cfg.training, "continue_from_checkpoint"):
         checkpoint = torch.load(cfg.training.continue_from_checkpoint, map_location=device)
@@ -178,7 +151,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
 
 
-def train_func(process_batch: ProcessBatchType):
+def train_func(process_batch):
     def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
         (
             model,
@@ -194,7 +167,10 @@ def train_func(process_batch: ProcessBatchType):
             start_epoch,
             best_loss
         ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+        print(f"Running experiment \033[1m{experiment_name}\033[0m")
 
+        print("Training datasets", *(f"{d.__class__.__name__}: {len(d)}"for d in train_dataset))
+        print("Validation datasets", *(f"{d.__class__.__name__}: {len(d)}"for d in validation_dataset))
         x = []
         y_train = {n: [] for n in criterion.keys() if criterion[n][2]}
         y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
@@ -205,6 +181,7 @@ def train_func(process_batch: ProcessBatchType):
             model.train()
             cumulative_loss = 0.0
             cumulative_losses = {n: 0.0 for n in criterion.keys() if criterion[n][2]}
+            n_items = 0
             for i, data in enumerate(loop):
                 for opt in optimizer.values():
                     opt.zero_grad()
@@ -216,13 +193,14 @@ def train_func(process_batch: ProcessBatchType):
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                 cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
-                cumulative_loss += loss.item()
+                cumulative_loss += loss.item() * data["keypoints"].size(0)
+                n_items += data["keypoints"].size(0)
                 loss.backward()
                 for opt in optimizer.values():
                     opt.step()
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
                     logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, len(train_loader), ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
-            avg_losses = {n: v / len(train_dataset) for n, v in cumulative_losses.items()}
+            avg_losses = {n: v / n_items for n, v in cumulative_losses.items()}
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
             for n, v in y_train.items():
@@ -245,6 +223,7 @@ def train_func(process_batch: ProcessBatchType):
                 model.eval()
                 cumulative_loss = 0.0
                 cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
+                n_items = 0
                 for data in loop:
                     # try:
                     losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
@@ -255,9 +234,10 @@ def train_func(process_batch: ProcessBatchType):
 
                     cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
                     cumulative_loss += loss.item() * data["keypoints"].size(0)
+                    n_items += data["keypoints"].size(0)
                     loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-                y_val = {n: y_val[n] + [v / len(validation_dataset)] for n, v in cumulative_losses.items()}
-                logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))
+                y_val = {n: y_val[n] + [v / n_items] for n, v in cumulative_losses.items()}
+                logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / n_items}" for n, v in cumulative_losses.items()))
 
                 _, ax = plt.subplots()
                 for n, v in y_val.items():
@@ -271,7 +251,7 @@ def train_func(process_batch: ProcessBatchType):
                 plt.close()
 
                 if checkpoint_dir is not None:
-                    average_loss = cumulative_loss / len(validation_dataset)
+                    average_loss = cumulative_loss / n_items
                     checkpoint = {
                         "epoch": epoch,
                         "model_state_dict": model.state_dict(),

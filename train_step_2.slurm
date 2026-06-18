@@ -16,4 +16,4 @@ source /root/.profile
 source /.venv/bin/activate 
 cd /workspace/affine-equivariant-features
 pip install -r requirements.txt
-/.venv/bin/python /workspace/affine-equivariant-features/src/run_training.py --config-name detector_unet_step_2
+/.venv/bin/python /workspace/affine-equivariant-features/src/run_training.py --config-name detector_unet_step_2 ++training.num_epochs=20
