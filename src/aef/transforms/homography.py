@@ -139,7 +139,7 @@ def sample_homography(
     # sample several rotations, check collision with borders, randomly pick a valid one
     if rotation:
         angles = np.linspace(-max_angle, max_angle, n_angles)
-        angles = np.concat([[0.0], angles], axis=0)  # in case no rotation is valid
+        angles = np.concatenate([[0.0], angles], axis=0)  # in case no rotation is valid
         center = np.mean(pts2, axis=0, keepdims=True)
         rot_mat = np.reshape(
             np.stack([np.cos(angles), -np.sin(angles), np.sin(angles), np.cos(angles)], axis=1),

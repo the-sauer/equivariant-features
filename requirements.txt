@@ -1,8 +1,10 @@
+escnn >= 1, < 2
 hydra-core >= 1.3, < 2
 kagglehub >= 1.0, < 2
 kornia >= 0.8, < 1
+lie-learn >= 0.0.2, < 1
 matplotlib
-numpy >= 2.4, < 3
+numpy
 pycolmap >= 4.0, < 5
 python-dotenv
 pytorch-metric-learning >= 1.2, < 2

@@ -54,7 +54,6 @@ def linearize_homography(H, shape=None, coords=None, stride=1):
             dim=2
         )
         coords = coords.unsqueeze(0)
-    H = H.unsqueeze(1).unsqueeze(2)
     coords = coords.unsqueeze(-1)
     proj = H @ coords
     x = proj[..., 0, 0]

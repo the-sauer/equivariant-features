@@ -200,10 +200,12 @@ class HomographyData(torch.utils.data.Dataset):
                 img = self.load_and_resize(self.images[img_id // (self.transforms.size(1) + 1)]) if not self.in_memory else self.images[img_id // (self.transforms.size(1) + 1)]
                 if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
                     img = kornia.geometry.transform.warp_perspective(
-                        img.unsqueeze(0),
+                        img.unsqueeze(0).expand(-1, 3, -1, -1),
                         (self.transforms[img_id // (self.transforms.size(1) + 1), img_id % (self.transforms.size(1) + 1) - 1]).unsqueeze(0),
                         self.size,
-                    ).squeeze(0)
+                        padding_mode="fill",
+                        fill_value=torch.tensor([1.0, 1.0, 1.0], device=img.device),
+                    ).squeeze(0)[:1]
                 assert img.size(0) == 1
                 imgs[img_id] = img
 
