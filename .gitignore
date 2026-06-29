@@ -219,6 +219,7 @@ __marimo__/
 
 data
 !src/aef/data
+!src/aef/models/asel/data
 
 outputs
 logs
