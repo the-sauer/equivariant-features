@@ -26,7 +26,7 @@ from torchvision.transforms import v2
 from tqdm import tqdm
 
 from . import losses
-
+from .canonicalizer import *
 from .descriptor import *
 from .detector import *
 from .scale import *

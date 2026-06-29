@@ -16,7 +16,7 @@
 
 import torch
 
-from .asel.affine import BasicBlock, EquivarLayer, LearnedSaliencyLayer
+from .asel.affine import BasicBlock, EquivarLayer
 
 
 class AffineFeatureNetCanonicalTwo(torch.nn.Module):
