@@ -24,7 +24,7 @@ import hydra
 import omegaconf
 
 from aef.configuration import Config
-from aef.data import get_dataset
+from aef.data import blobboards, get_dataset
 from aef.train import train_func
 from aef.models import *
 from aef.train import *
@@ -48,7 +48,7 @@ def train(cfg) -> None:
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
     validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
-    model_kwargs["in_channels"] = 1
+    # model_kwargs["in_channels"] = 1
     Model = eval(cfg.model.name)
     model = Model(**model_kwargs)
     train_func(eval(cfg.training.process_batch))(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
@@ -56,11 +56,7 @@ def train(cfg) -> None:
 
 @hydra.main(version_base=None, config_path="conf", config_name="scale")
 def main(cfg: Config):
-    torch.autograd.set_detect_anomaly(True)
     dotenv.load_dotenv()
-
-    # experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
-    # print(f"Running experiment \033[1m{experiment_name}\033[0m")
     train(cfg)
 
 

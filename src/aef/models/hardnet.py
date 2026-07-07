@@ -16,6 +16,8 @@
 import torch
 import torch.nn as nn
 
+from .utils import L2Norm
+
 
 class HardNet(nn.Module):
     def __init__(self, in_channels=1, patch_size=32, shallow=False, slim=False):

@@ -14,12 +14,19 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import os
 import random
 
 import blobboards
+import omegaconf
+import pint
 import torch
 
 from .homography import HomographyData
+
+
+_ureg = pint.UnitRegistry()
+_dpi = 1 / _ureg.inch
 
 
 def get_seeds(num_seeds, seed_range=(0, 10000), split="train"):
@@ -40,14 +47,13 @@ class BlobBoardHomographyData(HomographyData):
     def __init__(
         self,
         num_boards,
+        image_size=(150, 150),
         blobboard_params=None,
-        image_size=(128, 128),
         suffix="train",
         polarity="dark",
+        resolution=300,
         **kwargs
     ):
-        if blobboard_params is None:
-            blobboard_params = {}
         if blobboard_params is None:
             blobboard_params = {}
         if polarity == "dark":
@@ -57,8 +63,20 @@ class BlobBoardHomographyData(HomographyData):
         else:
             assert polarity == "random", "Polarity must be 'dark', 'light', or 'random'."
             polarity = [random.choice(["dark", "light"]) for _ in range(num_boards)]
-        kwargs["in_memory"] = True
-        boards = [blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params) for s, p in zip(get_seeds(num_boards, split=suffix), polarity)]
+        kwargs.setdefault("in_memory", False)
+        if not isinstance(blobboard_params, dict):
+            blobboard_params = omegaconf.OmegaConf.to_container(blobboard_params, resolve=True)
+        if "board_size" in blobboard_params:
+            blobboard_params["board_size"] = (
+                blobboard_params["board_size"][0] * _ureg.mm,
+                blobboard_params["board_size"][1] * _ureg.mm,
+            )
+        if "frame_width" in blobboard_params:
+            blobboard_params["frame_width"] = blobboard_params["frame_width"] * _ureg.mm
+        blobboard_params["dir"] = os.path.join(kwargs.get("data_dir", "."), "blobboards")
+        blobboard_params["format"] = "png"
+        boards = [blobboards.blob_board((image_size[0] * _ureg.mm, image_size[1] * _ureg.mm), resolution, seed=s, polarity=p, image_origin="opencv", **blobboard_params) for s, p in zip(get_seeds(num_boards, split=suffix), polarity)]
+        print(str(blobboard_params))
         blobs = [board.blobs for board in boards]
         max_blobs = max(map(len, blobs))
         blob_mask = torch.stack([
@@ -69,13 +87,19 @@ class BlobBoardHomographyData(HomographyData):
         ])
         blob_tensor = torch.stack([
             torch.cat([
-                torch.tensor(board.blobs, dtype=torch.float32) - 1,     # Julia convention to 0-based indexing
+                torch.tensor(board.blobs, dtype=torch.float32) + torch.tensor([
+                    (board.image.shape[1] - board.preamble.pattern_config.width) / 2.0,
+                    (board.image.shape[0] - board.preamble.pattern_config.height) / 2.0,
+                    0.0,
+                ], dtype=torch.float32),
                 torch.zeros((max_blobs-len(board.blobs), 3), dtype=torch.float32)
             ]) for i, board in enumerate(boards)
         ])
         super().__init__(
-            torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards]),
-            image_size=image_size,
+            torch.stack([
+                torch.tensor(board.image, dtype=torch.float32).unsqueeze(0) for board in boards
+            ]),
+            image_size=boards[0].image.shape,
             gt_keypoint_coords=blob_tensor[..., :2],
             gt_keypoint_scales=blob_tensor[..., 2],
             gt_keypoint_mask=blob_mask,

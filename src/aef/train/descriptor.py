@@ -238,22 +238,49 @@ def extract_patches(imgs, homographies, coords, scales, patch_size=64, scale_fac
     return patches
 
 
-def process_batch_blobs(model, data, criterion, augmentation, device, cfg):
-    patch_size = cfg.training.patch_size if "patch_size" in cfg.training else 64
-    scale_factor = cfg.training.scale_factor if "scale_factor" in cfg.training else 16
-
+def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
     keypoints = data["keypoints"].to(device)
     coords = data["keypoint_coords"].to(device)  
-    homographies = data["homographies"].to(device)
-    img = data["images"]
-    scales = data["scales"].to(device)
 
-    imgs = torch.stack([img[img_id.item()].to(device) for img_id in keypoints[..., 0]], dim=0)
-    patches = extract_patches(imgs, homographies, coords, scales)
+    patches = data["patches"].to(device)
+
     features = model(patches)
     features = features.view(features.size(0), -1)
 
-    in_bound_mask = torch.all((coords >= 0) & (coords <= imgs.size(-1)), dim=-1)
+    in_bound_mask = torch.all((coords >= 0) & (coords < 1024), dim=-1)
     features = features[in_bound_mask]
     keypoints = keypoints[in_bound_mask]
     return {n: (c({"features": features, "indices": keypoints[..., 1]}), w, r) for n, (c, w, r) in criterion.items()}
+
+
+def sanity_check(imgs, homographies, coords, scales, patch_size=64, scale_factor=64):
+    device = imgs.device
+    coords = coords[:1]
+    scales = scales[:1]
+    blob_normalizations = torch.linalg.inv(linearize_homography(homographies, coords=torch.cat([coords, torch.ones((1, 1)).expand(coords.size(0), 1).to(imgs.device)], dim=-1)))
+    print(blob_normalizations.size())
+    _, S, Vh = torch.linalg.svd(blob_normalizations)
+    Σ = torch.zeros((S.size(0), 2, 2), dtype=torch.float32, device=device)
+    Σ[:, 0, 0] = S[..., 0]
+    Σ[:, 1, 1] = S[..., 1]
+    blob_normalizations = Σ @ Vh
+    phi = torch.tensor([0, torch.pi / 4, torch.pi / 2])
+    rotations = torch.stack([torch.stack([torch.cos(phi), -torch.sin(phi)], dim=1),
+                   torch.stack([torch.sin(phi), torch.cos(phi)], dim=1)], dim=1).to(device)
+    print(rotations.size(), blob_normalizations.size())
+    blob_normalizations = rotations @ blob_normalizations[:1]
+
+    patches = kornia.geometry.transform.warp_perspective(
+        imgs[:1].expand(blob_normalizations.size(0), 3, -1, -1),
+        (
+            torch.diag(torch.tensor([patch_size, patch_size, 1.0], dtype=torch.float32)).to(imgs.device).unsqueeze(0)
+            @ homogenize(torch.eye(2), b=torch.tensor([0.5, 0.5])).unsqueeze(0).to(imgs.device)
+            @ homogenize(torch.eye(2).to(imgs.device).unsqueeze(0) / scales.view(-1, 1, 1) / scale_factor)
+            @ homogenize(blob_normalizations)
+            @ homogenize(torch.eye(2).to(imgs.device).unsqueeze(0).expand(coords.size(0), -1, -1), b=-coords)
+        ),
+        dsize=(patch_size, patch_size),
+        padding_mode="fill",
+        fill_value=torch.tensor([1.0, 1.0, 1.0], device=device),
+    )[:, :1]
+    return patches

@@ -5,16 +5,21 @@ import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
 try:
-    from rbf.basis import get_rbf  # If you have trouble installing rbf, you can comment out this line and load precomputed kernels from local files.
+    from rbf.basis import get_rbf
     rbf_available = True
 except ImportError:
     rbf_available = False
 
+
 def normalize(inv):
     batch = inv.shape[0]
     max_values = inv.abs().view(batch, -1).max(dim=-1)[0]
-    max_values[max_values==0] = 1
-    inv = inv / max_values.view(batch, 1, 1, 1)
+    max_values = torch.where(
+        torch.abs(max_values) < 1e-3,
+        torch.ones_like(max_values),
+        max_values
+    )
+    inv = inv / max_values.view(batch, 1, 1, 1).detach()
     return inv
 
 
@@ -32,7 +37,7 @@ class Diff(nn.Module):
             kernel2 = torch.load(os.path.join(os.path.abspath(__file__), "data", "kernel2.pt"), weights_only=True).cuda().reshape(3, 1, 1, 7, 7)
         conv_weights = torch.cat([-kernel1[1], kernel1[0], kernel2[2], kernel2[0]], dim=0)
         self.conv_weights = nn.Parameter(conv_weights.unsqueeze(1), requires_grad=False)
-    
+
     def make_coord(self, kernel_size):
         x = torch.arange(-(kernel_size // 2), kernel_size // 2 + 1)
         coord = torch.meshgrid([-x, x])

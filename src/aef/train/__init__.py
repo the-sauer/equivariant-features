@@ -71,8 +71,26 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     if hasattr(opt_cfg, "name"):
         optimizer = {"main": getattr(torch.optim, opt_cfg.name)(model.parameters(), **opt_cfg.get("params", {}))}
         if hasattr(opt_cfg, "scheduler"):
-            sched_cfg = opt_cfg.scheduler
-            scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], **sched_cfg.get("params", {}))}
+            if isinstance(opt_cfg.scheduler, omegaconf.ListConfig):
+                scheduler = { "main":
+                    torch.optim.lr_scheduler.ChainedScheduler([
+                        (
+                            getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], T_max=100, **sched_cfg.get("params", {}))
+                            if sched_cfg.name == "CosineAnnealingLR"
+                            else getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], **sched_cfg.get("params", {}))
+                        )
+                        for sched_cfg in opt_cfg.scheduler
+                    ])
+                }
+            else:
+                sched_cfg = opt_cfg.scheduler
+                if sched_cfg.name == "CosineAnnealingLR":
+                    scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
+                                                                                    T_max=100,
+                                                                                    **sched_cfg.get("params", {}))}
+                else:
+                    scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
+                                                                                   **sched_cfg.get("params", {}))}
         else:
             scheduler = {}
     else:
@@ -117,13 +135,13 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     train_loader = [torch.utils.data.DataLoader(
         d,
         batch_size=cfg.training.batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=d.get_collate_func()
     ) for d in train_dataset]
     validation_loader = [torch.utils.data.DataLoader(
         d,
         batch_size=cfg.validation.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=d.get_collate_func()
     ) for d in validation_dataset]
 
@@ -175,6 +193,8 @@ def train_func(process_batch):
         y_train = {n: [] for n in criterion.keys() if criterion[n][2]}
         y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
 
+        lr = {sch.__class__.__name__: [] for sch in scheduler.values()}
+
         for epoch in range(start_epoch, cfg.training.num_epochs):
             loop = tqdm(chain(*train_loader), leave=True)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
@@ -186,18 +206,41 @@ def train_func(process_batch):
                 for opt in optimizer.values():
                     opt.zero_grad()
                 # try:
-                losses = process_batch(model, data, criterion, augmentation, device, cfg)
+                losses = process_batch(model, data, criterion, augmentation, device, cfg, optimizer=optimizer)
                 # except Exception as e:
                 #     logging.error(f"Error processing batch {i} in epoch {epoch}: {e}")
                 #     continue
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
+                
+                # Check for NaN/Inf in loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    logging.warning("Loss is NaN or Inf at batch %d, skipping this batch", i)
+                    continue
+                    
                 cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item() * data["keypoints"].size(0)
                 n_items += data["keypoints"].size(0)
-                loss.backward()
-                for opt in optimizer.values():
-                    opt.step()
+                if loss.requires_grad:
+                    try:
+                        loss.backward()
+                        # Check for NaN in gradients after backward
+                        has_nan_grad = False
+                        for param in model.parameters():
+                            if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                                has_nan_grad = True
+                                break
+                        if has_nan_grad:
+                            logging.warning("NaN detected in gradients at batch %d, skipping update", i)
+                            model.zero_grad()
+                            continue
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                        for opt in optimizer.values():
+                            opt.step()
+                    except RuntimeError as e:
+                        logging.warning("Error during backward at batch %d: %s", i, str(e))
+                        model.zero_grad()
+                        continue
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
                     logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, len(train_loader), ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
             avg_losses = {n: v / n_items for n, v in cumulative_losses.items()}
@@ -272,7 +315,18 @@ def train_func(process_batch):
                         msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
                         print("\033[1m" + msg + "\033[0m")
                         logging.info("\033[1m" + msg + "\033[0m")
+                
                 for sch in scheduler.values():
+                    lr[sch.__class__.__name__] += sch.get_lr()
                     sch.step()
+
+        _, ax = plt.subplots()
+        for n, v in lr.items():
+            ax.plot(x, v, label=n)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Learning Rate")
+        ax.legend()
+        plt.savefig(os.path.join(checkpoint_dir, "..", "learning_rate.svg"))
+        plt.close()
 
     return train

@@ -20,11 +20,12 @@ def compute_affine_invariants(u):
     inv5 = uxx_uy[:,1:,:,:] * uy[:,:-1,:,:] - uxy_ux[:,1:,:,:] * uy[:,:-1,:,:] - uxy_uy[:,1:,:,:] * ux[:,:-1,:,:] + uyy_ux[:,1:,:,:] * ux[:,:-1,:,:]
     inv6 = ux[:,:-1,:,:] * uy[:,1:,:,:] - uy[:,:-1,:,:] * ux[:,1:,:,:]
 
+    # Clamp invariants to avoid extreme values in gradients
     inv1 = normalize(u)
-    inv2 = normalize(inv2)
-    inv345 = normalize(torch.cat((inv3, inv4, inv5), 1))
+    inv2 = normalize(torch.clamp(inv2, min=-1e4, max=1e4))
+    inv345 = normalize(torch.clamp(torch.cat((inv3, inv4, inv5), 1), min=-1e4, max=1e4))
     if u.shape[1] > 1:
-        inv6 = normalize(inv6)
+        inv6 = normalize(torch.clamp(inv6, min=-1e4, max=1e4))
 
     return torch.cat((inv1, inv2, inv345, inv6), 1)
 
@@ -76,9 +77,9 @@ class EqMatrixLayer(nn.Module):
         Su[Su == 0] = 1
         Su = Su.view(x.shape[0], 1, 1, 1) ** 0.5
 
-        eq_matrix11 = self.conv1((uxx * uy - uxy * ux) / Su)
+        eq_matrix11 = self.conv1((uxx * uy - uxy * ux) / Su.detach())
         eq_matrix12 = self.conv1(ux)
-        eq_matrix21 = self.conv1((uxy * uy - uyy * ux) / Su)
+        eq_matrix21 = self.conv1((uxy * uy - uyy * ux) / Su.detach())
         eq_matrix22 = self.conv1(uy)
 
         return torch.cat(
@@ -108,7 +109,8 @@ class BasicBlock(nn.Module):
                 )
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.conv1(x)
+        out = F.relu(self.bn1(out))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
         out = F.relu(out)
@@ -144,14 +146,14 @@ class EquivarLayer_affine_resnet32(nn.Module):
     def det_pool(self, x):
         b, _, h, w = x.shape
         det = (x[:, 0, :, :] * x[:, 3, :, :] - x[:, 1, :, :] * x[:, 2, :, :]).abs()
-        det_onehot = torch.nn.functional.one_hot(
-            torch.argmax(det.view(b, -1), dim=-1), h*w
-        ).view(b, h, w).float()
-        det_soft = torch.nn.functional.softmax(
-            self.beta * det.view(b, -1), dim=-1
-        ).view(b, h, w)
-        det_weight = det_onehot + det_soft - det_soft.detach()
-        pool_x = torch.sum(det_weight.unsqueeze(1) * x, dim=(-2, -1))
+        # Clamp det to avoid numerical instability
+        det = torch.clamp(det, min=1e-6)
+        # Simply select the position with maximum determinant for each batch
+        max_indices = torch.argmax(det.view(b, -1), dim=-1)
+        max_y = max_indices // w
+        max_x = max_indices % w
+        # Gather the 2x2 matrix at the selected position for each batch
+        pool_x = x[torch.arange(b), :, max_y, max_x]
         return pool_x.view(b, 2, 2)
 
     def forward(self, x):

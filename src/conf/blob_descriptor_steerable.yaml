@@ -3,39 +3,72 @@ defaults:
   - _self_
 
 model:
-  name: BlobDescriptorNoStride
+  name: BlobDescriptorHierarchical
   params:
-    n_rotations: 8
+    scale_factors: [4.0, 16.0, 64.0]
+    in_channels: 3
 
 training:
-  num_epochs: 20
+  num_epochs: 100
   patch_size: 64
-  scale_factor: 2
   process_batch: process_batch_blobs
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 80
-      image_size: [1024, 1024]
-      transforms_per_image: 2
-  batch_size: 5000
+      num_boards: 8
+      image_size: [150, 150]
+      transforms_per_image: 7
+      in_memory: true
+      transform_params:
+        perspective: false
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      patch_scale_factors: [4.0, 16.0,  64.0]
+  batch_size: 2048
   optimizer:
-    name: SGD
+    name: AdamW
     params:
-      lr: 1e-3
+      lr: 5e-3
       weight_decay: 1e-4
+    scheduler:
+      - name: LinearLR
+        parameter:
+          start_factor: 1e-3
+          last_epoch: 10
+          total_iters: 10
+      - name: CosineAnnealingLR
+        parameter:
+          T_max: 100
+          last_epoch: 100
+        
   loss: 
     - name: SupCon
+      parameters:
+        temperature: 0.3
 
 validation:
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 10
-      image_size: [1024, 1024]
-      transforms_per_image: 2
-  batch_size: 1000
-  loss: 
+      in_memory: true
+      num_boards: 1
+      image_size: [150, 150]
+      transforms_per_image: 7
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      patch_scale_factors: [4.0, 16.0,  64.0]
+  batch_size: 4096
+  loss:
     - name: FPR95
 
-experiment_name: blob_descriptor_scale_factor_2
+# experiment_name: blob_descriptor_steerable_hierarchical_multi_large_supcon_temp_03

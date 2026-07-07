@@ -13,27 +13,35 @@ training:
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 80
+      num_boards: 16
       image_size: [1024, 1024]
       transforms_per_image: 2
-  batch_size: 5000
+      transform_params:
+        perspective: false
+  batch_size: 500
   optimizer:
     name: SGD
     params:
-      lr: 1e-3
+      lr: 1e-5
       weight_decay: 1e-4
   loss: 
-    - name: SupCon
+    # - name: BlobLoss
+    #   params:
+    #     patch_size: [64, 64]
+    - name: AlignmentLoss
 
 validation:
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 10
+      num_boards: 2
       image_size: [1024, 1024]
       transforms_per_image: 2
   batch_size: 1000
   loss: 
-    - name: FPR95
+    # - name: BlobLoss
+    #   params:
+    #     patch_size: [64, 64]
+    - name: AlignmentLoss
 
-experiment_name: blob_descriptor_scale_factor_2
+# experiment_name: blob_descriptor_scale_factor_2

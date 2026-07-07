@@ -14,16 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import torch
+
 from .asel.affine import EquivarLayer_affine_resnet32
 from .hardnet import HardNet
 
 
-class BlobCanonicalization:
-    def __init__(self):
+class BlobCanonicalization(torch.nn.Module):
+    def __init__(self, **_):
+        super().__init__()
         self.canonicalizer = EquivarLayer_affine_resnet32((1, 64, 64))
         self.descriptor = HardNet(patch_size=64)
-
-    def to(self, device):
-        self.canonicalizer = self.canonicalizer.to(device)
-        self.descriptor = self.descriptor.to(device)
-        return self
