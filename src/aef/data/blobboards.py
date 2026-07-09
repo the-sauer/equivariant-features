@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import glob
 import os
 import random
 
@@ -21,6 +22,7 @@ import blobboards
 import omegaconf
 import pint
 import torch
+import torchvision
 
 from .homography import HomographyData
 
@@ -75,7 +77,32 @@ class BlobBoardHomographyData(HomographyData):
             blobboard_params["frame_width"] = blobboard_params["frame_width"] * _ureg.mm
         blobboard_params["dir"] = os.path.join(kwargs.get("data_dir", "."), "blobboards")
         blobboard_params["format"] = "png"
-        boards = [blobboards.blob_board((image_size[0] * _ureg.mm, image_size[1] * _ureg.mm), resolution, seed=s, polarity=p, image_origin="opencv", **blobboard_params) for s, p in zip(get_seeds(num_boards, split=suffix), polarity)]
+        out_dir = blobboard_params["dir"]
+        os.makedirs(out_dir, exist_ok=True)
+        boards = []
+        for s, p in zip(get_seeds(num_boards, split=suffix), polarity):
+            board = blobboards.blob_board(
+                (image_size[0] * _ureg.mm, image_size[1] * _ureg.mm),
+                resolution, seed=s, polarity=p, image_origin="opencv",
+                **blobboard_params,
+            )
+            # Current BlobBoards bindings render the board raster to disk rather
+            # than returning it, so board.image is None. Load the just-written
+            # PNG (the newest matching file, since boards are created serially)
+            # and attach it. Its canvas frame matches the pattern->canvas offset
+            # applied to the blob coordinates below.
+            if board.image is None:
+                pngs = glob.glob(os.path.join(out_dir, "blob_board_*.png"))
+                if not pngs:
+                    raise RuntimeError(
+                        f"blob_board wrote no PNG to {out_dir!r}; cannot recover board image"
+                    )
+                png = max(pngs, key=os.path.getmtime)
+                raster = torchvision.io.decode_image(
+                    png, torchvision.io.ImageReadMode.GRAY
+                )
+                board.image = (raster.squeeze(0).to(torch.float32) / 255.0).numpy()
+            boards.append(board)
         print(str(blobboard_params))
         blobs = [board.blobs for board in boards]
         max_blobs = max(map(len, blobs))

@@ -317,7 +317,9 @@ def train_func(process_batch):
                         logging.info("\033[1m" + msg + "\033[0m")
                 
                 for sch in scheduler.values():
-                    lr[sch.__class__.__name__] += sch.get_lr()
+                    # get_last_lr() works for composite schedulers (e.g.
+                    # ChainedScheduler), whose get_lr() raises NotImplementedError.
+                    lr[sch.__class__.__name__] += sch.get_last_lr()
                     sch.step()
 
         _, ax = plt.subplots()

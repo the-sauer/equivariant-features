@@ -83,11 +83,14 @@ def load_images(
     )(find_images(dir, extensions))
 
 
-def extract_multiscale_patches(
-    imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0]
-):
-    device = imgs.device
-    blob_normalizations = torch.linalg.inv(
+def blob_normalizations(homographies, coords, device):
+    """Affine shape normalization for each keypoint.
+
+    Whitens the local Jacobian of ``homographies`` at ``coords`` (dropping the
+    rotational part via SVD) so that the elliptical blob maps to an isotropic
+    one. Shared by the cartesian and log-polar patch extractors.
+    """
+    normalizations = torch.linalg.inv(
         linearize_homography(
             homographies,
             coords=torch.cat(
@@ -96,11 +99,18 @@ def extract_multiscale_patches(
             ),
         )
     )
-    _, S, Vh = torch.linalg.svd(blob_normalizations)
+    _, S, Vh = torch.linalg.svd(normalizations)
     Σ = torch.zeros((S.size(0), 2, 2), dtype=torch.float32, device=device)
     Σ[:, 0, 0] = S[..., 0]
     Σ[:, 1, 1] = S[..., 1]
-    blob_normalizations = Σ @ Vh
+    return Σ @ Vh
+
+
+def extract_multiscale_patches(
+    imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0]
+):
+    device = imgs.device
+    blob_normalizations_ = blob_normalizations(homographies, coords, device)
 
     multiscale_patches = []
 
@@ -130,7 +140,7 @@ def extract_multiscale_patches(
             @ homogenize(
                 torch.eye(2).to(device).unsqueeze(0) / scales.view(-1, 1, 1) / sf
             )
-            @ homogenize(blob_normalizations)
+            @ homogenize(blob_normalizations_)
             @ homogenize(
                 torch.eye(2).to(device).unsqueeze(0).expand(coords.size(0), -1, -1),
                 b=-coords,
@@ -151,6 +161,78 @@ def extract_multiscale_patches(
 
     # Stapeln entlang der Kanal-Dimension -> Shape: [Batch, len(scale_factors), patch_size, patch_size]
     return torch.cat(multiscale_patches, dim=1)
+
+
+def extract_logpolar_patches(
+    imgs,
+    homographies,
+    coords,
+    scales,
+    patch_size=64,
+    inner_factor=2.0,
+    outer_factor=32.0,
+):
+    """Extract a log-polar patch around each keypoint.
+
+    The sampled annulus has inner radius ``inner_factor * scale`` and outer
+    radius ``outer_factor * scale`` (measured in the shape-normalized frame),
+    where ``scale`` is the per-feature scale in ``scales``. The radial axis
+    (dim ``-2``) is log-spaced from the inner to the outer radius; the angular
+    axis (dim ``-1``) spans a full turn. Shape normalization is identical to
+    :func:`extract_multiscale_patches`.
+
+    Returns a tensor of shape ``(N, 1, patch_size, patch_size)`` (one channel,
+    since the radial axis already encodes scale).
+    """
+    device = imgs.device
+    N = coords.size(0)
+    H, W = imgs.shape[-2:]
+
+    normalizations = blob_normalizations(homographies, coords, device)
+    # Linear map from the shape-normalized frame back into image pixels.
+    inv_normalizations = torch.linalg.inv(normalizations)
+
+    # Log-polar sampling lattice, in units of the feature scale.
+    radii = torch.exp(
+        torch.linspace(
+            math.log(inner_factor), math.log(outer_factor), patch_size, device=device
+        )
+    )  # (P,) radial, log-spaced
+    angles = torch.linspace(0.0, 2 * math.pi, patch_size + 1, device=device)[
+        :-1
+    ]  # (P,) angular, uniform full turn
+    rr, aa = torch.meshgrid(radii, angles, indexing="ij")  # (P, P): dim0 radial, dim1 angular
+    lattice = torch.stack(
+        [rr * torch.cos(aa), rr * torch.sin(aa)], dim=-1
+    )  # (P, P, 2)
+
+    # Scale to shape-normalized pixels, then map into the source image.
+    offsets = lattice.view(1, patch_size, patch_size, 2) * scales.view(-1, 1, 1, 1)
+    offsets = torch.einsum("nij,nhwj->nhwi", inv_normalizations, offsets)
+    sample_coords = coords.view(N, 1, 1, 2) + offsets  # (x, y) image pixels
+
+    # Normalize to grid_sample's [-1, 1] range (align_corners=True).
+    grid = torch.stack(
+        [
+            sample_coords[..., 0] / (W - 1) * 2.0 - 1.0,
+            sample_coords[..., 1] / (H - 1) * 2.0 - 1.0,
+        ],
+        dim=-1,
+    )
+
+    patches = torch.nn.functional.grid_sample(
+        imgs,
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=True,
+    )
+
+    # White fill outside the image, matching the cartesian extractor.
+    oob = (grid.abs() > 1.0).any(dim=-1, keepdim=True).permute(0, 3, 1, 2)
+    patches = torch.where(oob, torch.ones_like(patches), patches)
+
+    return patches
 
 
 class HomographyData(torch.utils.data.Dataset):
@@ -174,14 +256,26 @@ class HomographyData(torch.utils.data.Dataset):
         gt_keypoint_scales=None,
         gt_keypoint_mask=None,
         patch_scale_factors=[16.0, 64.0, 128.0],  # NEU: Scale Space Faktoren
+        patch_size=64,
+        patch_type="cartesian",  # "cartesian" oder "logpolar"
+        logpolar_inner_factor=2.0,
+        logpolar_outer_factor=32.0,
         **_,
     ):
         super().__init__()
         if transform_params is None:
             transform_params = {}
+        if patch_type not in ("cartesian", "logpolar"):
+            raise ValueError(
+                f"patch_type must be 'cartesian' or 'logpolar', got {patch_type!r}"
+            )
         self.size = image_size
         self.in_memory = in_memory
         self.patch_scale_factors = patch_scale_factors
+        self.patch_size = patch_size
+        self.patch_type = patch_type
+        self.logpolar_inner_factor = logpolar_inner_factor
+        self.logpolar_outer_factor = logpolar_outer_factor
         self.precomputed_patches = None  # Platzhalter für RAM-Modus
 
         if isinstance(images, torch.Tensor):
@@ -297,10 +391,16 @@ class HomographyData(torch.utils.data.Dataset):
         # --- NEU: Pre-Extraktion des Scale Space ---
         self.patches_available = False
         if self.in_memory:
-            print("Pre-extracting multiscale patches into memory...")
+            # Log-polar erzeugt einen einzelnen Kanal (die Radialachse kodiert
+            # bereits die Skala), Cartesian einen Kanal pro Scale-Space-Faktor.
+            n_channels = (
+                1 if self.patch_type == "logpolar" else len(self.patch_scale_factors)
+            )
+            print(f"Pre-extracting {self.patch_type} patches into memory...")
             # Allokiere Speicher für alle Patches (N, Channels, H, W)
             self.precomputed_patches = torch.empty(
-                (len(self), len(self.patch_scale_factors), 64, 64), dtype=torch.float32
+                (len(self), n_channels, self.patch_size, self.patch_size),
+                dtype=torch.float32,
             )
 
             # Wir nutzen einen temporären DataLoader, um die bestehende Logik wiederzuverwenden
@@ -321,14 +421,25 @@ class HomographyData(torch.utils.data.Dataset):
                         [batch["images"][img_id] for img_id in img_ids], dim=0
                     ).cuda()
 
-                    patches = extract_multiscale_patches(
-                        imgs_tensor,
-                        batch["homographies"].cuda(),
-                        batch["keypoint_coords"].cuda(),
-                        batch["scales"].cuda(),
-                        patch_size=64,
-                        scale_factors=self.patch_scale_factors,
-                    )
+                    if self.patch_type == "logpolar":
+                        patches = extract_logpolar_patches(
+                            imgs_tensor,
+                            batch["homographies"].cuda(),
+                            batch["keypoint_coords"].cuda(),
+                            batch["scales"].cuda(),
+                            patch_size=self.patch_size,
+                            inner_factor=self.logpolar_inner_factor,
+                            outer_factor=self.logpolar_outer_factor,
+                        )
+                    else:
+                        patches = extract_multiscale_patches(
+                            imgs_tensor,
+                            batch["homographies"].cuda(),
+                            batch["keypoint_coords"].cuda(),
+                            batch["scales"].cuda(),
+                            patch_size=self.patch_size,
+                            scale_factors=self.patch_scale_factors,
+                        )
 
                     self.precomputed_patches[idx : idx + patches.size(0)] = (
                         patches.cpu()

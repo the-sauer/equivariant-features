@@ -1,0 +1,78 @@
+defaults:
+  - config
+  - _self_
+
+model:
+  name: HardNet
+  params:
+    in_channels: 1   # log-polar patches are single-channel (radial axis encodes scale)
+    patch_size: 64
+
+training:
+  num_epochs: 100
+  patch_size: 64
+  process_batch: process_batch_blobs
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      num_boards: 8
+      image_size: [150, 150]
+      transforms_per_image: 7
+      in_memory: true
+      transform_params:
+        perspective: false
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      # Log-polar patches: HardNet operates on a single scale, so the annulus
+      # spans inner_radius = 2 * scale to outer_radius = 96 * scale.
+      patch_type: logpolar
+      patch_size: 64
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: 96.0
+  batch_size: 2048
+  optimizer:
+    name: AdamW
+    params:
+      lr: 5e-3
+      weight_decay: 1e-4
+    scheduler:
+      - name: LinearLR
+        params:
+          start_factor: 1e-3
+          total_iters: 10
+      - name: CosineAnnealingLR   # T_max is hardcoded to 100 by the training loop
+
+  loss:
+    - name: SupCon
+      params:
+        temperature: 0.3
+
+validation:
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      in_memory: true
+      num_boards: 1
+      image_size: [150, 150]
+      transforms_per_image: 7
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      patch_type: logpolar
+      patch_size: 64
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: 96.0
+  batch_size: 4096
+  loss:
+    - name: FPR95
+
+# experiment_name: hardnet_logpolar_blobboard
