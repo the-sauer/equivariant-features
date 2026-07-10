@@ -132,12 +132,24 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         start_epoch = 0
         best_loss = float("inf")
 
-    train_loader = [torch.utils.data.DataLoader(
-        d,
-        batch_size=cfg.training.batch_size,
-        shuffle=True,
-        collate_fn=d.get_collate_func()
-    ) for d in train_dataset]
+    # Optional class-balanced sampling (m views per keypoint per batch) for
+    # contrastive training; enabled by setting `training.m_per_class` in the
+    # config. Falls back to plain shuffling for datasets/tasks that don't use it.
+    m_per_class = getattr(cfg.training, "m_per_class", None)
+    train_loader = []
+    for d in train_dataset:
+        sampler = (
+            d.get_sampler(cfg.training.batch_size, m=int(m_per_class))
+            if m_per_class and hasattr(d, "get_sampler")
+            else None
+        )
+        train_loader.append(torch.utils.data.DataLoader(
+            d,
+            batch_size=cfg.training.batch_size,
+            shuffle=sampler is None,
+            sampler=sampler,
+            collate_fn=d.get_collate_func()
+        ))
     validation_loader = [torch.utils.data.DataLoader(
         d,
         batch_size=cfg.validation.batch_size,

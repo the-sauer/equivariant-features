@@ -12,6 +12,7 @@ training:
   num_epochs: 100
   patch_size: 64
   process_batch: process_batch_blobs
+  m_per_class: 4   # views per keypoint per batch (class-balanced sampling for SupCon)
   dataset:
     name: BlobBoardHomographyData
     params:
@@ -20,7 +21,7 @@ training:
       transforms_per_image: 7
       in_memory: true
       transform_params:
-        perspective: false
+        fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]
         cutoff: 2
@@ -34,6 +35,7 @@ training:
       patch_size: 64
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: 96.0
+      extraction_batch_size: 256
   batch_size: 2048
   optimizer:
     name: AdamW
@@ -42,9 +44,6 @@ training:
       weight_decay: 1e-4
     scheduler:
       - name: LinearLR
-        params:
-          start_factor: 1e-3
-          total_iters: 10
       - name: CosineAnnealingLR   # T_max is hardcoded to 100 by the training loop
 
   loss:
@@ -60,6 +59,8 @@ validation:
       num_boards: 1
       image_size: [150, 150]
       transforms_per_image: 7
+      transform_params:
+        fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]
         cutoff: 2
@@ -71,6 +72,7 @@ validation:
       patch_size: 64
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: 96.0
+      extraction_batch_size: 256
   batch_size: 4096
   loss:
     - name: FPR95

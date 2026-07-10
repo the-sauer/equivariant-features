@@ -12,6 +12,7 @@ training:
   num_epochs: 100
   patch_size: 64
   process_batch: process_batch_blobs
+  m_per_class: 4   # views per keypoint per batch (class-balanced sampling for SupCon)
   dataset:
     name: BlobBoardHomographyData
     params:
@@ -21,6 +22,7 @@ training:
       in_memory: true
       transform_params:
         perspective: false
+        fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]
         cutoff: 2
@@ -37,18 +39,14 @@ training:
       weight_decay: 1e-4
     scheduler:
       - name: LinearLR
-        parameter:
+        params:
           start_factor: 1e-3
-          last_epoch: 10
           total_iters: 10
       - name: CosineAnnealingLR
-        parameter:
-          T_max: 100
-          last_epoch: 100
-        
+
   loss: 
     - name: SupCon
-      parameters:
+      params:
         temperature: 0.3
 
 validation:
@@ -59,6 +57,9 @@ validation:
       num_boards: 1
       image_size: [150, 150]
       transforms_per_image: 7
+      transform_params:
+        perspective: false
+        fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]
         cutoff: 2

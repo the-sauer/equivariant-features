@@ -42,6 +42,8 @@ def sample_homography(
         max_angle: float | str = np.pi / 2,
         allow_artifacts: bool = False,
         translation_overflow: float = 0.0,
+        fit_to_frame: bool = False,
+        min_fit_scale: float = 0.0,
 ) -> torch.Tensor:
     """Sample a random valid homography.
 
@@ -69,6 +71,12 @@ def sample_homography(
         max_angle: Maximum angle used in rotations.
         allow_artifacts: A boolean that enables artifacts when applying the homography.
         translation_overflow: Amount of border artifacts caused by translation.
+        fit_to_frame: If True, post-compose a uniform scale+translation so the entire original
+            image maps inside the output frame (letterboxed), guaranteeing nothing is cut off.
+        min_fit_scale: Lower bound on the fit_to_frame shrink factor, disabled (0.0) by default
+            since even the worst-case fit still covers ~24% of the frame. Set >0 to floor the
+            shrink at the cost of re-introducing minor clipping for extreme transforms. Only
+            used when ``fit_to_frame`` is True.
 
     Returns:
         An `array` of shape `(3,3)` corresponding to the homography.
@@ -171,4 +179,23 @@ def sample_homography(
     homography[0, :] = flat_homography[0][:3]
     homography[1, :] = flat_homography[0][3:6]
     homography[2, :2] = flat_homography[0][6:]
+
+    if fit_to_frame:
+        # Post-compose a uniform scale + translation so the *entire* original
+        # image maps inside the output frame (letterbox), guaranteeing nothing
+        # is cut off. `shape` is (W, H) here; the homography maps original -> warped.
+        w, h = shape
+        corners = np.array(
+            [[0.0, 0.0, 1.0], [0.0, h, 1.0], [w, h, 1.0], [w, 0.0, 1.0]]
+        ).T  # (3, 4): homogeneous (x, y, 1) corners of the full original image
+        warped = homography @ corners
+        warped = warped[:2] / warped[2]  # (2, 4): (x, y) of the warped corners
+        (xmin, ymin), (xmax, ymax) = warped.min(axis=1), warped.max(axis=1)
+        s = min(w / (xmax - xmin), h / (ymax - ymin))  # shrink to fit, keep aspect
+        s = max(s, min_fit_scale)  # cap the shrink; extreme warps overflow slightly instead
+        tx = (w - s * (xmax - xmin)) / 2 - s * xmin  # center the letterboxed content
+        ty = (h - s * (ymax - ymin)) / 2 - s * ymin
+        fit = np.array([[s, 0.0, tx], [0.0, s, ty], [0.0, 0.0, 1.0]])
+        homography = fit @ homography
+
     return torch.tensor(homography, dtype=torch.float32)

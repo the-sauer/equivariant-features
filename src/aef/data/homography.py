@@ -107,10 +107,18 @@ def blob_normalizations(homographies, coords, device):
 
 
 def extract_multiscale_patches(
-    imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0]
+    imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0],
+    supersample=1,
 ):
     device = imgs.device
     blob_normalizations_ = blob_normalizations(homographies, coords, device)
+
+    # Warp at `supersample` taps per output pixel along each axis and
+    # area-average back down (in addition to the per-scale pre-blur below), so
+    # each output pixel integrates its full source footprint. ``supersample=1``
+    # recovers the plain single-tap behaviour.
+    ss = max(1, int(supersample))
+    P = patch_size * ss
 
     multiscale_patches = []
 
@@ -130,8 +138,9 @@ def extract_multiscale_patches(
             blurred_imgs = imgs
 
         # --- Affine Patch-Warping Matrix ---
+        # Output spans the supersampled grid (P = patch_size * ss).
         M = (
-            torch.diag(torch.tensor([patch_size, patch_size, 1.0], dtype=torch.float32))
+            torch.diag(torch.tensor([P, P, 1.0], dtype=torch.float32))
             .to(device)
             .unsqueeze(0)
             @ homogenize(torch.eye(2), b=torch.tensor([0.5, 0.5]))
@@ -150,12 +159,16 @@ def extract_multiscale_patches(
         patches = kornia.geometry.transform.warp_perspective(
             blurred_imgs.expand(-1, 3, -1, -1),
             M,
-            dsize=(patch_size, patch_size),
+            dsize=(P, P),
             padding_mode="fill",
             fill_value=torch.tensor([1.0, 1.0, 1.0], device=device),
         )[
             :, :1
         ]  # Zurück auf 1 Kanal pro Skala
+
+        # Area-average each output pixel's supersampled footprint.
+        if ss > 1:
+            patches = torch.nn.functional.avg_pool2d(patches, kernel_size=ss, stride=ss)
 
         multiscale_patches.append(patches)
 
@@ -171,15 +184,24 @@ def extract_logpolar_patches(
     patch_size=64,
     inner_factor=2.0,
     outer_factor=32.0,
+    supersample=3,
 ):
     """Extract a log-polar patch around each keypoint.
 
     The sampled annulus has inner radius ``inner_factor * scale`` and outer
     radius ``outer_factor * scale`` (measured in the shape-normalized frame),
     where ``scale`` is the per-feature scale in ``scales``. The radial axis
-    (dim ``-2``) is log-spaced from the inner to the outer radius; the angular
-    axis (dim ``-1``) spans a full turn. Shape normalization is identical to
+    (dim ``-1``) is log-spaced from the inner to the outer radius; the angular
+    axis (dim ``-2``) spans a full turn. Shape normalization is identical to
     :func:`extract_multiscale_patches`.
+
+    For anti-aliased sampling, the lattice is built at ``supersample`` sub-taps
+    per output pixel along each axis and area-averaged back down. Because the
+    sub-taps live in log-polar coordinates, they automatically span each output
+    pixel's true source footprint — which grows with radius — so this
+    approximates area interpolation and suppresses the aliasing that a single
+    bilinear tap produces in the outer (condensed) radii. ``supersample=1``
+    recovers the plain single-tap behaviour.
 
     Returns a tensor of shape ``(N, 1, patch_size, patch_size)`` (one channel,
     since the radial axis already encodes scale).
@@ -192,22 +214,25 @@ def extract_logpolar_patches(
     # Linear map from the shape-normalized frame back into image pixels.
     inv_normalizations = torch.linalg.inv(normalizations)
 
+    ss = max(1, int(supersample))
+    P = patch_size * ss  # supersampled lattice resolution per axis
+
     # Log-polar sampling lattice, in units of the feature scale.
     radii = torch.exp(
         torch.linspace(
-            math.log(inner_factor), math.log(outer_factor), patch_size, device=device
+            math.log(inner_factor), math.log(outer_factor), P, device=device
         )
     )  # (P,) radial, log-spaced
-    angles = torch.linspace(0.0, 2 * math.pi, patch_size + 1, device=device)[
+    angles = torch.linspace(0.0, 2 * math.pi, P + 1, device=device)[
         :-1
     ]  # (P,) angular, uniform full turn
-    rr, aa = torch.meshgrid(radii, angles, indexing="ij")  # (P, P): dim0 radial, dim1 angular
+    aa, rr = torch.meshgrid(angles, radii, indexing="ij")  # (P, P): dim0 angular, dim1 radial
     lattice = torch.stack(
         [rr * torch.cos(aa), rr * torch.sin(aa)], dim=-1
     )  # (P, P, 2)
 
     # Scale to shape-normalized pixels, then map into the source image.
-    offsets = lattice.view(1, patch_size, patch_size, 2) * scales.view(-1, 1, 1, 1)
+    offsets = lattice.view(1, P, P, 2) * scales.view(-1, 1, 1, 1)
     offsets = torch.einsum("nij,nhwj->nhwi", inv_normalizations, offsets)
     sample_coords = coords.view(N, 1, 1, 2) + offsets  # (x, y) image pixels
 
@@ -231,6 +256,10 @@ def extract_logpolar_patches(
     # White fill outside the image, matching the cartesian extractor.
     oob = (grid.abs() > 1.0).any(dim=-1, keepdim=True).permute(0, 3, 1, 2)
     patches = torch.where(oob, torch.ones_like(patches), patches)
+
+    # Area-average each output pixel's supersampled footprint.
+    if ss > 1:
+        patches = torch.nn.functional.avg_pool2d(patches, kernel_size=ss, stride=ss)
 
     return patches
 
@@ -257,9 +286,11 @@ class HomographyData(torch.utils.data.Dataset):
         gt_keypoint_mask=None,
         patch_scale_factors=[16.0, 64.0, 128.0],  # NEU: Scale Space Faktoren
         patch_size=64,
+        extraction_batch_size=512,
         patch_type="cartesian",  # "cartesian" oder "logpolar"
         logpolar_inner_factor=2.0,
         logpolar_outer_factor=32.0,
+        supersample=3,  # sub-taps per output pixel per axis, area-averaged (both patch types)
         **_,
     ):
         super().__init__()
@@ -276,6 +307,7 @@ class HomographyData(torch.utils.data.Dataset):
         self.patch_type = patch_type
         self.logpolar_inner_factor = logpolar_inner_factor
         self.logpolar_outer_factor = logpolar_outer_factor
+        self.supersample = supersample
         self.precomputed_patches = None  # Platzhalter für RAM-Modus
 
         if isinstance(images, torch.Tensor):
@@ -406,7 +438,7 @@ class HomographyData(torch.utils.data.Dataset):
             # Wir nutzen einen temporären DataLoader, um die bestehende Logik wiederzuverwenden
             extraction_loader = torch.utils.data.DataLoader(
                 self,
-                batch_size=512,
+                batch_size=extraction_batch_size,
                 collate_fn=self.get_collate_func(),
                 shuffle=False,
                 num_workers=0,
@@ -420,6 +452,8 @@ class HomographyData(torch.utils.data.Dataset):
                     imgs_tensor = torch.stack(
                         [batch["images"][img_id] for img_id in img_ids], dim=0
                     ).cuda()
+                    # for img_id in img_ids:
+                    #     torchvision.utils.save_image(batch["images"][img_id], f"./debug_imgs/img_{img_id}.png")
 
                     if self.patch_type == "logpolar":
                         patches = extract_logpolar_patches(
@@ -430,6 +464,7 @@ class HomographyData(torch.utils.data.Dataset):
                             patch_size=self.patch_size,
                             inner_factor=self.logpolar_inner_factor,
                             outer_factor=self.logpolar_outer_factor,
+                            supersample=self.supersample,
                         )
                     else:
                         patches = extract_multiscale_patches(
@@ -439,6 +474,7 @@ class HomographyData(torch.utils.data.Dataset):
                             batch["scales"].cuda(),
                             patch_size=self.patch_size,
                             scale_factors=self.patch_scale_factors,
+                            supersample=self.supersample,
                         )
 
                     self.precomputed_patches[idx : idx + patches.size(0)] = (
@@ -496,6 +532,23 @@ class HomographyData(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.keypoints) * (self.transforms.size(1) + 1)
 
+    def get_sampler(self, batch_size, m=4):
+        """Class-balanced sampler so each batch holds ``m`` views per keypoint.
+
+        Contrastive losses (SupCon/FPR95) need multiple views of the same
+        physical keypoint in a batch to form positive pairs; plain shuffling
+        scatters the ``transforms_per_image + 1`` views so most anchors end up
+        with no positive. The per-index label is the keypoint's feature id,
+        which repeats across its views (see ``__getitem__``/``__len__``).
+        """
+        from pytorch_metric_learning.samplers import MPerClassSampler
+
+        views = self.transforms.size(1) + 1
+        labels = self.keypoints[:, 1].repeat_interleave(views)
+        return MPerClassSampler(
+            labels, m=m, batch_size=batch_size, length_before_new_iter=len(labels)
+        )
+
     def load_and_resize(self, img_path):
         return (
             self.resize(
@@ -516,6 +569,8 @@ class HomographyData(torch.utils.data.Dataset):
                 ),
                 "scales": torch.stack([item["scales"] for item in batch]),
                 "homographies": torch.stack([item["homographies"] for item in batch]),
+                # Frame size (H, W) so downstream can bound warped coords correctly.
+                "image_size": torch.tensor(self.size, dtype=torch.float32),
             }
 
             if not needs_images:

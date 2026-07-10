@@ -247,7 +247,12 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
     features = model(patches)
     features = features.view(features.size(0), -1)
 
-    in_bound_mask = torch.all((coords >= 0) & (coords < 1024), dim=-1)
+    # Drop keypoints that fell outside the image frame after warping — their
+    # patches are meaningless white fill. Bound by the actual frame size (the
+    # collate attaches it as (H, W)); coords are (x, y), so bound by (W, H).
+    img_h, img_w = data["image_size"].tolist()
+    bound = torch.tensor([img_w, img_h], device=device)
+    in_bound_mask = torch.all((coords >= 0) & (coords < bound), dim=-1)
     features = features[in_bound_mask]
     keypoints = keypoints[in_bound_mask]
     return {n: (c({"features": features, "indices": keypoints[..., 1]}), w, r) for n, (c, w, r) in criterion.items()}
