@@ -37,20 +37,45 @@ def get_dataset(dataset_cfg):
 def get_validation_specs(cfg):
     """Resolve the validation config into ``(label, datasets, loss_cfgs)`` specs.
 
-    Two config forms are supported:
+    Three config forms are supported:
 
+    * **Shared-params** — ``cfg.validation.shared_params`` holds a single
+      ``{name, params}`` dataset template and each ``cfg.validation.datasets``
+      entry supplies only what differs (``params`` overrides + its own ``loss``).
+      The template is deep-merged with the per-entry overrides, so the common
+      board/patch settings live in one place instead of being repeated (or
+      threaded through YAML anchors) across every split. An entry may still
+      carry an explicit ``dataset`` block to opt out of the template entirely.
     * **Multi-dataset** — ``cfg.validation.datasets`` is a list of entries, each
-      ``{name, dataset, loss}``. Every entry is paired with its own criterion and
-      reported separately (metrics keyed ``<loss>@<name>``). This is what lets
-      the small/large/overall blob validation sets report individual FPRs.
+      carrying its own full ``{name, dataset, loss}``. Every entry is paired with
+      its own criterion and reported separately (metrics keyed ``<loss>@<name>``).
     * **Single-dataset (legacy)** — ``cfg.validation.dataset`` + ``cfg.validation.loss``.
       Returned as a single unlabelled spec, so existing configs are unchanged.
     """
     val = cfg.validation
     if getattr(val, "datasets", None) is not None:
+        shared = getattr(val, "shared_params", None)
         specs = []
         for entry in val.datasets:
             label = entry.get("name", "")
-            specs.append((label, get_dataset(entry.dataset), entry.loss))
+            if getattr(entry, "dataset", None) is not None:
+                dataset_cfg = entry.dataset
+            elif shared is not None:
+                # Deep-merge the shared template with this split's overrides.
+                # ``entry.name`` is the split *label*, not the dataset class, so
+                # only ``entry.params`` participates in the merge; the class name
+                # comes from ``shared.name``.
+                dataset_cfg = omegaconf.OmegaConf.merge(
+                    shared,
+                    omegaconf.OmegaConf.create(
+                        {"params": entry.get("params", {}) or {}}
+                    ),
+                )
+            else:
+                raise ValueError(
+                    f"validation.datasets entry {label!r} has no 'dataset' block "
+                    "and no 'validation.shared_params' template to inherit from"
+                )
+            specs.append((label, get_dataset(dataset_cfg), entry.loss))
         return specs
     return [("", get_dataset(val.dataset), getattr(val, "loss", []))]

@@ -82,9 +82,12 @@ class BlobBoardHomographyData(HomographyData):
         os.makedirs(out_dir, exist_ok=True)
         if seeds is not None:
             board_seeds = list(seeds)
-            assert len(board_seeds) == num_boards, (
-                f"Expected {num_boards} seeds, got {len(board_seeds)}"
+            assert num_boards <= len(board_seeds), (
+                f"Expected at least {num_boards} seeds, got {len(board_seeds)}"
             )
+            # Allow a seed pool larger than num_boards: take the first num_boards
+            # so a single shared seed list can back configs with fewer boards.
+            board_seeds = board_seeds[:num_boards]
         else:
             board_seeds = get_seeds(num_boards, split=suffix)
         boards = []

@@ -295,6 +295,8 @@ class HomographyData(torch.utils.data.Dataset):
         supersample=3,  # sub-taps per output pixel per axis, area-averaged (both patch types)
         scale_quantile_range=None,  # (lo, hi) in [0, 1]: keep keypoints whose intrinsic blob scale falls in this quantile band
         scale_range=None,  # (lo, hi) absolute blob-scale bounds; alternative to scale_quantile_range
+        max_keypoints=None,  # cap the kept keypoints to a fixed count (deterministic subsample) so different splits are exactly the same size
+        subsample_seed=0,  # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable across runs
         **_,
     ):
         super().__init__()
@@ -464,6 +466,31 @@ class HomographyData(torch.utils.data.Dataset):
                 f"Scale filter {scale_quantile_range or scale_range}: kept "
                 f"{self.keypoints.size(0)}/{n_before} keypoints "
                 f"(intrinsic scale in [{lo:.4f}, {hi:.4f}])"
+            )
+
+        # Cap to a fixed number of keypoints so sibling splits (e.g. the
+        # small/medium/large blob-scale bands, which naturally hold different
+        # counts) end up exactly the same size. The subsample is deterministic
+        # (seeded generator) so a split's members are stable across runs, and we
+        # keep the original ordering afterwards so downstream indexing is
+        # unaffected. Applied after scale filtering, so the cap counts only the
+        # keypoints that survived the band selection.
+        if max_keypoints is not None and self.keypoints.size(0) > max_keypoints:
+            n_before = self.keypoints.size(0)
+            generator = torch.Generator().manual_seed(int(subsample_seed))
+            perm = torch.randperm(n_before, generator=generator)[:max_keypoints]
+            perm = perm.sort().values
+            self.keypoints = self.keypoints[perm]
+            self.keypoint_coords = self.keypoint_coords[perm]
+            self.keypoint_scales = self.keypoint_scales[perm]
+            print(
+                f"Keypoint cap: subsampled {self.keypoints.size(0)}/{n_before} "
+                f"keypoints (max_keypoints={max_keypoints}, seed={subsample_seed})"
+            )
+        elif max_keypoints is not None:
+            print(
+                f"Keypoint cap: only {self.keypoints.size(0)} keypoints available "
+                f"(< max_keypoints={max_keypoints}); split will be smaller than the cap"
             )
 
         avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)

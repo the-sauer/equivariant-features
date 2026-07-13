@@ -1,9 +1,0 @@
-defaults:
-  - descriptor
-  - dgx
-  - _self_
-
-training:
-  batch_size: 8
-validation:
-  batch_size: 8
