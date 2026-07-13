@@ -1,75 +1,27 @@
 defaults:
-  - config
+  - blob_descriptor_base
+  - dgx
   - _self_
 
 model:
-  name: BlobDescriptorHierarchical
+  name: BlobDescriptorNoStride
   params:
-    scale_factors: [4.0, 16.0, 64.0]
-    in_channels: 3
+    scale_factors: [16.0]
+    in_channels: 1
 
 training:
-  num_epochs: 100
-  patch_size: 64
-  process_batch: process_batch_blobs
-  m_per_class: 4   # views per keypoint per batch (class-balanced sampling for SupCon)
+  batch_size: 1024
   dataset:
-    name: BlobBoardHomographyData
     params:
-      num_boards: 8
-      image_size: [150, 150]
-      transforms_per_image: 7
-      in_memory: true
-      transform_params:
-        perspective: false
-        fit_to_frame: true
-      blobboard_params:
-        board_size: [142, 142]
-        cutoff: 2
-        alpha: 1.6
-        max_diameter_fraction: 0.4
-        min_scale: 0.2
-        frame_width: 10
-      patch_scale_factors: [4.0, 16.0,  64.0]
-  batch_size: 2048
+      patch_type: cartesian
+      patch_scale_factors: [16.0]
+      extraction_batch_size: 512
   optimizer:
     name: AdamW
-    params:
-      lr: 5e-3
-      weight_decay: 1e-4
-    scheduler:
-      - name: LinearLR
-        params:
-          start_factor: 1e-3
-          total_iters: 10
-      - name: CosineAnnealingLR
-
-  loss: 
-    - name: SupCon
-      params:
-        temperature: 0.3
 
 validation:
   dataset:
-    name: BlobBoardHomographyData
     params:
-      in_memory: true
-      num_boards: 1
-      image_size: [150, 150]
-      transforms_per_image: 7
-      transform_params:
-        perspective: false
-        fit_to_frame: true
-      blobboard_params:
-        board_size: [142, 142]
-        cutoff: 2
-        alpha: 1.6
-        max_diameter_fraction: 0.4
-        min_scale: 0.2
-        frame_width: 10
-      patch_scale_factors: [4.0, 16.0,  64.0]
-  batch_size: 4096
-  loss:
-    - name: FPR95
-
-# experiment_name: blob_descriptor_steerable_hierarchical_multi_large_supcon_temp_03
+      patch_type: cartesian
+      patch_scale_factors: [16.0]
+      extraction_batch_size: 512

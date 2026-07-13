@@ -22,6 +22,7 @@ from typing import Iterable, Union
 import kornia
 import torch
 import torchvision
+from torchvision.transforms import v2
 from tqdm import tqdm
 
 from ..train.detector import homogenize, linearize_homography
@@ -278,6 +279,7 @@ class HomographyData(torch.utils.data.Dataset):
         in_memory=True,
         transform_params=None,
         transforms_per_image=1,
+        augmentation=None,
         sift_batch_size=1000,
         sift_min_response_threshold=0.03,
         features_per_image=500,
@@ -310,6 +312,20 @@ class HomographyData(torch.utils.data.Dataset):
         self.supersample = supersample
         self.precomputed_patches = None  # Platzhalter für RAM-Modus
 
+        if augmentation is not None:
+        # TODO: Check for all innner augmentations
+            self.augmentation = v2.Compose([
+                v2.ColorJitter(**augmentation.color_jitter),
+                v2.GaussianBlur(
+                    kernel_size=getattr(augmentation.gaussian_blur, 'kernel_size'),
+                    sigma=getattr(augmentation.gaussian_blur, 'sigma')
+                ),
+                v2.GaussianNoise(**augmentation.gaussian_noise),
+            ])
+        else:
+            self.augmentation = lambda x: x
+        print(f"Augmentation: {self.augmentation}")
+
         if isinstance(images, torch.Tensor):
             self.images = images
             self.c = self.images.size(1)
@@ -324,7 +340,7 @@ class HomographyData(torch.utils.data.Dataset):
                 self.images = list(find_images(images))
                 self.resize = torchvision.transforms.Resize(image_size)
                 self.c = torchvision.io.decode_image(self.images[0]).size(0)
-
+        self.transform_params = transform_params
         self.transforms = torch.stack(
             [
                 torch.stack(
@@ -358,7 +374,7 @@ class HomographyData(torch.utils.data.Dataset):
                 else:
                     actual_sift_batch_size = sift_batch_size
 
-                if in_memory:
+                if hasattr(self, "images"):
                     img = self.images[i : i + actual_sift_batch_size].cuda()
                 else:
                     img = torch.stack(
@@ -368,6 +384,7 @@ class HomographyData(torch.utils.data.Dataset):
                         ],
                         dim=0,
                     ).cuda()
+                    img = augmentation(img)
                 if (
                     gt_keypoint_coords is not None
                     and gt_keypoint_scales is not None
@@ -419,8 +436,10 @@ class HomographyData(torch.utils.data.Dataset):
 
         avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)
         print(f"{avg_keypoints_per_image=}")
+        self.extraction_batch_size = extraction_batch_size
+        self.compute_patches()
 
-        # --- NEU: Pre-Extraktion des Scale Space ---
+    def compute_patches(self):
         self.patches_available = False
         if self.in_memory:
             # Log-polar erzeugt einen einzelnen Kanal (die Radialachse kodiert
@@ -438,7 +457,7 @@ class HomographyData(torch.utils.data.Dataset):
             # Wir nutzen einen temporären DataLoader, um die bestehende Logik wiederzuverwenden
             extraction_loader = torch.utils.data.DataLoader(
                 self,
-                batch_size=extraction_batch_size,
+                batch_size=self.extraction_batch_size,
                 collate_fn=self.get_collate_func(),
                 shuffle=False,
                 num_workers=0,
@@ -449,11 +468,13 @@ class HomographyData(torch.utils.data.Dataset):
                 for batch in tqdm(extraction_loader, desc="Warping Patches"):
                     # Rekonstruiere den Batched-Image-Tensor aus dem Dictionary
                     img_ids = batch["keypoints"][:, 0].cpu().numpy()
+                    images = {img_id: self.augmentation(img) for img_id, img in batch["images"].items()}
+                    # TODO: Consider using no augmention for the non-warped images
                     imgs_tensor = torch.stack(
-                        [batch["images"][img_id] for img_id in img_ids], dim=0
+                        [images[img_id] for img_id in img_ids], dim=0
                     ).cuda()
-                    # for img_id in img_ids:
-                    #     torchvision.utils.save_image(batch["images"][img_id], f"./debug_imgs/img_{img_id}.png")
+                    # for i, img in enumerate(images.values()):
+                    #     torchvision.utils.save_image(img, f"./debug_imgs/img_{i}.png")
 
                     if self.patch_type == "logpolar":
                         patches = extract_logpolar_patches(
@@ -482,6 +503,7 @@ class HomographyData(torch.utils.data.Dataset):
                     )
                     idx += patches.size(0)
             self.patches_available = True
+
 
     def __getitem__(self, index):
         keypoint_i = index // (self.transforms.size(1) + 1)
@@ -557,6 +579,22 @@ class HomographyData(torch.utils.data.Dataset):
             / 255
         )
 
+    def resample_homographies(self):
+        self.transforms = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.Tensor(sample_homography(self.size, **self.transform_params))
+                        for _ in range(self.transforms_per_image)
+                    ]
+                )
+                for _ in range(len(self.images))
+            ]
+        )
+        self.transforms_inv = torch.linalg.inv(self.transforms)
+        self.compute_patches()
+
+
     def get_collate_func(self):
         def collate_homography(batch):
             # Wir sparen uns das Image-Loading, wenn wir die Patches schon haben!
@@ -581,13 +619,16 @@ class HomographyData(torch.utils.data.Dataset):
                 img_ids = {item["keypoint"][0].item() for item in batch}
                 imgs = {}
                 for img_id in img_ids:
-                    img = (
-                        self.load_and_resize(
-                            self.images[img_id // (self.transforms.size(1) + 1)]
+                    try:
+                        img = self.images[img_id // (self.transforms.size(1) + 1)]
+                    except TypeError:
+                        img = (
+                            self.load_and_resize(
+                                self.images[img_id // (self.transforms.size(1) + 1)]
+                            )
+                            if not self.in_memory
+                            else self.images[img_id // (self.transforms.size(1) + 1)]
                         )
-                        if not self.in_memory
-                        else self.images[img_id // (self.transforms.size(1) + 1)]
-                    )
                     if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
                         img = kornia.geometry.transform.warp_perspective(
                             img.unsqueeze(0).expand(-1, 3, -1, -1),

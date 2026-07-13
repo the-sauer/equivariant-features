@@ -39,7 +39,7 @@ def sample_homography(
         perspective_amplitude_x: float = 0.1,
         perspective_amplitude_y: float = 0.1,
         patch_ratio: float = 0.5,
-        max_angle: float | str = np.pi / 2,
+        max_angle: float | str = np.pi,
         allow_artifacts: bool = False,
         translation_overflow: float = 0.0,
         fit_to_frame: bool = False,

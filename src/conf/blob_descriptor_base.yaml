@@ -1,0 +1,85 @@
+defaults:
+  - config
+  - _self_
+
+training:
+  num_epochs: 100
+  patch_size: 64
+  process_batch: process_batch_blobs
+  m_per_class: 4
+
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      num_boards: 16
+      image_size: [150, 150]
+      transforms_per_image: 1
+      in_memory: true
+      transform_params:
+        perspective: false
+        fit_to_frame: true
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      augmentation:
+        color_jitter:
+          brightness: 0.5
+          contrast: 1
+          saturation: 1
+        gaussian_blur:
+          kernel_size: 31
+          sigma: 5.0
+        gaussian_noise:
+          mean: 0.0
+          sigma: 0.1
+  batch_size: 2048
+  optimizer:
+    name: SGD
+    params:
+      lr: 4e-5
+      weight_decay: 1e-4
+    scheduler:
+      - name: LinearLR
+      - name: CosineAnnealingLR
+
+  loss: 
+    - name: SupCon
+
+validation:
+  batch_size: 1024
+
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      num_boards: 2
+      image_size: [150, 150]
+      transforms_per_image: 1
+      in_memory: true
+      transform_params:
+        perspective: false
+        fit_to_frame: true
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      augmentation:
+        color_jitter:
+          brightness: 0.05
+          contrast: 0.1
+          saturation: .01
+        gaussian_blur:
+          kernel_size: 5
+          sigma: 0.5
+        gaussian_noise:
+          mean: 0.0
+          sigma: 0.01
+
+  loss:
+    - name: FPR95

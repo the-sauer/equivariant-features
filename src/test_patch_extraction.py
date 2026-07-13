@@ -15,10 +15,13 @@ dataset = BlobBoardHomographyData(
     image_size=(150, 150),
     suffix="train",
     polarity="dark",
-    in_memory=True
+    in_memory=True,
+    patch_type="logpolar",
+    logpolar_inner_factor=2.0,
+    logpolar_outer_factor=96.0,
 )
 
 for i in range(1000):
     patch = dataset[i]["patch"]
     for j in range(patch.shape[0]):
-        torchvision.utils.save_image(patch[j].unsqueeze(0), f"/raid/data/hsa/debug_imgs/patch_{i}_{j}.png")
+        torchvision.utils.save_image(patch[j].unsqueeze(0), f"/raid/data/hsa/debug_imgs/patch_log_polar_{i}_{j}.png")

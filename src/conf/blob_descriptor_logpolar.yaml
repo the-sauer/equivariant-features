@@ -1,0 +1,27 @@
+defaults:
+  - blob_descriptor_base
+  - dgx
+  - _self_
+
+model:
+  name: HardNet
+  params:
+    in_channels: 1   # log-polar patches are single-channel (radial axis encodes scale)
+    patch_size: 64
+
+training:
+  dataset:
+    params:
+      patch_type: logpolar
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: 64.0
+      extraction_batch_size: 1024
+
+validation:
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      patch_type: logpolar
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: 64.0
+      extraction_batch_size: 1024

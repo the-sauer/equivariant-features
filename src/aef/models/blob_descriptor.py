@@ -117,34 +117,46 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
         c_in = escnn.nn.FieldType(self.s, 1 * [self.s.trivial_repr])
         c_hid1 = escnn.nn.FieldType(self.s, 32 * [self.s.regular_repr])
         c_hid2 = escnn.nn.FieldType(self.s, 64 * [self.s.regular_repr])
-        # Keep the final features in the regular representation!
         c_hid3 = escnn.nn.FieldType(self.s, 128 * [self.s.regular_repr])
+        # Keep the final features in the regular representation!
+        c_out = escnn.nn.FieldType(self.s, 128 * [self.s.regular_repr])
 
         self.net = escnn.nn.SequentialModule(
             # Apply a mask to zero-out the corners of the square grid
             escnn.nn.MaskModule(c_in, 64, margin=1),
-            escnn.nn.R2Conv(c_in, c_hid1, 5),  # 64x64 => 60x60
+            escnn.nn.R2Conv(c_in, c_hid1, 3),  # 64x64 => 62x62
             escnn.nn.InnerBatchNorm(c_hid1),
             escnn.nn.ReLU(c_hid1),
+            escnn.nn.FieldDropout(c_hid1, p=0.1),
+            escnn.nn.R2Conv(c_hid1, c_hid1, 3, bias=False),  # 62x62 => 60x60
+            escnn.nn.InnerBatchNorm(c_hid1),
+            escnn.nn.ReLU(c_hid1),
+            escnn.nn.FieldDropout(c_hid1, p=0.1),
             escnn.nn.R2Conv(c_hid1, c_hid1, 5, bias=False),  # 60x60 => 56x56
             escnn.nn.InnerBatchNorm(c_hid1),
             escnn.nn.ReLU(c_hid1),
-            escnn.nn.R2Conv(c_hid1, c_hid1, 5, bias=False),  # 56x56 => 52x52
-            escnn.nn.InnerBatchNorm(c_hid1),
-            escnn.nn.ReLU(c_hid1),
-            escnn.nn.R2Conv(c_hid1, c_hid2, 5, bias=False),  # 52x52 => 48x48
+            escnn.nn.FieldDropout(c_hid1, p=0.1),
+            escnn.nn.R2Conv(c_hid1, c_hid2, 5, bias=False),  # 56x56 => 52x52
             escnn.nn.InnerBatchNorm(c_hid2),
             escnn.nn.ReLU(c_hid2),
-            escnn.nn.R2Conv(c_hid2, c_hid2, 9, bias=False),  # 48x48 => 40x40
+            escnn.nn.FieldDropout(c_hid2, p=0.1),
+            escnn.nn.R2Conv(c_hid2, c_hid2, 7, bias=False),  # 52x52 => 46x46
             escnn.nn.InnerBatchNorm(c_hid2),
             escnn.nn.ReLU(c_hid2),
-            escnn.nn.R2Conv(c_hid2, c_hid2, 9, bias=False),  # 40x40 => 32x32
+            escnn.nn.FieldDropout(c_hid2, p=0.1),
+            escnn.nn.R2Conv(c_hid2, c_hid2, 7, bias=False),  # 46x46 => 40x40
             escnn.nn.InnerBatchNorm(c_hid2),
             escnn.nn.ReLU(c_hid2),
-            escnn.nn.R2Conv(c_hid2, c_out, 9, bias=False),  # 32x32 => 24x24
-            escnn.nn.InnerBatchNorm(c_out),
-            escnn.nn.ReLU(c_out),
-            escnn.nn.R2Conv(c_out, c_out, 24, bias=False),
+            escnn.nn.FieldDropout(c_hid2, p=0.1),
+            escnn.nn.R2Conv(c_hid2, c_hid3, 9, bias=False),  # 40x40 => 32x32
+            escnn.nn.InnerBatchNorm(c_hid3),
+            escnn.nn.ReLU(c_hid3),
+            escnn.nn.FieldDropout(c_hid3, p=0.1),
+            escnn.nn.R2Conv(c_hid3, c_hid3, 9, bias=False),  # 32x32 => 24x24
+            escnn.nn.InnerBatchNorm(c_hid3),
+            escnn.nn.ReLU(c_hid3),
+            escnn.nn.FieldDropout(c_hid3, p=0.1),
+            escnn.nn.R2Conv(c_hid3, c_out, 24, bias=False),
             escnn.nn.GroupPooling(c_out),
         )
 
@@ -164,11 +176,6 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
         x = F.normalize(x, p=2, dim=1)
 
         return x
-
-
-import torch
-import torch.nn.functional as F
-import escnn
 
 
 class BlobDescriptorRobust(torch.nn.Module):
@@ -430,6 +437,9 @@ class BlobDescriptorHierarchical(torch.nn.Module):
             escnn.nn.ReLU(c_hid3, inplace=True),
             escnn.nn.MaskModule(c_hid3, 24, margin=1),
         )
+        self.dropout1 = escnn.nn.FieldDropout(c_hid1, p=0.1)
+        self.dropout2 = escnn.nn.FieldDropout(c_hid2, p=0.1)
+        self.dropout3 = escnn.nn.FieldDropout(c_hid3, p=0.1)
 
         # NEU: Attention-Layer für jede Skalen-Ebene.
         # Output ist eine "Triviale Repräsentation" (ein skalarer Wert pro Pixel, der sich bei Rotation nicht ändert)
@@ -464,6 +474,10 @@ class BlobDescriptorHierarchical(torch.nn.Module):
         # 3. Deep Stage (Extract global contextual features)
         x = self.block6(x_mid)
         x_deep = self.block7(x)
+
+        x_shallow = self.dropout1(x_shallow)
+        x_mid = self.dropout2(x_mid)
+        x_deep = self.dropout3(x_deep)
 
         # --- NEU: Attention-Weighted Pooling ---
         # 1. Generiere räumliche Attention-Maps (1 Kanal, Werte zwischen 0 und 1)

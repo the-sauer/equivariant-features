@@ -7,4 +7,4 @@
 #SBATCH --time=24:00:00
 
 cd deps/BlobBoards.jl
-pixi run python ../../src/run_training.py --config-name blob_descriptor_steerable
+pixi run python ../../src/run_training.py --config-name blob_descriptor_logpolar
