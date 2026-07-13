@@ -19,6 +19,13 @@ training:
   optimizer:
     name: AdamW
 
+# FPR95 is reported per blob-scale band. All three validation sets are the SAME
+# pinned board (seeds: [40], a validation-split seed the training boards never
+# draw), so `overall` is exactly the union of `small` and `large`. The small/large
+# sets keep only the lower/upper half of the board's intrinsic blob-scale
+# distribution (scale_quantile_range), splitting at the median. Reported as
+# FPR95@overall / FPR95@small / FPR95@large. Only the overall FPR drives best.pth
+# selection (small/large carry weight 0, so they are monitored but not optimized).
 validation:
   dataset:
     params:

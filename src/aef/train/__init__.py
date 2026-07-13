@@ -150,20 +150,32 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
             sampler=sampler,
             collate_fn=d.get_collate_func()
         ))
-    validation_loader = [torch.utils.data.DataLoader(
-        d,
-        batch_size=cfg.validation.batch_size,
-        shuffle=False,
-        collate_fn=d.get_collate_func()
-    ) for d in validation_dataset]
+    def build_criterion(loss_cfgs):
+        return {
+            loss_cfg.name: (
+                getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})),
+                getattr(loss_cfg, "weight", 1.0),
+                getattr(loss_cfg, "report", True),
+            )
+            for loss_cfg in loss_cfgs
+        }
 
-    criterion = {
-        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.training.loss
-    }
+    criterion = build_criterion(cfg.training.loss)
 
-    validation_criterion = {
-        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.validation.loss
-    }
+    # ``validation_dataset`` is a list of (label, [dataset], [loss_cfg]) specs.
+    # Pair each dataset with its own criterion + loader(s) so their metrics are
+    # accumulated and reported separately (keyed ``<loss>@<label>``) rather than
+    # pooled into a single number across all validation datasets.
+    validation_entries = [
+        (
+            label,
+            [torch.utils.data.DataLoader(
+                d, batch_size=cfg.validation.batch_size, shuffle=False,
+                collate_fn=d.get_collate_func()) for d in datasets],
+            build_criterion(loss_cfgs),
+        )
+        for label, datasets, loss_cfgs in validation_dataset
+    ]
 
     if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
         # TODO: Check for all innner augmentations
@@ -178,7 +190,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     else:
         augmentation = lambda x: x  # noqa: E731
 
-    return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
+    return model, optimizer, scheduler, criterion, validation_entries, train_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
 
 
 def train_func(process_batch):
@@ -188,9 +200,8 @@ def train_func(process_batch):
             optimizer,
             scheduler,
             criterion,
-            validation_criterion,
+            validation_entries,
             train_loader,
-            validation_loader,
             augmentation,
             device,
             checkpoint_dir,
@@ -199,11 +210,20 @@ def train_func(process_batch):
         ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
         print(f"Running experiment \033[1m{experiment_name}\033[0m")
 
+        def report_key(label, name):
+            return f"{name}@{label}" if label else name
+
         print("Training datasets", *(f"{d.__class__.__name__}: {len(d)}"for d in train_dataset))
-        print("Validation datasets", *(f"{d.__class__.__name__}: {len(d)}"for d in validation_dataset))
+        print("Validation datasets", *(
+            f"{label or 'val'}[{d.__class__.__name__}]: {len(d)}"
+            for label, loaders, _ in validation_entries for d in (ld.dataset for ld in loaders)))
         x = []
         y_train = {n: [] for n in criterion.keys() if criterion[n][2]}
-        y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
+        # One curve per (validation dataset, reported metric), keyed <metric>@<label>.
+        val_keys = [report_key(label, n)
+                    for label, _, crit in validation_entries
+                    for n, (_, _, r) in crit.items() if r]
+        y_val = {k: [] for k in val_keys}
 
         lr = {sch.__class__.__name__: [] for sch in scheduler.values()}
 
@@ -271,28 +291,36 @@ def train_func(process_batch):
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
 
-            loop = tqdm(chain(*validation_loader), leave=True)
-            loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
-
             with torch.no_grad():
                 model.eval()
                 cumulative_loss = 0.0
-                cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
                 n_items = 0
-                for data in loop:
-                    # try:
-                    losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
-                    # except Exception as e:
-                    #     logging.error(f"Error processing validation batch in epoch {epoch}: {e}")
-                    #     continue
-                    loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-
-                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
-                    cumulative_loss += loss.item() * data["keypoints"].size(0)
-                    n_items += data["keypoints"].size(0)
-                    loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-                y_val = {n: y_val[n] + [v / n_items] for n, v in cumulative_losses.items()}
-                logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / n_items}" for n, v in cumulative_losses.items()))
+                # Per-metric-key sums and item counts: each validation dataset
+                # contributes only to its own keys, so an FPR reported for the
+                # small-blob set is divided by the small-blob item count, not the
+                # pooled total across all validation datasets.
+                cumulative_losses = {k: 0.0 for k in val_keys}
+                cumulative_items = {k: 0 for k in val_keys}
+                for label, loaders, val_crit in validation_entries:
+                    loop = tqdm(chain(*loaders), leave=True)
+                    loop.set_description(f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]")
+                    for data in loop:
+                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg)
+                        batch_items = data["keypoints"].size(0)
+                        loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
+                        # Weighted total drives best.pth selection; with the
+                        # small/large FPRs at weight 0 this tracks the overall FPR.
+                        cumulative_loss += loss.item() * batch_items
+                        n_items += batch_items
+                        for n, (l, _, r) in losses.items():
+                            if r:
+                                key = report_key(label, n)
+                                cumulative_losses[key] += l.item() * batch_items
+                                cumulative_items[key] += batch_items
+                        loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
+                for k in val_keys:
+                    y_val[k].append(cumulative_losses[k] / cumulative_items[k] if cumulative_items[k] > 0 else float("nan"))
+                logging.info("finished epoch [%d/%d], avg val losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{k}: {y_val[k][-1]}" for k in val_keys))
 
                 _, ax = plt.subplots()
                 for n, v in y_val.items():

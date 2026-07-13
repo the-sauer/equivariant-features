@@ -24,7 +24,7 @@ import hydra
 import omegaconf
 
 from aef.configuration import Config
-from aef.data import blobboards, get_dataset
+from aef.data import blobboards, get_dataset, get_validation_specs
 from aef.train import train_func
 from aef.models import *
 from aef.train import *
@@ -46,7 +46,9 @@ def experiment_name_from_cfg(cfg: Config) -> str:
 def train(cfg) -> None:
     # TODO: Move all this to prepare training if possible
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
-    validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
+    # List of (label, [dataset], [loss_cfg]); each validation dataset carries its
+    # own criterion and is reported separately (metrics keyed <loss>@<label>).
+    validation_dataset = get_validation_specs(cfg)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
     # model_kwargs["in_channels"] = 1
     Model = eval(cfg.model.name)

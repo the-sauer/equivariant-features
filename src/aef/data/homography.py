@@ -293,6 +293,8 @@ class HomographyData(torch.utils.data.Dataset):
         logpolar_inner_factor=2.0,
         logpolar_outer_factor=32.0,
         supersample=3,  # sub-taps per output pixel per axis, area-averaged (both patch types)
+        scale_quantile_range=None,  # (lo, hi) in [0, 1]: keep keypoints whose intrinsic blob scale falls in this quantile band
+        scale_range=None,  # (lo, hi) absolute blob-scale bounds; alternative to scale_quantile_range
         **_,
     ):
         super().__init__()
@@ -433,6 +435,36 @@ class HomographyData(torch.utils.data.Dataset):
             self.keypoints = torch.cat(keypoints)
             self.keypoint_coords = torch.cat(keypoint_coord_list)
             self.keypoint_scales = torch.cat(keypoint_scale_list)
+
+        # Optionally restrict the dataset to a band of the (intrinsic) blob
+        # scale distribution. Filtering happens on the per-keypoint arrays here,
+        # before the view expansion in ``__getitem__``, so every view of a kept
+        # keypoint is kept together (positives for contrastive/FPR metrics stay
+        # intact). This lets a single board be split into e.g. "small" and
+        # "large" blob validation sets whose FPRs are reported separately.
+        if scale_quantile_range is not None or scale_range is not None:
+            scales = self.keypoint_scales
+            if scale_quantile_range is not None:
+                lo_q, hi_q = float(scale_quantile_range[0]), float(scale_quantile_range[1])
+                lo = torch.quantile(scales, lo_q).item()
+                hi = torch.quantile(scales, hi_q).item()
+                include_hi = hi_q >= 1.0
+            else:
+                lo = -float("inf") if scale_range[0] is None else float(scale_range[0])
+                hi = float("inf") if scale_range[1] is None else float(scale_range[1])
+                include_hi = True
+            # Half-open on the upper edge (except the top-most band) so adjacent
+            # quantile bands partition the keypoints without overlap or gaps.
+            mask = (scales >= lo) & ((scales <= hi) if include_hi else (scales < hi))
+            n_before = self.keypoints.size(0)
+            self.keypoints = self.keypoints[mask]
+            self.keypoint_coords = self.keypoint_coords[mask]
+            self.keypoint_scales = self.keypoint_scales[mask]
+            print(
+                f"Scale filter {scale_quantile_range or scale_range}: kept "
+                f"{self.keypoints.size(0)}/{n_before} keypoints "
+                f"(intrinsic scale in [{lo:.4f}, {hi:.4f}])"
+            )
 
         avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)
         print(f"{avg_keypoints_per_image=}")

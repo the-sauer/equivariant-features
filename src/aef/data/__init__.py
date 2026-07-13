@@ -32,3 +32,25 @@ def get_dataset(dataset_cfg):
         return [globals[dataset_cfg.name](**dataset_cfg.params, path=os.path.join(dataset_cfg.foreach, d)) for d in os.listdir(dataset_cfg.foreach)]
     else:
         return [eval(f"{dataset_cfg.name}(**dataset_cfg.params)")]
+
+
+def get_validation_specs(cfg):
+    """Resolve the validation config into ``(label, datasets, loss_cfgs)`` specs.
+
+    Two config forms are supported:
+
+    * **Multi-dataset** — ``cfg.validation.datasets`` is a list of entries, each
+      ``{name, dataset, loss}``. Every entry is paired with its own criterion and
+      reported separately (metrics keyed ``<loss>@<name>``). This is what lets
+      the small/large/overall blob validation sets report individual FPRs.
+    * **Single-dataset (legacy)** — ``cfg.validation.dataset`` + ``cfg.validation.loss``.
+      Returned as a single unlabelled spec, so existing configs are unchanged.
+    """
+    val = cfg.validation
+    if getattr(val, "datasets", None) is not None:
+        specs = []
+        for entry in val.datasets:
+            label = entry.get("name", "")
+            specs.append((label, get_dataset(entry.dataset), entry.loss))
+        return specs
+    return [("", get_dataset(val.dataset), getattr(val, "loss", []))]

@@ -52,34 +52,58 @@ training:
 validation:
   batch_size: 1024
 
-  dataset:
-    name: BlobBoardHomographyData
-    params:
-      num_boards: 2
-      image_size: [150, 150]
-      transforms_per_image: 1
-      in_memory: true
-      transform_params:
-        perspective: false
-        fit_to_frame: true
-      blobboard_params:
-        board_size: [142, 142]
-        cutoff: 2
-        alpha: 1.6
-        max_diameter_fraction: 0.4
-        min_scale: 0.2
-        frame_width: 10
-      augmentation:
-        color_jitter:
-          brightness: 0.05
-          contrast: 0.1
-          saturation: .01
-        gaussian_blur:
-          kernel_size: 5
-          sigma: 0.5
-        gaussian_noise:
-          mean: 0.0
-          sigma: 0.01
-
-  loss:
-    - name: FPR95
+  datasets:
+    - name: overall
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: 1
+          seeds: &val_seeds [40]
+          image_size: &val_image_size [150, 150]
+          transforms_per_image: &val_tpi 7
+          transform_params: &val_transform_params
+            perspective: false
+            fit_to_frame: true
+          blobboard_params: &val_blobboard_params
+            board_size: [142, 142]
+            cutoff: 2
+            alpha: 1.6
+            max_diameter_fraction: 0.4
+            min_scale: 0.2
+            frame_width: 10
+          patch_scale_factors: &val_patch_scale_factors [4.0, 16.0, 64.0]
+      loss:
+        - name: FPR95
+    - name: small
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: 1
+          seeds: *val_seeds
+          image_size: *val_image_size
+          transforms_per_image: *val_tpi
+          transform_params: *val_transform_params
+          blobboard_params: *val_blobboard_params
+          patch_scale_factors: *val_patch_scale_factors
+          scale_quantile_range: [0.0, 0.5]   # lower half of blob scales
+      loss:
+        - name: FPR95
+          weight: 0   # monitor only; does not affect best.pth
+    - name: large
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: 1
+          seeds: *val_seeds
+          image_size: *val_image_size
+          transforms_per_image: *val_tpi
+          transform_params: *val_transform_params
+          blobboard_params: *val_blobboard_params
+          patch_scale_factors: *val_patch_scale_factors
+          scale_quantile_range: [0.5, 1.0]   # upper half of blob scales
+      loss:
+        - name: FPR95
+          weight: 0   # monitor only; does not affect best.pth

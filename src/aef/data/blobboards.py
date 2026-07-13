@@ -54,6 +54,7 @@ class BlobBoardHomographyData(HomographyData):
         suffix="train",
         polarity="dark",
         resolution=300,
+        seeds=None,  # explicit board seeds; pins the board(s) so e.g. scale-split validation sets share one board
         **kwargs
     ):
         if blobboard_params is None:
@@ -79,8 +80,15 @@ class BlobBoardHomographyData(HomographyData):
         blobboard_params["format"] = "png"
         out_dir = blobboard_params["dir"]
         os.makedirs(out_dir, exist_ok=True)
+        if seeds is not None:
+            board_seeds = list(seeds)
+            assert len(board_seeds) == num_boards, (
+                f"Expected {num_boards} seeds, got {len(board_seeds)}"
+            )
+        else:
+            board_seeds = get_seeds(num_boards, split=suffix)
         boards = []
-        for s, p in zip(get_seeds(num_boards, split=suffix), polarity):
+        for s, p in zip(board_seeds, polarity):
             board = blobboards.blob_board(
                 (image_size[0] * _ureg.mm, image_size[1] * _ureg.mm),
                 resolution, seed=s, polarity=p, image_origin="opencv",
