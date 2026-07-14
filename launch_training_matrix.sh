@@ -21,11 +21,21 @@ set -euo pipefail
 declare -A CONFIG=(
   [steerable]=blob_descriptor_steerable
   [logpolar]=blob_descriptor_logpolar
+  [efficient8]=blob_descriptor_efficient
+  [efficient4]=blob_descriptor_efficient
 )
 # per-network scale values
 declare -A SCALES=(
   [steerable]="32 64 96 128"
   [logpolar]="32 64 96 128"
+  [efficient8]="32 64 96 128"
+  [efficient4]="32 64 96 128"
+)
+# extra hydra overrides per network (e.g. C8 vs C4 for the efficient descriptor).
+# NoStride-vs-Efficient FPR95 comparison: run `steerable efficient8 efficient4`.
+declare -A NET_EXTRA=(
+  [efficient8]="model.params.n_rotations=8"
+  [efficient4]="model.params.n_rotations=4"
 )
 
 # ---- Slurm resources --------------------------------------------------------
@@ -35,16 +45,21 @@ CPUS="${CPUS:-10}"
 TIME="${TIME:-24:00:00}"
 LOGDIR="${LOGDIR:-logs}"
 
-# Per-network memory override (falls back to $MEM). Log-polar is lighter -> 32GB.
+# Per-network memory override (falls back to $MEM). The light nets need less.
 declare -A NET_MEM=(
   [logpolar]=32GB
+  [efficient8]=32GB
+  [efficient4]=32GB
 )
 # Per-network core count (falls back to $CPUS). Sized to each config's
 # `num_workers` + ~2 (main process + Julia board generation): steerable uses 6
-# DataLoader workers (GPU-bound), log-polar uses the base 8.
+# DataLoader workers (GPU-bound); log-polar and the efficient nets are lighter/more
+# data-bound and use the base 8.
 declare -A NET_CPUS=(
   [steerable]=8
   [logpolar]=10
+  [efficient8]=10
+  [efficient4]=10
 )
 
 DRY_RUN="${DRY_RUN:-0}"                       # DRY_RUN=1 -> print instead of submit
@@ -91,6 +106,7 @@ submit() {
   local name="${net}_s${scale}"
   local mem="${NET_MEM[$net]:-$MEM}"
   local cpus="${NET_CPUS[$net]:-$CPUS}"
+  local extra="${NET_EXTRA[$net]:-}"
   # Prepend the dated subfolder so this run's checkpoints/plots land under it too.
   local exp="${RUN_SUBDIR:+$RUN_SUBDIR/}${name}"
   local job
@@ -106,7 +122,7 @@ submit() {
 
 cd deps/BlobBoards.jl
 pixi run python ../../src/run_training.py \\
-  --config-name ${cfg} scale=${scale} +experiment_name=${exp}
+  --config-name ${cfg} scale=${scale} +experiment_name=${exp} ${extra}
 EOF
 )
   if [[ "$DRY_RUN" == "1" ]]; then

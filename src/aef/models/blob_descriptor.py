@@ -178,6 +178,139 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
         return x
 
 
+class BlobDescriptorEfficient(AbstractBlobDescriptor):
+    """Memory/compute-efficient steerable blob descriptor.
+
+    Keeps ``NoStride``'s equivariant inductive bias but fixes its two cost drivers:
+
+    1. **Antialiased downsampling** — instead of running every layer at 24-62 px, a
+       ``PointwiseAvgPoolAntialiased2D`` (Gaussian blur + subsample, equivariance-
+       preserving) halves the resolution after each stage (64 -> 32 -> 16 -> 8), so
+       the wide deep layers run cheaply.
+    2. **Small dense head** — replaces the ``R2Conv(kernel=24)`` readout (whose escnn
+       basis-expanded filter alone is ~2.25 GB) with an adaptive pool to a small grid
+       followed by a small dense ``R2Conv`` (spatial layout preserved, ~34x cheaper),
+       or an attention-weighted pool (``head="attention"``).
+
+    **Centre masking** (``inner_mask``): the anchor blob within
+    ``sigma_cutoff * (patch_size/2) / scale_factor`` px of the centre is the same
+    normalized structure for every keypoint, so it carries no discriminative signal.
+    A radially symmetric mask commutes with the rotation group, so zeroing it keeps
+    equivariance intact and forces the descriptor onto the informative surround.
+    """
+
+    def __init__(
+        self,
+        out_dim=128,
+        widths=(32, 64, 128),
+        head="attention",          # "attention" (equivariance-robust) | "dense" (layout, but sensitive)
+        l2_normalize=False,        # NoStride returns un-normalized features; match by default
+        pool_sigma=0.6,            # Gaussian sigma of the antialiased downsampling
+        frequencies_cutoff=None,   # bandlimit the steerable conv basis (None = escnn default)
+        dropout=0.1,
+        inner_mask=True,           # zero the uninformative anchor blob at the patch centre
+        sigma_cutoff=2.0,
+        scale_factors=(64.0,),     # the patch scale factor(s); sets the centre-mask radius
+        patch_size=64,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        s = self.s
+
+        # --- Centre (donut) mask ------------------------------------------------
+        if inner_mask:
+            sf = float(min(scale_factors))
+            r_pixel = sigma_cutoff * (patch_size / 2.0) / sf
+            yy, xx = torch.meshgrid(
+                torch.arange(patch_size), torch.arange(patch_size), indexing="ij"
+            )
+            c = (patch_size - 1) / 2.0
+            dist = torch.sqrt((xx - c) ** 2 + (yy - c) ** 2)
+            mask = (dist >= r_pixel).to(torch.float32).view(1, 1, patch_size, patch_size)
+            self.register_buffer("inner_mask", mask)
+        else:
+            self.inner_mask = None
+
+        c_in = escnn.nn.FieldType(s, 1 * [s.trivial_repr])
+        w1, w2, w3 = widths
+        c1 = escnn.nn.FieldType(s, w1 * [s.regular_repr])
+        c2 = escnn.nn.FieldType(s, w2 * [s.regular_repr])
+        c3 = escnn.nn.FieldType(s, out_dim * [s.regular_repr])
+
+        # Mask the boundary ring after every conv: padded convs leak zero-padding
+        # artifacts at the border that break rotation equivariance (unlike NoStride's
+        # valid convs). Re-masking each block — as BlobDescriptorRobust does — keeps
+        # the field circularly supported and the network tightly equivariant.
+        def block(cin, cout, k, size):
+            return [
+                escnn.nn.R2Conv(
+                    cin, cout, k, padding=k // 2, bias=False,
+                    frequencies_cutoff=frequencies_cutoff,
+                ),
+                escnn.nn.MaskModule(cout, size, margin=1),
+                escnn.nn.InnerBatchNorm(cout),
+                escnn.nn.ReLU(cout),
+                escnn.nn.FieldDropout(cout, p=dropout),
+            ]
+
+        s1, s2, s3 = patch_size, patch_size // 2, patch_size // 4  # 64, 32, 16
+        self.net = escnn.nn.SequentialModule(
+            escnn.nn.MaskModule(c_in, patch_size, margin=1),
+            *block(c_in, c1, 5, s1),
+            *block(c1, c1, 5, s1),
+            escnn.nn.PointwiseAvgPoolAntialiased2D(c1, sigma=pool_sigma, stride=2),  # 64 -> 32
+            *block(c1, c2, 5, s2),
+            *block(c2, c2, 5, s2),
+            escnn.nn.PointwiseAvgPoolAntialiased2D(c2, sigma=pool_sigma, stride=2),  # 32 -> 16
+            *block(c2, c3, 5, s3),
+            *block(c3, c3, 5, s3),
+            escnn.nn.PointwiseAvgPoolAntialiased2D(c3, sigma=pool_sigma, stride=2),  # 16 -> 8
+        )
+
+        self.head_type = head
+        if head == "dense":
+            # A single dense R2Conv over the *whole* backbone grid reads it out to
+            # 1x1: it keeps a distinct learned weight per spatial cell (full layout)
+            # AND stays exactly equivariant. (Adaptive-pooling to a non-divisor grid
+            # is NOT rotation-symmetric and wrecks invariance; a valid conv over the
+            # full grid is the equivariant analogue of flatten+FC.) The three stride-2
+            # antialiased pools take patch_size -> patch_size/8, which is the grid the
+            # readout consumes.
+            grid = patch_size // 8
+            self.readout = escnn.nn.R2Conv(
+                c3, c3, grid, bias=False, frequencies_cutoff=frequencies_cutoff
+            )
+            self.group_pool = escnn.nn.GroupPooling(c3)
+        elif head == "attention":
+            # Learned non-uniform spatial weighting instead of a uniform average.
+            self.group_pool = escnn.nn.GroupPooling(c3)
+            self.att = escnn.nn.R2Conv(
+                c3, escnn.nn.FieldType(s, 1 * [s.trivial_repr]), 1
+            )
+        else:
+            raise ValueError(f"head must be 'dense' or 'attention', got {head!r}")
+        self.l2_normalize = l2_normalize
+
+    def forward(self, x):
+        if self.inner_mask is not None:
+            x = x * self.inner_mask
+        x = escnn.nn.GeometricTensor(x, self.field_type)
+        x = self.net(x)
+
+        if self.head_type == "dense":
+            x = self.readout(x)                 # whole grid -> 1x1
+            x = self.group_pool(x).tensor       # [B, out_dim, 1, 1]
+            x = x.view(x.size(0), -1)
+        else:  # attention
+            a = torch.sigmoid(self.att(x).tensor)          # [B, 1, H, W] saliency
+            f = self.group_pool(x).tensor                  # [B, out_dim, H, W] invariant
+            x = (f * a).sum(dim=(2, 3)) / (a.sum(dim=(2, 3)) + 1e-6)
+
+        if self.l2_normalize:
+            x = F.normalize(x, p=2, dim=1)
+        return x
+
+
 class BlobDescriptorRobust(torch.nn.Module):
     def __init__(self, in_channels=1, out_dim=128, **_):
         super().__init__()
