@@ -22,15 +22,5 @@ training:
         gaussian_noise:
           mean: 0.0
           sigma: 0.1
-validation:
-  batch_size: 1
-  dataset:
-    params:
-      data_dir: /data/datasets
-      image_size: [256, 256]
-      suffix: test #ILSVRC/Data/CLS-LOC/val
-  feature_sampling:
-    num_features: 1000
 logging:
-  dir: /data/logs
-  interval: 100
+  model_checkpoints: false

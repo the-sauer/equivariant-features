@@ -6,7 +6,7 @@ defaults:
 model:
   name: BlobDescriptorNoStride
   params:
-    scale_factors: [16.0]
+    scale_factors: [64.0]
     in_channels: 1
 
 training:
@@ -14,21 +14,88 @@ training:
   dataset:
     params:
       patch_type: cartesian
-      patch_scale_factors: [16.0]
-      extraction_batch_size: 512
+      patch_scale_factors: [64.0]
+      extraction_batch_size: 1024
   optimizer:
     name: AdamW
 
-# FPR95 is reported per blob-scale band. All three validation sets are the SAME
-# pinned board (seeds: [40], a validation-split seed the training boards never
-# draw), so `overall` is exactly the union of `small` and `large`. The small/large
-# sets keep only the lower/upper half of the board's intrinsic blob-scale
-# distribution (scale_quantile_range), splitting at the median. Reported as
-# FPR95@overall / FPR95@small / FPR95@large. Only the overall FPR drives best.pth
-# selection (small/large carry weight 0, so they are monitored but not optimized).
 validation:
-  dataset:
-    params:
-      patch_type: cartesian
-      patch_scale_factors: [16.0]
-      extraction_batch_size: 512
+  datasets:
+    - name: overall
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: &num_val_boards 8
+          seeds: &val_seeds [40, 60, 80, 100, 120, 140, 160, 180]
+          image_size: &val_image_size [150, 150]
+          transforms_per_image: &val_tpi 1
+          transform_params: &val_transform_params
+            perspective: false
+            fit_to_frame: true
+          blobboard_params: &val_blobboard_params
+            board_size: [142, 142]
+            cutoff: 2
+            alpha: 1.6
+            max_diameter_fraction: 0.4
+            min_scale: 0.2
+            frame_width: 10
+          patch_type:  cartesian
+          patch_scale_factors: [64.0]
+          extraction_batch_size: 1024
+      loss:
+        - name: FPR95
+    - name: small
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: *num_val_boards
+          seeds: *val_seeds
+          image_size: *val_image_size
+          transforms_per_image: *val_tpi
+          transform_params: *val_transform_params
+          blobboard_params: *val_blobboard_params
+          scale_quantile_range: [0.0, 0.33]
+          patch_type:  cartesian
+          patch_scale_factors: [64.0]
+          extraction_batch_size: 1024
+      loss:
+        - name: FPR95
+          weight: 0   # monitor only; does not affect best.pth
+    - name: medium
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: *num_val_boards
+          seeds: *val_seeds
+          image_size: *val_image_size
+          transforms_per_image: *val_tpi
+          transform_params: *val_transform_params
+          blobboard_params: *val_blobboard_params
+          scale_quantile_range: [0.33, 0.66]   # middle half of blob scales
+          patch_type:  cartesian
+          patch_scale_factors: [64.0]
+          extraction_batch_size: 1024
+      loss:
+        - name: FPR95
+          weight: 0   # monitor only; does not affect best.pth
+    - name: large
+      dataset:
+        name: BlobBoardHomographyData
+        params:
+          in_memory: true
+          num_boards: *num_val_boards
+          seeds: *val_seeds
+          image_size: *val_image_size
+          transforms_per_image: *val_tpi
+          transform_params: *val_transform_params
+          blobboard_params: *val_blobboard_params
+          scale_quantile_range: [0.66, 1.0]   # upper quarter of blob scales
+          patch_type:  cartesian
+          patch_scale_factors: [64.0]
+          extraction_batch_size: 1024
+      loss:
+        - name: FPR95
+          weight: 0   # monitor only; does not affect best.pth

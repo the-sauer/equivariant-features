@@ -333,7 +333,7 @@ def train_func(process_batch):
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()
 
-                if checkpoint_dir is not None:
+                if cfg.logging.model_checkpoints and cfg.checkpoint_dir is not None:
                     average_loss = cumulative_loss / n_items
                     checkpoint = {
                         "epoch": epoch,
