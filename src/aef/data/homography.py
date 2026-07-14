@@ -84,6 +84,117 @@ def load_images(
     )(find_images(dir, extensions))
 
 
+def resolve_background_dir(background, kaggle_slug):
+    """Resolve a directory of background scene images.
+
+    Prefers a local ``background`` folder (any non-empty directory of images);
+    falls back to downloading ``kaggle_slug`` via kagglehub. Returns ``None`` if
+    neither yields any image, so the caller can disable compositing gracefully.
+    """
+    if background is not None and os.path.isdir(background):
+        if any(True for _ in find_images(background)):
+            return background
+    if kaggle_slug:
+        try:
+            import kagglehub
+
+            path = kagglehub.dataset_download(kaggle_slug)
+            if any(True for _ in find_images(path)):
+                return path
+        except Exception as e:  # noqa: BLE001 — background is optional; never hard-fail training
+            print(f"Could not download kagglehub background {kaggle_slug!r}: {e}")
+    return None
+
+
+def load_background(path, size):
+    """Decode one background image as a single grayscale channel in ``[0, 1]``,
+    resized to ``size`` (H, W)."""
+    img = torchvision.io.decode_image(path, torchvision.io.ImageReadMode.GRAY)
+    img = torchvision.transforms.functional.resize(img, list(size))
+    return img.to(torch.float32) / 255.0
+
+
+def sample_placement_similarity(size, scale_range, generator):
+    """Sample a placement mapping a board raster (size (H, W)) into an axis-aligned
+    sub-rectangle of a same-size frame: uniform scale + a random translation that
+    keeps the scaled board fully inside the frame.
+
+    No rotation is applied here — the per-view homography already rotates the board,
+    so adding it at placement would just compound it (and the axis-aligned box keeps
+    the identity view a clean, upright reference). Returns ``(A, s)`` where ``A`` is a
+    ``(3, 3)`` matrix mapping board-raster pixels (x, y) to frame pixels and ``s`` is
+    the uniform scale. Being a pure similarity (uniform scale, no shear), circular
+    blobs stay circular — the identity-view shape normalization assumes isotropy.
+    """
+    H, W = float(size[0]), float(size[1])
+
+    def _uniform(lo, hi):
+        return lo + (hi - lo) * torch.rand((), generator=generator).item()
+
+    s = _uniform(float(scale_range[0]), float(scale_range[1]))
+
+    # Axis-aligned scaled board bbox, so translation keeps it in-frame.
+    bbox_w, bbox_h = s * W, s * H
+    cx = _uniform(bbox_w / 2, max(bbox_w / 2, W - bbox_w / 2))
+    cy = _uniform(bbox_h / 2, max(bbox_h / 2, H - bbox_h / 2))
+
+    # A = T(new_center) @ S(s) @ T(-board_center)
+    A = torch.eye(3, dtype=torch.float32)
+    A[0, 0] = s
+    A[1, 1] = s
+    A[0, 2] = cx - s * W / 2
+    A[1, 2] = cy - s * H / 2
+    return A, s
+
+
+def composite_board(board, background, A, size, lighting=True, shading_strength=0.3):
+    """Place a single-channel ``board`` (1, H, W) onto ``background`` (1, H, W) using
+    the placement similarity ``A``, optionally light-matching the board to the scene.
+
+    Returns ``(composite, mask)`` both (1, H, W). ``mask`` is the warped board
+    coverage (soft edges from bilinear sampling). Lighting is *multiplicative* — a
+    gentle brightness match to the local background plus a low-frequency shading
+    field — so the board's internal blob/paper contrast is preserved (a full
+    mean/std match would flatten faint blobs and hurt the descriptor).
+    """
+    H, W = int(size[0]), int(size[1])
+    A_b = A.unsqueeze(0)
+    board_on_frame = kornia.geometry.transform.warp_perspective(
+        board.unsqueeze(0), A_b, dsize=(H, W), padding_mode="zeros"
+    )[0]
+    mask = kornia.geometry.transform.warp_perspective(
+        torch.ones_like(board).unsqueeze(0), A_b, dsize=(H, W), padding_mode="zeros"
+    )[0]
+
+    board_lit = board_on_frame
+    if lighting:
+        inside = mask > 0.5
+        if inside.any():
+            bg_mean = background[inside].mean()
+            board_mean = board_on_frame[inside].mean().clamp_min(1e-4)
+            # Gentle brightness match, clamped so paper/blobs keep their contrast.
+            brightness = (bg_mean / board_mean).clamp(0.5, 1.5)
+            board_lit = board_on_frame * brightness
+        if shading_strength > 0:
+            # Low-frequency shading field from the background, normalized to ~1 mean
+            # so it modulates (not recolours) the board. Computed on a small
+            # downsample + blur + upsample so the cost is independent of the (large)
+            # board raster resolution.
+            small = torch.nn.functional.interpolate(
+                background.unsqueeze(0), size=(64, 64), mode="area"
+            )
+            small = kornia.filters.gaussian_blur2d(small, (9, 9), (2.0, 2.0))
+            shading = torch.nn.functional.interpolate(
+                small, size=(H, W), mode="bilinear", align_corners=False
+            )[0]
+            shading = shading / shading.mean().clamp_min(1e-4)
+            board_lit = board_lit * (1.0 - shading_strength + shading_strength * shading)
+        board_lit = board_lit.clamp(0.0, 1.0)
+
+    composite = mask * board_lit + (1.0 - mask) * background
+    return composite, mask
+
+
 def blob_normalizations(homographies, coords, device):
     """Affine shape normalization for each keypoint.
 
@@ -297,6 +408,14 @@ class HomographyData(torch.utils.data.Dataset):
         scale_range=None,  # (lo, hi) absolute blob-scale bounds; alternative to scale_quantile_range
         max_keypoints=None,  # cap the kept keypoints to a fixed count (deterministic subsample) so different splits are exactly the same size
         subsample_seed=0,  # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable across runs
+        background=None,  # local folder of scene images to place boards in front of; None disables all compositing/garbage
+        background_kaggle_slug="arnaud58/landscape-pictures",  # kagglehub fallback when `background` is unset or missing on disk
+        board_scale_range=(0.4, 0.7),  # board extent as a fraction of the frame (min, max); the placement's uniform scale
+        background_lighting=True,  # brightness-match the board to the local background + apply a low-frequency shading gradient
+        shading_strength=0.3,  # weight of the multiplicative shading field sampled from the background (0 disables the gradient)
+        garbage_fraction=0.0,  # number of background distractor keypoints per board, as a fraction of that board's surviving blobs
+        garbage_source="sift",  # "sift" (detect on the background) or "random" (uniform background points)
+        background_seed=0,  # base RNG seed for placement/background choice/garbage; per-board seed derives from this + board index
         **_,
     ):
         super().__init__()
@@ -358,6 +477,62 @@ class HomographyData(torch.utils.data.Dataset):
         )
         self.transforms_inv = torch.linalg.inv(self.transforms)
 
+        # --- Background compositing (blob-board / GT-keypoint path only) ---
+        # Place each board as a shrunk sub-rectangle onto a real background scene so
+        # the warped views look like the board photographed in a scene. The identity
+        # (un-warped) view stays a clean reference: we keep the raw board-frame GT
+        # coords/scales in the ``*_clean`` arrays and the original board rasters in
+        # ``self.images_clean``, while ``self.images`` / ``keypoint_coords`` /
+        # ``keypoint_scales`` carry the composite-frame values used by warped views.
+        self.keypoint_is_garbage = None  # populated in the garbage block below
+        self.images_clean = self.images
+        self._board_masks = None
+        gt_keypoint_coords_clean = None
+        gt_keypoint_scales_clean = None
+        self._garbage_fraction = float(garbage_fraction)
+        self._garbage_source = garbage_source
+        self._background_seed = int(background_seed)
+        compositing = (
+            isinstance(self.images, torch.Tensor)
+            and gt_keypoint_coords is not None
+            and gt_keypoint_scales is not None
+            and (background is not None or background_kaggle_slug)
+        )
+        if compositing:
+            bg_dir = resolve_background_dir(background, background_kaggle_slug)
+            if bg_dir is None:
+                print("No background images found; skipping compositing/garbage.")
+                compositing = False
+        if compositing:
+            bg_paths = sorted(find_images(bg_dir))
+            print(f"Compositing {self.images.size(0)} boards onto backgrounds from {bg_dir!r} ({len(bg_paths)} images)")
+            gt_keypoint_coords = gt_keypoint_coords.clone()
+            gt_keypoint_scales = gt_keypoint_scales.clone()
+            gt_keypoint_coords_clean = gt_keypoint_coords.clone()
+            gt_keypoint_scales_clean = gt_keypoint_scales.clone()
+            clean_boards = self.images
+            composites, masks = [], []
+            for i in range(clean_boards.size(0)):
+                gen = torch.Generator().manual_seed(int(background_seed) + i)
+                A, s = sample_placement_similarity(self.size, board_scale_range, gen)
+                bg_idx = torch.randint(len(bg_paths), (), generator=gen).item()
+                bg = load_background(bg_paths[bg_idx], self.size)
+                composite, mask = composite_board(
+                    clean_boards[i], bg, A, self.size,
+                    lighting=background_lighting, shading_strength=shading_strength,
+                )
+                composites.append(composite)
+                masks.append(mask)
+                # Map this board's GT blobs into the composite frame (warped path).
+                coords = gt_keypoint_coords[i]  # (F, 2), board-raster px
+                ones = torch.ones((coords.size(0), 1), dtype=coords.dtype)
+                warped = (A @ torch.cat([coords, ones], dim=-1).T).T  # (F, 3)
+                gt_keypoint_coords[i] = warped[:, :2] / warped[:, 2:3]
+                gt_keypoint_scales[i] = gt_keypoint_scales[i] * s
+            self.images = torch.stack(composites)
+            self.images_clean = clean_boards
+            self._board_masks = torch.stack(masks)
+
         with torch.no_grad():
             detector = kornia.feature.ScaleSpaceDetector(
                 num_features=features_per_image,
@@ -366,6 +541,8 @@ class HomographyData(torch.utils.data.Dataset):
             keypoints = []
             keypoint_coord_list = []
             keypoint_scale_list = []
+            keypoint_coord_clean_list = []
+            keypoint_scale_clean_list = []
             loop = tqdm(range(0, len(self.images), sift_batch_size))
             loop.set_description("Obtaining SIFT features")
 
@@ -398,6 +575,12 @@ class HomographyData(torch.utils.data.Dataset):
                     keypoint_scales = gt_keypoint_scales[i : i + actual_sift_batch_size]
                     keypoint_mask = gt_keypoint_mask[i : i + actual_sift_batch_size]
                     features_per_image = gt_keypoint_coords.size(1)
+                    if gt_keypoint_coords_clean is not None:
+                        keypoint_coords_clean = gt_keypoint_coords_clean[i : i + actual_sift_batch_size]
+                        keypoint_scales_clean = gt_keypoint_scales_clean[i : i + actual_sift_batch_size]
+                    else:
+                        keypoint_coords_clean = keypoint_coords
+                        keypoint_scales_clean = keypoint_scales
                 else:
                     img = torchvision.transforms.functional.rgb_to_grayscale(img)
                     lafs, responses = detector(img)
@@ -408,6 +591,10 @@ class HomographyData(torch.utils.data.Dataset):
                     )
                     keypoint_scales = kornia.feature.get_laf_scale(lafs).squeeze()
                     keypoint_mask = responses > sift_min_response_threshold
+                    # No compositing on the natural-image path: the identity view
+                    # already uses the same image, so clean == detected.
+                    keypoint_coords_clean = keypoint_coords
+                    keypoint_scales_clean = keypoint_scales
 
                 img_ids = torch.stack(
                     [
@@ -433,10 +620,16 @@ class HomographyData(torch.utils.data.Dataset):
                 )
                 keypoint_coord_list.append(keypoint_coords[keypoint_mask].cpu())
                 keypoint_scale_list.append(keypoint_scales[keypoint_mask].cpu())
+                keypoint_coord_clean_list.append(keypoint_coords_clean[keypoint_mask].cpu())
+                keypoint_scale_clean_list.append(keypoint_scales_clean[keypoint_mask].cpu())
 
             self.keypoints = torch.cat(keypoints)
             self.keypoint_coords = torch.cat(keypoint_coord_list)
             self.keypoint_scales = torch.cat(keypoint_scale_list)
+            # Raw board-frame coords/scales for the clean identity view (== the
+            # composite-frame arrays when compositing is off).
+            self.keypoint_coords_clean = torch.cat(keypoint_coord_clean_list)
+            self.keypoint_scales_clean = torch.cat(keypoint_scale_clean_list)
 
         # Optionally restrict the dataset to a band of the (intrinsic) blob
         # scale distribution. Filtering happens on the per-keypoint arrays here,
@@ -445,7 +638,10 @@ class HomographyData(torch.utils.data.Dataset):
         # intact). This lets a single board be split into e.g. "small" and
         # "large" blob validation sets whose FPRs are reported separately.
         if scale_quantile_range is not None or scale_range is not None:
-            scales = self.keypoint_scales
+            # Band on the raw *intrinsic* blob scale (clean, pre-placement) so the
+            # small/medium/large splits reflect true blob size, not the random
+            # per-board placement scale baked into ``keypoint_scales``.
+            scales = self.keypoint_scales_clean
             if scale_quantile_range is not None:
                 lo_q, hi_q = float(scale_quantile_range[0]), float(scale_quantile_range[1])
                 lo = torch.quantile(scales, lo_q).item()
@@ -462,6 +658,8 @@ class HomographyData(torch.utils.data.Dataset):
             self.keypoints = self.keypoints[mask]
             self.keypoint_coords = self.keypoint_coords[mask]
             self.keypoint_scales = self.keypoint_scales[mask]
+            self.keypoint_coords_clean = self.keypoint_coords_clean[mask]
+            self.keypoint_scales_clean = self.keypoint_scales_clean[mask]
             print(
                 f"Scale filter {scale_quantile_range or scale_range}: kept "
                 f"{self.keypoints.size(0)}/{n_before} keypoints "
@@ -483,6 +681,8 @@ class HomographyData(torch.utils.data.Dataset):
             self.keypoints = self.keypoints[perm]
             self.keypoint_coords = self.keypoint_coords[perm]
             self.keypoint_scales = self.keypoint_scales[perm]
+            self.keypoint_coords_clean = self.keypoint_coords_clean[perm]
+            self.keypoint_scales_clean = self.keypoint_scales_clean[perm]
             print(
                 f"Keypoint cap: subsampled {self.keypoints.size(0)}/{n_before} "
                 f"keypoints (max_keypoints={max_keypoints}, seed={subsample_seed})"
@@ -492,6 +692,84 @@ class HomographyData(torch.utils.data.Dataset):
                 f"Keypoint cap: only {self.keypoints.size(0)} keypoints available "
                 f"(< max_keypoints={max_keypoints}); split will be smaller than the cap"
             )
+
+        # --- Background "garbage" keypoints (pure-negative distractors) ---
+        # Detect points on the composited background and add them as keypoints that
+        # never form a positive pair (unique-per-view negative labels, see
+        # __getitem__). Added AFTER the cap so every split shares the same constant
+        # garbage set and stays the same size. Their identity-view patch is a bland
+        # clean-board sample; only their warped views carry real background content.
+        views = self.transforms.size(1) + 1
+        self.keypoint_is_garbage = torch.zeros(self.keypoints.size(0), dtype=torch.bool)
+        if self._board_masks is not None and self._garbage_fraction > 0:
+            with torch.no_grad():
+                garbage_detector = kornia.feature.ScaleSpaceDetector(
+                    num_features=2000, minima_are_also_good=True,
+                )
+                # Exact target: since every split shares the same (capped) blob
+                # count, keying the garbage count off it makes all splits the same
+                # total size. We pool SIFT background detections (preferred) and
+                # random background points (top-up), then pick exactly this many.
+                target_total = int(round(self._garbage_fraction * self.keypoints.size(0)))
+                sift_c, sift_s, sift_b = [], [], []
+                rand_c, rand_s, rand_b = [], [], []
+                for b in range(self.images.size(0)):
+                    gen = torch.Generator().manual_seed(self._background_seed + 100003 + b)
+                    bg_region = self._board_masks[b, 0] < 0.05  # strictly background
+                    ys_all, xs_all = torch.nonzero(bg_region, as_tuple=True)
+                    if ys_all.numel() == 0:
+                        continue
+                    if self._garbage_source == "sift":
+                        lafs, _ = garbage_detector(self.images[b:b + 1].cuda())
+                        # kornia get_laf_center returns (x, y), matching the (x, y)
+                        # convention of the blob-board GT coords.
+                        coords = kornia.feature.get_laf_center(lafs)[0].cpu()
+                        scales = kornia.feature.get_laf_scale(lafs).reshape(-1).cpu()
+                        xs = coords[:, 0].round().long().clamp(0, self.size[1] - 1)
+                        ys = coords[:, 1].round().long().clamp(0, self.size[0] - 1)
+                        on_bg = bg_region[ys, xs]
+                        sift_c.append(coords[on_bg]); sift_s.append(scales[on_bg])
+                        sift_b.append(torch.full((int(on_bg.sum()),), b, dtype=torch.int64))
+                    # Random background candidates (used verbatim for the "random"
+                    # source, and as a top-up when SIFT is sparse).
+                    ridx = torch.randperm(ys_all.numel(), generator=gen)[: max(target_total, 256)]
+                    rc = torch.stack([xs_all[ridx].float(), ys_all[ridx].float()], dim=-1)
+                    rand_c.append(rc)
+                    rand_s.append(torch.full((rc.size(0),), 2.0))
+                    rand_b.append(torch.full((rc.size(0),), b, dtype=torch.int64))
+
+                def _shuffled_cat(cs, ss, bs, seed):
+                    if not cs:
+                        return (torch.empty((0, 2)), torch.empty((0,)), torch.empty((0,), dtype=torch.int64))
+                    c, s, bd = torch.cat(cs), torch.cat(ss), torch.cat(bs)
+                    perm = torch.randperm(c.size(0), generator=torch.Generator().manual_seed(seed))
+                    return c[perm], s[perm], bd[perm]
+
+                sc, ss_, sb = _shuffled_cat(sift_c, sift_s, sift_b, self._background_seed + 11)
+                rc, rs, rb = _shuffled_cat(rand_c, rand_s, rand_b, self._background_seed + 22)
+                # Prefer SIFT points; top up the remainder with random background.
+                take_sift = min(target_total, sc.size(0))
+                rem = target_total - take_sift
+                g_coords = torch.cat([sc[:take_sift], rc[:rem]])
+                g_scales = torch.cat([ss_[:take_sift], rs[:rem]])
+                g_board = torch.cat([sb[:take_sift], rb[:rem]])
+                if g_coords.size(0) < target_total:
+                    print(f"Only {g_coords.size(0)} garbage keypoints available (< target {target_total}); splits may differ in size")
+                if g_coords.size(0) > 0:
+                    # Unique negative feature ids (for the training sampler); the
+                    # per-view FPR label is further made unique in __getitem__.
+                    fids = -(1 + torch.arange(g_coords.size(0), dtype=torch.int64))
+                    g_kp = torch.stack([g_board * views, fids], dim=-1)
+                    self.keypoints = torch.cat([self.keypoints, g_kp])
+                    self.keypoint_coords = torch.cat([self.keypoint_coords, g_coords])
+                    self.keypoint_scales = torch.cat([self.keypoint_scales, g_scales])
+                    # Garbage identity view mirrors the composite values.
+                    self.keypoint_coords_clean = torch.cat([self.keypoint_coords_clean, g_coords])
+                    self.keypoint_scales_clean = torch.cat([self.keypoint_scales_clean, g_scales])
+                    self.keypoint_is_garbage = torch.cat(
+                        [self.keypoint_is_garbage, torch.ones(g_coords.size(0), dtype=torch.bool)]
+                    )
+                    print(f"Added {g_coords.size(0)} garbage keypoints ({take_sift} sift + {min(rem, rc.size(0))} random) across {self.images.size(0)} boards")
 
         avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)
         print(f"{avg_keypoints_per_image=}")
@@ -527,8 +805,13 @@ class HomographyData(torch.utils.data.Dataset):
                 for batch in tqdm(extraction_loader, desc="Warping Patches"):
                     # Rekonstruiere den Batched-Image-Tensor aus dem Dictionary
                     img_ids = batch["keypoints"][:, 0].cpu().numpy()
-                    images = {img_id: self.augmentation(img) for img_id, img in batch["images"].items()}
-                    # TODO: Consider using no augmention for the non-warped images
+                    # The identity (un-warped) view is the clean reference: never
+                    # augment it. Warped views (img_id % views < views-1) get the aug.
+                    views = self.transforms.size(1) + 1
+                    images = {
+                        img_id: (img if img_id % views == views - 1 else self.augmentation(img))
+                        for img_id, img in batch["images"].items()
+                    }
                     imgs_tensor = torch.stack(
                         [images[img_id] for img_id in img_ids], dim=0
                     ).cuda()
@@ -570,7 +853,10 @@ class HomographyData(torch.utils.data.Dataset):
         homography_i = self.keypoints[keypoint_i, 0] // (self.transforms.size(1) + 1)
 
         if homography_j == self.transforms.size(1):
-            keypoint_coords = self.keypoint_coords[keypoint_i]
+            # Identity view = clean reference: raw board-frame coords/scale, no warp
+            # and (in compute_patches) no augmentation. Uses the clean board image.
+            keypoint_coords = self.keypoint_coords_clean[keypoint_i]
+            base_scale = self.keypoint_scales_clean[keypoint_i]
             scale_factor = torch.tensor(1.0)
         else:
             keypoint_coords = self.transforms[homography_i, homography_j] @ torch.cat(
@@ -587,16 +873,25 @@ class HomographyData(torch.utils.data.Dataset):
                 .sqrt()
             )
             keypoint_coords = (keypoint_coords[:2] / keypoint_coords[2:]).squeeze(-1)
+            base_scale = self.keypoint_scales[keypoint_i]
+
+        label = self.keypoints[keypoint_i, 1]
+        if getattr(self, "keypoint_is_garbage", None) is not None and bool(
+            self.keypoint_is_garbage[keypoint_i]
+        ):
+            # Untracked singleton: a globally-unique, always-negative label per
+            # emitted patch, so background garbage never forms a positive pair.
+            label = torch.tensor(-(1 + index), dtype=self.keypoints.dtype)
 
         res = {
             "keypoint": torch.stack(
                 [
                     self.keypoints[keypoint_i, 0] + homography_j,
-                    self.keypoints[keypoint_i, 1],
+                    label,
                 ]
             ),
             "keypoint_coords": keypoint_coords,
-            "scales": self.keypoint_scales[keypoint_i] * scale_factor,
+            "scales": base_scale * scale_factor,
             "homographies": (
                 self.transforms[homography_i, homography_j]
                 if homography_j < self.transforms.size(1)
@@ -676,17 +971,20 @@ class HomographyData(torch.utils.data.Dataset):
             else:
                 # Fallback Logik für dynamische Extraktion (in_memory=False)
                 img_ids = {item["keypoint"][0].item() for item in batch}
+                views = self.transforms.size(1) + 1
                 imgs = {}
                 for img_id in img_ids:
+                    board = img_id // views
+                    # Identity (un-warped) view reads the clean board; warped views
+                    # read the composite (== clean board when compositing is off).
+                    source = self.images_clean if (img_id % views == self.transforms.size(1)) else self.images
                     try:
-                        img = self.images[img_id // (self.transforms.size(1) + 1)]
+                        img = source[board]
                     except TypeError:
                         img = (
-                            self.load_and_resize(
-                                self.images[img_id // (self.transforms.size(1) + 1)]
-                            )
+                            self.load_and_resize(source[board])
                             if not self.in_memory
-                            else self.images[img_id // (self.transforms.size(1) + 1)]
+                            else source[board]
                         )
                     if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
                         img = kornia.geometry.transform.warp_perspective(

@@ -136,6 +136,26 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     # contrastive training; enabled by setting `training.m_per_class` in the
     # config. Falls back to plain shuffling for datasets/tasks that don't use it.
     m_per_class = getattr(cfg.training, "m_per_class", None)
+
+    # DataLoader worker config. With num_workers>0 the data pipeline (index the
+    # precomputed patches, collate, H2D copy) overlaps with the GPU forward/backward
+    # instead of running synchronously in the main process — the main lever when the
+    # GPU is starved by single-process loading. persistent_workers keeps the train
+    # loader's workers alive across epochs to avoid re-forking the large in-memory
+    # dataset each epoch; validation uses fewer, non-persistent workers since its
+    # several small loaders are iterated sequentially. Sizes come from
+    # `training.num_workers` / `validation.num_workers` (match Slurm `-c` to them).
+    def _loader_kwargs(num_workers, persistent):
+        num_workers = int(num_workers)
+        kw = {"num_workers": num_workers, "pin_memory": True}
+        if num_workers > 0:
+            kw["persistent_workers"] = persistent
+            kw["prefetch_factor"] = 2
+        return kw
+
+    train_workers = int(getattr(cfg.training, "num_workers", 8))
+    val_workers = int(getattr(cfg.validation, "num_workers", 4))
+
     train_loader = []
     for d in train_dataset:
         sampler = (
@@ -148,7 +168,8 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
             batch_size=cfg.training.batch_size,
             shuffle=sampler is None,
             sampler=sampler,
-            collate_fn=d.get_collate_func()
+            collate_fn=d.get_collate_func(),
+            **_loader_kwargs(train_workers, persistent=True),
         ))
     def build_criterion(loss_cfgs):
         return {
@@ -171,7 +192,8 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
             label,
             [torch.utils.data.DataLoader(
                 d, batch_size=cfg.validation.batch_size, shuffle=False,
-                collate_fn=d.get_collate_func()) for d in datasets],
+                collate_fn=d.get_collate_func(),
+                **_loader_kwargs(val_workers, persistent=False)) for d in datasets],
             build_criterion(loss_cfgs),
         )
         for label, datasets, loss_cfgs in validation_dataset
@@ -280,13 +302,22 @@ def train_func(process_batch):
             x += [epoch]
             for n, v in y_train.items():
                 v += [avg_losses[n]]
+            # Figure heading: model type + the key scale hyperparameter (the single
+            # ``scale`` config key when present, else the patch/log-polar scale param).
+            model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
+            scale_desc = getattr(cfg, "scale", None)
+            if scale_desc is None:
+                _p = cfg.training.dataset.params
+                scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
+            plot_title = f"{model_name} (scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)
+            ax.set_title(plot_title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
             ax.set_xlim(0, cfg.training.num_epochs)
-            ax.set_ylim(bottom=0)
+            ax.set_ylim(0, 6)
             ax.legend()
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
@@ -325,10 +356,11 @@ def train_func(process_batch):
                 _, ax = plt.subplots()
                 for n, v in y_val.items():
                     ax.plot(x, v, label=n)
+                ax.set_title(plot_title)
                 ax.set_xlabel("Epoch")
                 ax.set_ylabel("Average Validation Loss")
                 ax.set_xlim(0, cfg.training.num_epochs)
-                ax.set_ylim(bottom=0)
+                ax.set_ylim(0, 1)
                 ax.legend()
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()
