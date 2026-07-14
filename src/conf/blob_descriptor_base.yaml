@@ -12,14 +12,13 @@ training:
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 8
+      num_boards: 32
       image_size: [150, 150]
-      transforms_per_image: 3
+      transforms_per_image: 1
       in_memory: true
       extraction_batch_size: 1024
       supersample: 3   # sub-taps per output pixel per axis, area-averaged (patch anti-aliasing)
       transform_params:
-        perspective: false
         fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]
@@ -95,7 +94,6 @@ validation:
       extraction_batch_size: 1024
       supersample: 3
       transform_params:
-        perspective: false
         fit_to_frame: true
       blobboard_params:
         board_size: [142, 142]

@@ -87,7 +87,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 sched_cfg = opt_cfg.scheduler
                 if sched_cfg.name == "CosineAnnealingLR":
                     scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
-                                                                                    T_max=100,
+                                                                                    T_max=50,
                                                                                     **sched_cfg.get("params", {}))}
                 else:
                     scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
@@ -310,7 +310,7 @@ def train_func(process_batch):
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
             ax.set_xlim(0, cfg.training.num_epochs)
-            ax.set_ylim(0, 6)
+            ax.set_ylim(bottom=0)
             ax.legend()
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
