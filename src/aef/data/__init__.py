@@ -65,11 +65,22 @@ def get_validation_specs(cfg):
                 # ``entry.name`` is the split *label*, not the dataset class, so
                 # only ``entry.params`` participates in the merge; the class name
                 # comes from ``shared.name``.
+                #
+                # Resolve the template against the real config root first (baking
+                # in interpolations like ${scale}) and rebuild it as a plain,
+                # non-struct config: Hydra composes in struct mode, which would
+                # otherwise reject a split's extra keys (e.g. scale_quantile_range).
+                base = omegaconf.OmegaConf.create(
+                    omegaconf.OmegaConf.to_container(shared, resolve=True)
+                )
+                entry_params = entry.get("params", None)
+                override = (
+                    omegaconf.OmegaConf.to_container(entry_params, resolve=True)
+                    if entry_params is not None
+                    else {}
+                )
                 dataset_cfg = omegaconf.OmegaConf.merge(
-                    shared,
-                    omegaconf.OmegaConf.create(
-                        {"params": entry.get("params", {}) or {}}
-                    ),
+                    base, omegaconf.OmegaConf.create({"params": override})
                 )
             else:
                 raise ValueError(
