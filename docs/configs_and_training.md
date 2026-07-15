@@ -68,6 +68,20 @@ dataset params only, so all models at a given `scale` share one entry. Set it to
 to disable. See [data pipeline → dataset cache](data_pipeline.md#dataset-cache-disk)
 for the key, concurrency and the "frozen random draw" caveat.
 
+## Checkpoints
+
+Controlled by the `logging` block (`config.yaml`):
+
+- `model_checkpoints` — master switch (currently `false`).
+- `checkpoint_dir` — `null` ⇒ `<logging.dir>/<experiment_name>/checkpoints`.
+- `checkpoint_every_epoch` — `false` (default) ⇒ only `latest.pth` (refreshed every
+  epoch, the resume point) and `best.pth` (lowest weighted validation loss, i.e. the
+  `overall` FPR95) are written. `true` ⇒ additionally keep `epoch_<n>.pth` snapshots.
+
+Note escnn checkpoints are large (~240 MB — the basis buffers live in the
+`state_dict`), so per-epoch snapshots add up fast. Resume with
+`+training.continue_from_checkpoint=<path>`.
+
 ## Loss curves
 
 `train_losses.svg` / `validation_losses.svg` (under `<logging.dir>/<experiment_name>/`)

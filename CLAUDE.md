@@ -9,7 +9,7 @@ Affine Equivariant Features — the reference implementation of Hendrik Sauer's 
 Two Python environments coexist; pick by task:
 
 - **Running code / training / notebooks → the pixi env in `deps/BlobBoards.jl`.** It bundles `juliacall` + the `BlobBoards.jl` Julia package + all Python deps and pins `JULIA_PYTHONCALL_EXE` so PythonCall reuses pixi's interpreter. Run either `cd deps/BlobBoards.jl && pixi run python ...` or `pixi run --manifest-path deps/BlobBoards.jl/pixi.toml python ...` from the repo root. Anything that touches `BlobBoardHomographyData` (the Julia bridge) must run here.
-- **Unit tests → `.venv13`** (`.venv13/bin/python -m pytest`). `tests/conftest.py` stubs out the heavy deps (kornia, torchvision, Julia, escnn/sesn/asel, pytorch-metric-learning), so tests need only torch + pytest. The pixi env does **not** have pytest.
+- **Unit tests → `.venv13`** (`.venv13/bin/python -m pytest`). `tests/conftest.py` stubs out the heavy deps (kornia, torchvision, Julia, escnn/asel, pytorch-metric-learning), so tests need only torch + pytest. The pixi env does **not** have pytest.
 
 `requirements.txt` is the pip-installable dependency list (used by the Slurm container recipe); pixi's `pixi.toml` is the authoritative local env.
 
@@ -29,7 +29,7 @@ pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
 pylint src/aef
 ```
 
-`tests/integration/` and `tests/test_models_smoke.py` are training-loop / smoke harnesses, not part of the fast unit suite (smoke tests are `@pytest.mark.skip`).
+`tests/unit/` is the whole suite (the old `tests/integration/` + smoke harnesses drove the since-removed detector/scale tasks and were deleted).
 
 First-time setup also requires the Julia submodule and registry (see README.md): `git submodule update --init --recursive`, then the pixi env handles Julia instantiation on first use.
 
@@ -37,7 +37,7 @@ First-time setup also requires the Julia submodule and registry (see README.md):
 
 ### Config-driven, string-dispatched wiring
 
-`src/run_training.py` (Hydra entrypoint, configs in `src/conf/`, default `config_name="scale"`) resolves everything by **name** from YAML:
+`src/run_training.py` (Hydra entrypoint, configs in `src/conf/`; there is **no** default config — `--config-name` is required) resolves everything by **name** from YAML:
 
 - `model.name` → `eval()`'d against the `aef.models` namespace, constructed with `model.params`.
 - `training.process_batch` → `eval()`'d against `aef.train` (a `process_batch_*` function).
@@ -50,7 +50,7 @@ Consequence: **to register a new model / loss / dataset / process-batch function
 
 ### Generic training loop
 
-`aef.train.train_func(process_batch)` (in `src/aef/train/__init__.py`) returns the one training loop used by every task. It builds optimizer(s)/scheduler(s) (supports multiple named optimizers over distinct `model_params` sub-modules), DataLoaders using each dataset's own `get_collate_func()`, and a weighted multi-loss criterion. The loop has built-in NaN/Inf guarding (skips bad batches, clips grad norm to 5.0), per-epoch checkpointing to `logging.dir/<experiment>/checkpoints/`, and `best.pth` tracking. The task-specific logic lives entirely in the chosen `process_batch_*` function (detector, descriptor, canonicalizer, scale — see `src/aef/train/{detector,descriptor,canonicalizer,scale}.py`).
+`aef.train.train_func(process_batch)` (in `src/aef/train/__init__.py`) returns the one training loop used by every task. It builds optimizer(s)/scheduler(s) (supports multiple named optimizers over distinct `model_params` sub-modules), DataLoaders using each dataset's own `get_collate_func()`, and a weighted multi-loss criterion. The loop has built-in NaN/Inf guarding (skips bad batches, clips grad norm to 5.0) and checkpointing to `logging.dir/<experiment>/checkpoints/` — gated by `logging.model_checkpoints` (currently **false**), writing `latest.pth` + `best.pth`, and `epoch_<n>.pth` only if `logging.checkpoint_every_epoch`. The task-specific logic lives entirely in the chosen `process_batch_*` function; only two remain: `process_batch_blobs` (`train/descriptor.py`) and `process_batch_canonicalize` (`train/canonicalizer.py`). Shared geometry helpers live in `src/aef/geometry.py`.
 
 ### Data pipeline
 
@@ -61,11 +61,13 @@ Patch extraction happens in module-level functions in `homography.py`:
 - `extract_multiscale_patches(...)` — **cartesian** patches, one channel per entry in `patch_scale_factors`, via `warp_perspective`.
 - `extract_logpolar_patches(...)` — **log-polar** patches (single channel; angular axis = dim −2, radial axis = dim −1) via `grid_sample`; inner/outer radius = `logpolar_{inner,outer}_factor * scale`.
 
-`HomographyData` selects between them with `patch_type="cartesian"|"logpolar"`. Subclasses supply different image sources but reuse this machinery: `BlobBoardHomographyData` (synthetic calibration boards via the `BlobBoards.jl` Julia bridge — needs the pixi env), `KaggleHomographyData`, and the COLMAP loaders in `data/colmap.py`.
+`HomographyData` selects between them with `patch_type="cartesian"|"logpolar"`. `BlobBoardHomographyData` (synthetic calibration boards via the `BlobBoards.jl` Julia bridge — needs the pixi env) is the only subclass and the only dataset any live config uses; it hands `HomographyData` an in-memory tensor of board rasters. `data/track.py` is kept for future work but is not wired up.
+
+`in_memory` is task-specific, not a perf dial: `true` (blob descriptor) pre-extracts patches and batches carry `"patches"`; `false` (canonicalization) batches carry `"images"` and the collate warps per view. Setting `cache_dir` reuses a fully prepared dataset from disk, keyed by a hash of the *effective* constructor params. See `docs/data_pipeline.md`.
 
 ### Models
 
-`src/aef/models/` holds the equivariant architectures: `approach_one`/`approach_two` (affine feature nets), `blob_descriptor.py` (`BlobDescriptorHierarchical`), `hardnet.py`, `unet.py`, `blob_canon.py`, `scale.py` (`NeuralScaleSpaceSESN`). `asel/` and `sesn/` are **vendored** equivariant-conv libraries (scale/roto-scale steerable convs), integrated into the tree rather than pip-installed (see commit history).
+`src/aef/models/` holds the equivariant architectures: `blob_descriptor.py` (`BlobDescriptorNoStride`, `BlobDescriptorEfficient` + older `HardNet`/`Deep`/`Robust`/`Hierarchical` variants), `hardnet.py`, `blob_canon.py`. `asel/` is a **vendored** equivariant-conv library (affine steerable convs), integrated into the tree rather than pip-installed; it is a dependency of `BlobCanonicalization`. See `docs/steerable_descriptors.md`.
 
 ## Notes
 

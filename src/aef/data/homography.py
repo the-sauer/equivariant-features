@@ -16,6 +16,7 @@
 
 import functools
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -28,17 +29,39 @@ import torchvision
 from torchvision.transforms import v2
 from tqdm import tqdm
 
-from ..train.detector import homogenize, linearize_homography
+from ..geometry import homogenize, linearize_homography
 from ..transforms.homography import sample_homography
 
 
 # Bump when a pipeline change makes previously written caches invalid.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 # Params that don't change a dataset's *contents* (so they must not split the cache).
+# Everything else a constructor accepts is hashed — including params left at their
+# default (see `effective_params`) — so anything that realistically changes the
+# boards, keypoints or extracted patches (patch_size, supersample, patch_type, the
+# scale factors, compositing/garbage settings, augmentation, ...) is covered.
 _CACHE_KEY_EXCLUDE = {
     "data_dir", "cache_dir", "cache_path", "extraction_batch_size", "sift_batch_size",
 }
+
+
+def effective_params(fns, passed: dict) -> dict:
+    """``passed`` overlaid on the constructor defaults of ``fns`` (later fns win).
+
+    Hashing the *effective* values rather than only what the caller happened to pass
+    means a param left at its default still participates in the cache key. Two
+    consequences: a config that omits e.g. ``supersample`` still keys on the value it
+    actually ran with, and changing a default in code changes every key — invalidating
+    stale caches instead of silently reusing them.
+    """
+    merged = {}
+    for fn in fns:
+        for name, p in inspect.signature(fn).parameters.items():
+            if p.default is not inspect.Parameter.empty:
+                merged[name] = p.default
+    merged.update(passed)
+    return merged
 
 
 def dataset_cache_key(params: dict) -> str:

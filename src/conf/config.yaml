@@ -24,3 +24,8 @@ training:
           sigma: 0.1
 logging:
   model_checkpoints: false
+  # false -> only `latest.pth` (refreshed each epoch) + `best.pth` are written.
+  # true  -> additionally keep a per-epoch `epoch_<n>.pth` snapshot.
+  checkpoint_every_epoch: false
+  # null -> <logging.dir>/<experiment_name>/checkpoints
+  checkpoint_dir: null

@@ -14,6 +14,27 @@ tensor index + collate. The FPR95/contrastive label is the keypoint's feature id
 (`keypoints[..., 1]`), shared across a keypoint's views → those form the positive
 pairs.
 
+## `in_memory` is task-specific, not a free toggle
+
+`in_memory` decides *what a batch contains*, and the two `process_batch` functions
+expect different things — so its value is dictated by the task, not a performance dial:
+
+| | `in_memory: true` | `in_memory: false` |
+|---|---|---|
+| patches | pre-extracted once, cached in RAM (`patches_available=True`) | not extracted |
+| batch carries | `"patches"` | `"images"` (collate warps each view on the fly) |
+| works with | `process_batch_blobs` (reads `data["patches"]`) | `process_batch_canonicalize` (reads `data["images"]`) |
+
+Only `blob_descriptor_base.yaml` sets `in_memory: true`; `blob_descriptor_canonicalization.yaml`
+omits the key and `blobboards.py` applies `kwargs.setdefault("in_memory", False)`, so it
+runs the on-the-fly path. **Consequences:** the blob-descriptor configs must keep
+`in_memory: true` (with `false`, `process_batch_blobs` raises `KeyError: 'patches'`),
+and the `in_memory=False` collate fallback must not be deleted as "dead" — canonicalization
+depends on it.
+
+Note the flag no longer selects how *images* are loaded: `HomographyData` takes an
+in-memory tensor only (the on-disk image path went away with `KaggleHomographyData`).
+
 ## Background compositing
 
 Boards can be placed onto real background scenes so warped views look like a board
@@ -85,11 +106,18 @@ dataset to disk and reuses it on the next run.
 - **What's stored**: transforms, all keypoint arrays (incl. `*_clean` and
   `keypoint_is_garbage`), images/composites, and `precomputed_patches` — everything
   needed to reconstruct the dataset without re-running the pipeline.
-- **Key**: a short hash of every param that determines the contents
-  (`dataset_cache_key`), plus `CACHE_VERSION`. `data_dir`, `cache_dir`,
-  `extraction_batch_size` and `sift_batch_size` are excluded — they don't change the
-  data. Bump `CACHE_VERSION` (in `homography.py`) when a pipeline change invalidates
-  existing caches.
+- **Key**: a short hash (`dataset_cache_key`) of every param that determines the
+  contents, plus `CACHE_VERSION`. It hashes the **effective** params — `effective_params`
+  overlays what the caller passed onto the constructor *defaults* of
+  `HomographyData.__init__` and `BlobBoardHomographyData.__init__` — so a param the
+  config never mentions (`patch_size`, `supersample`, `patch_type`, the log-polar
+  factors, …) still keys the cache at the value it actually ran with, and **changing a
+  default in code invalidates every key** instead of silently reusing stale data.
+  Passing a param explicitly at its default does *not* split the cache.
+  `data_dir`, `cache_dir`, `extraction_batch_size` and `sift_batch_size` are excluded —
+  they don't change the data.
+  The *algorithm* is not hashed: if you change the compositing/garbage code itself,
+  bump `CACHE_VERSION` (in `homography.py`) by hand.
 - **Checked before board generation**: `BlobBoardHomographyData` derives the key from
   its params and, on a hit, skips rendering entirely (the slowest step) — so the check
   cannot live in `HomographyData` alone.
@@ -108,8 +136,8 @@ unseeded RNG, and board seeds (when `seeds` is unset) and `polarity: random` are
 per run; the cache freezes whichever draw was written first. That is *desirable* for
 pinned validation sets and for controlled model comparisons, but it means repeats
 sharing a key see identical data. Clear the entry (or vary a keyed param) to force a
-fresh draw. Since patches are pre-extracted once per run anyway (`resample_homographies`
-is never called), caching is semantically identical *within* a run.
+fresh draw. Since patches are pre-extracted once per run and never recomputed
+(there is no re-sampling of homographies mid-run), caching is semantically identical *within* a run.
 
 ## Reproducing example composites
 
