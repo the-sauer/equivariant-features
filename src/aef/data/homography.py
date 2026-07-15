@@ -450,6 +450,8 @@ class HomographyData(torch.utils.data.Dataset):
         garbage_fraction=0.0,  # number of background distractor keypoints per board, as a fraction of that board's surviving blobs
         garbage_source="sift",  # "sift" (detect on the background) or "random" (uniform background points)
         background_seed=0,  # base RNG seed for placement/background choice/garbage; per-board seed derives from this + board index
+        shuffle_keypoints=True,  # shuffle keypoint order once so appended garbage isn't clustered in the last batches
+        shuffle_seed=0,  # RNG seed for that shuffle; fixed so a split's batch composition is stable across runs
         cache_path=None,  # if set: load the prepared dataset from here when it exists, else build and save it
         **_,
     ):
@@ -791,6 +793,22 @@ class HomographyData(torch.utils.data.Dataset):
                         [self.keypoint_is_garbage, torch.ones(g_coords.size(0), dtype=torch.bool)]
                     )
                     print(f"Added {g_coords.size(0)} garbage keypoints ({take_sift} sift + {min(rem, rc.size(0))} random) across {self.images.size(0)} boards")
+
+        # Shuffle the keypoint order once, deterministically. Garbage is appended at
+        # the end, so without this a `shuffle=False` validation loader hands whole
+        # trailing batches of only-garbage keypoints to the metric — those contain no
+        # real positive pair and report a meaningless FPR of 0, dragging the average
+        # down. A keypoint's views stay contiguous (index = keypoint_i * views + j),
+        # so its views still land in the same batch and positives are preserved.
+        if shuffle_keypoints and self.keypoints.size(0) > 1:
+            generator = torch.Generator().manual_seed(int(shuffle_seed))
+            perm = torch.randperm(self.keypoints.size(0), generator=generator)
+            self.keypoints = self.keypoints[perm]
+            self.keypoint_coords = self.keypoint_coords[perm]
+            self.keypoint_scales = self.keypoint_scales[perm]
+            self.keypoint_coords_clean = self.keypoint_coords_clean[perm]
+            self.keypoint_scales_clean = self.keypoint_scales_clean[perm]
+            self.keypoint_is_garbage = self.keypoint_is_garbage[perm]
 
         avg_keypoints_per_image = self.keypoints.size(0) / len(self.images)
         print(f"{avg_keypoints_per_image=}")

@@ -79,6 +79,33 @@ background (preferred) topped up with random background points to hit an exact t
 the `max_keypoints` cap, and trimmed to `round(garbage_fraction · n_capped_blobs)`, so
 every split gets the same constant garbage set and stays the same size.
 
+## Keypoint order, and what FPR95 actually counts
+
+Two coupled details decide whether the reported FPR95 is meaningful. Both were bugs
+that made the metric read **better than reality**; expect reported FPR to rise now.
+
+**Keypoint order is shuffled once** (`shuffle_keypoints=True`, `shuffle_seed`). Garbage
+is appended to the end of the keypoint arrays and the validation loader runs
+`shuffle=False`, so without this the *trailing batches contained only garbage*. Garbage
+labels are all unique singletons, so such a batch has **no real positive pair** — its
+only positives were the diagonal self-pairs at distance 0, which trivially satisfy 95%
+recall ⇒ a meaningless `FPR = 0` that was then averaged in. The shuffle is a single
+deterministic `randperm` over the keypoint arrays, applied after the garbage block and
+**before** `compute_patches` (so the extracted patches match the new order). A
+keypoint's views stay contiguous (`index = keypoint_i * views + j`), so its views still
+land in the same batch and positives are preserved.
+
+**The distance matrix diagonal is excluded** (`fpr_from_features`, `aef/evaluate`).
+Pairing a patch with itself is a trivial positive at distance 0 that always ranks
+first. With `views=2` that made *half* of all "positives" free self-pairs, so the
+threshold was effectively set at ~90% real recall instead of 95%. `fpr_from_distances`
+now returns **NaN** when a batch has no positive pair at all (FPR@recall is undefined
+there) and the validation loop skips non-finite batches rather than averaging them in.
+
+Neither fix works alone: excluding the diagonal without shuffling leaves the tail
+batches with *zero* positives (still degenerate); shuffling without excluding the
+diagonal leaves the low bias in every batch.
+
 ## Scale bands and equal-sized splits (validation)
 
 The validation config reports FPR95 per blob-scale band. Splits share one pinned set of

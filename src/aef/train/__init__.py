@@ -334,10 +334,13 @@ def train_func(process_batch):
                         loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                         # Weighted total drives best.pth selection; with the
                         # small/large FPRs at weight 0 this tracks the overall FPR.
-                        cumulative_loss += loss.item() * batch_items
-                        n_items += batch_items
+                        # Non-finite batches (e.g. a batch with no positive pair, where
+                        # FPR@recall is undefined) are skipped rather than averaged in.
+                        if torch.isfinite(loss).all():
+                            cumulative_loss += loss.item() * batch_items
+                            n_items += batch_items
                         for n, (l, _, r) in losses.items():
-                            if r:
+                            if r and torch.isfinite(l).all():
                                 key = report_key(label, n)
                                 cumulative_losses[key] += l.item() * batch_items
                                 cumulative_items[key] += batch_items

@@ -20,15 +20,25 @@ import torch
 def fpr(**_):
     def fpr_from_features(features, labels, target_recall=0.95):
         lx, ly = torch.meshgrid(labels, labels, indexing="ij")
+        # Exclude the diagonal: pairing a patch with itself is a trivial positive at
+        # distance 0. Those always rank first, which inflates recall and biases the
+        # FPR low — and in a batch whose labels are all singletons (e.g. only
+        # background garbage) they are the *only* positives, which made such batches
+        # report a meaningless FPR of 0.
+        off_diagonal = ~torch.eye(labels.numel(), dtype=torch.bool, device=labels.device)
         return fpr_from_distances(
-            torch.cdist(features, features, p=2).view(-1),
-            (lx == ly).int().view(-1),
+            torch.cdist(features, features, p=2)[off_diagonal],
+            (lx == ly)[off_diagonal].int(),
             target_recall=target_recall
         )
     return fpr_from_features
 
 
 def fpr_from_distances(preds, labels, target_recall=0.95):
+    if labels.sum() == 0:
+        # No positive pairs -> FPR@recall is undefined. Report NaN rather than a
+        # misleading 0; the validation loop skips non-finite batches.
+        return torch.full((1,), float("nan"), device=preds.device)
     # Sort by descending confidence
     sorted_indices = torch.argsort(preds, dim=0)
     sorted_labels = labels[sorted_indices]
