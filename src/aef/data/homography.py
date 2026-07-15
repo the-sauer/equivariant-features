@@ -15,11 +15,14 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import functools
+import hashlib
+import json
 import math
 import os
 from typing import Iterable, Union
 
 import kornia
+import omegaconf
 import torch
 import torchvision
 from torchvision.transforms import v2
@@ -27,6 +30,38 @@ from tqdm import tqdm
 
 from ..train.detector import homogenize, linearize_homography
 from ..transforms.homography import sample_homography
+
+
+# Bump when a pipeline change makes previously written caches invalid.
+CACHE_VERSION = 1
+
+# Params that don't change a dataset's *contents* (so they must not split the cache).
+_CACHE_KEY_EXCLUDE = {
+    "data_dir", "cache_dir", "cache_path", "extraction_batch_size", "sift_batch_size",
+}
+
+
+def dataset_cache_key(params: dict) -> str:
+    """Stable short hash over the params that determine a dataset's contents.
+
+    OmegaConf nodes are resolved to plain containers so a config-driven run and a
+    hand-constructed one with the same values hit the same cache entry.
+    """
+    def _norm(v):
+        if isinstance(v, (omegaconf.DictConfig, omegaconf.ListConfig)):
+            return omegaconf.OmegaConf.to_container(v, resolve=True)
+        if isinstance(v, (list, tuple)):
+            return [_norm(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _norm(x) for k, x in v.items()}
+        return v
+
+    payload = {"__cache_version__": CACHE_VERSION}
+    payload.update(
+        {k: _norm(v) for k, v in params.items() if k not in _CACHE_KEY_EXCLUDE}
+    )
+    blob = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 def flip(f):
@@ -416,6 +451,7 @@ class HomographyData(torch.utils.data.Dataset):
         garbage_fraction=0.0,  # number of background distractor keypoints per board, as a fraction of that board's surviving blobs
         garbage_source="sift",  # "sift" (detect on the background) or "random" (uniform background points)
         background_seed=0,  # base RNG seed for placement/background choice/garbage; per-board seed derives from this + board index
+        cache_path=None,  # if set: load the prepared dataset from here when it exists, else build and save it
         **_,
     ):
         super().__init__()
@@ -448,6 +484,14 @@ class HomographyData(torch.utils.data.Dataset):
         else:
             self.augmentation = lambda x: x
         print(f"Augmentation: {self.augmentation}")
+
+        # Cache hit: restore the fully prepared dataset and skip the whole pipeline
+        # (board rendering, compositing, SIFT, garbage, patch extraction). `images`
+        # is ignored here — the caller (e.g. BlobBoardHomographyData) checks the cache
+        # before generating boards, so nothing expensive has run yet.
+        if cache_path is not None and os.path.exists(cache_path):
+            self._load_cache(cache_path)
+            return
 
         if isinstance(images, torch.Tensor):
             self.images = images
@@ -775,6 +819,60 @@ class HomographyData(torch.utils.data.Dataset):
         print(f"{avg_keypoints_per_image=}")
         self.extraction_batch_size = extraction_batch_size
         self.compute_patches()
+
+        if cache_path is not None:
+            self._save_cache(cache_path)
+
+    # Everything needed to reconstruct a prepared dataset without re-running the
+    # pipeline. `_board_masks` is deliberately omitted (only used while generating
+    # garbage) and `augmentation` is rebuilt from the constructor params.
+    _CACHE_TENSORS = (
+        "transforms", "transforms_inv",
+        "keypoints", "keypoint_coords", "keypoint_scales",
+        "keypoint_coords_clean", "keypoint_scales_clean", "keypoint_is_garbage",
+        "images", "images_clean", "precomputed_patches",
+    )
+    _CACHE_META = (
+        "size", "c", "in_memory", "patch_type", "patch_size", "patch_scale_factors",
+        "logpolar_inner_factor", "logpolar_outer_factor", "supersample",
+        "transform_params", "patches_available", "extraction_batch_size",
+    )
+
+    def _save_cache(self, path):
+        def _plain(v):
+            if isinstance(v, (omegaconf.DictConfig, omegaconf.ListConfig)):
+                return omegaconf.OmegaConf.to_container(v, resolve=True)
+            return v
+
+        state = {
+            "tensors": {k: getattr(self, k, None) for k in self._CACHE_TENSORS},
+            "meta": {k: _plain(getattr(self, k, None)) for k in self._CACHE_META},
+        }
+        # Write + atomic rename: concurrent jobs (e.g. a sweep) can never read a
+        # half-written cache. Two cold jobs may both build it; last one wins, which
+        # is wasteful but correct. Saving is best-effort — an unwritable cache dir
+        # must never take down a training run.
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = f"{path}.tmp.{os.getpid()}"
+            torch.save(state, tmp)
+            os.replace(tmp, path)
+            print(f"Cached prepared dataset -> {path}")
+        except OSError as e:
+            print(f"Could not write dataset cache to {path!r}: {e}")
+
+    def _load_cache(self, path):
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        for k, v in state["meta"].items():
+            setattr(self, k, v)
+        for k, v in state["tensors"].items():
+            setattr(self, k, v)
+        self._board_masks = None
+        n_g = int(self.keypoint_is_garbage.sum()) if self.keypoint_is_garbage is not None else 0
+        print(
+            f"Loaded cached dataset from {path} "
+            f"({self.keypoints.size(0)} keypoints, {n_g} garbage, len={len(self)})"
+        )
 
     def compute_patches(self):
         self.patches_available = False

@@ -24,7 +24,7 @@ import pint
 import torch
 import torchvision
 
-from .homography import HomographyData
+from .homography import HomographyData, dataset_cache_key
 
 
 _ureg = pint.UnitRegistry()
@@ -55,8 +55,25 @@ class BlobBoardHomographyData(HomographyData):
         polarity="dark",
         resolution=300,
         seeds=None,  # explicit board seeds; pins the board(s) so e.g. scale-split validation sets share one board
+        cache_dir=None,  # if set: reuse a prepared dataset from here, else build it and save it there
         **kwargs
     ):
+        # Check the cache *before* rendering any boards — board generation (Julia) is
+        # the slowest step, so the key must be derived from the params alone. Note the
+        # cache freezes this dataset's random draws (homographies, and unpinned board
+        # seeds / "random" polarity): a hit reuses the exact same data.
+        cache_path = None
+        if cache_dir is not None:
+            key = dataset_cache_key(dict(
+                cls=type(self).__name__, num_boards=num_boards, image_size=image_size,
+                blobboard_params=blobboard_params, suffix=suffix, polarity=polarity,
+                resolution=resolution, seeds=seeds, **kwargs,
+            ))
+            cache_path = os.path.join(cache_dir, f"blobboard_{key}.pt")
+            if os.path.exists(cache_path):
+                super().__init__(None, cache_path=cache_path, **kwargs)
+                return
+
         if blobboard_params is None:
             blobboard_params = {}
         if polarity == "dark":
@@ -141,6 +158,7 @@ class BlobBoardHomographyData(HomographyData):
             gt_keypoint_coords=blob_tensor[..., :2],
             gt_keypoint_scales=blob_tensor[..., 2],
             gt_keypoint_mask=blob_mask,
+            cache_path=cache_path,
             **kwargs
         )
 

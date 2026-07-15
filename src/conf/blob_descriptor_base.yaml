@@ -35,6 +35,12 @@ training:
       board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 0
+      # Reuse a prepared dataset (boards, composites, garbage, extracted patches)
+      # keyed by a hash of the params above. Runs that share a dataset — e.g. every
+      # model at the same `scale` — build it once. Saving is best-effort; set to null
+      # to disable. NOTE: a hit reuses the exact same random draw (homographies, and
+      # unpinned board seeds), so runs sharing a key see identical data.
+      cache_dir: /raid/data/hsa/datasets/homography_cache
       augmentation:
         color_jitter:
           brightness: 0.5
@@ -104,6 +110,7 @@ validation:
       board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 40
+      cache_dir: /raid/data/hsa/datasets/homography_cache   # see training.dataset.params.cache_dir
   datasets:
     - name: overall
       loss:
