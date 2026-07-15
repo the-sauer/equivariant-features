@@ -27,6 +27,7 @@ set -euo pipefail
 declare -A CONFIG=(
   [steerable]=blob_descriptor_steerable
   [logpolar]=blob_descriptor_logpolar
+  [logpolar_circ]=blob_descriptor_logpolar
   [efficient8]=blob_descriptor_efficient
   [efficient4]=blob_descriptor_efficient
 )
@@ -34,6 +35,7 @@ declare -A CONFIG=(
 declare -A SCALES=(
   [steerable]="32 64 96 128"
   [logpolar]="32 64 96 128"
+  [logpolar_circ]="32 64 96 128"
   [efficient8]="32 64 96 128"
   [efficient4]="32 64 96 128"
 )
@@ -48,6 +50,9 @@ SUPERSAMPLES=(1 2 4)
 declare -A NET_EXTRA=(
   [efficient8]="model.params.n_rotations=8"
   [efficient4]="model.params.n_rotations=4"
+  # log-polar-aware HardNet (circular angular padding + antialiased stride) vs the
+  # plain one; same config/dataset, so they share the prebuilt datasets.
+  [logpolar_circ]="model.name=HardNetLogPolar"
 )
 
 # ---- Dataset groups (drive the prebuild) ------------------------------------
@@ -61,6 +66,7 @@ declare -A NET_DATASET_GROUP=(
   [efficient8]=cartesian
   [efficient4]=cartesian
   [logpolar]=logpolar
+  [logpolar_circ]=logpolar
 )
 declare -A GROUP_CONFIG=(
   [cartesian]=blob_descriptor_steerable
@@ -88,6 +94,7 @@ PREBUILD_TIME="${PREBUILD_TIME:-4:00:00}"
 # Per-network memory override (falls back to $MEM). The light nets need less.
 declare -A NET_MEM=(
   [logpolar]=32GB
+  [logpolar_circ]=32GB
   [efficient8]=32GB
   [efficient4]=32GB
 )
@@ -98,6 +105,7 @@ declare -A NET_MEM=(
 declare -A NET_CPUS=(
   [steerable]=8
   [logpolar]=10
+  [logpolar_circ]=10
   [efficient8]=10
   [efficient4]=10
 )

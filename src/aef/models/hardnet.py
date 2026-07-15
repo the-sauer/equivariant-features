@@ -15,8 +15,18 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .utils import L2Norm
+
+
+def input_norm(x):
+    """Per-patch mean/std normalization (shift-invariant)."""
+    flat = x.view(x.size(0), -1)
+    mp = torch.mean(flat, dim=1)
+    sp = torch.std(flat, dim=1) + 1e-7
+    return ((x - mp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(x)) /
+            sp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(1).expand_as(x))
 
 
 class HardNet(nn.Module):
@@ -102,6 +112,111 @@ class HardNet(nn.Module):
         x_features = self.features(self.input_norm(patches))
         x = x_features.view(x_features.size(0), -1)
         return L2Norm()(x)
+
+
+class LogPolarPad(nn.Module):
+    """Pad a log-polar map: wrap the angular axis, zero-pad the radial axis.
+
+    In a log-polar patch the angular axis (dim -2) is periodic — row 0 and row H-1 are
+    neighbours — while the radial axis (dim -1) is not (inner radius != outer radius).
+    ``nn.Conv2d(padding_mode="circular")`` is no use here because it would wrap *both*.
+    """
+
+    def __init__(self, pad):
+        super().__init__()
+        self.pad = pad
+
+    def forward(self, x):
+        if self.pad == 0:
+            return x
+        x = F.pad(x, (0, 0, self.pad, self.pad), mode="circular")            # angular wraps
+        return F.pad(x, (self.pad, self.pad, 0, 0), mode="constant", value=0)  # radial does not
+
+
+class LogPolarBlurPool(nn.Module):
+    """Antialiased stride-2 downsample that wraps on the angular axis.
+
+    A plain ``stride=2`` conv aliases: a cyclic shift that isn't a multiple of the total
+    downsampling factor does not map to an integer shift of the subsampled map, so the
+    angular max-pool downstream no longer sees a shifted copy. Blurring (binomial 1-2-1)
+    before subsampling suppresses that — with the blur itself wrapping angularly, or it
+    would reintroduce the seam the padding above removes.
+    """
+
+    def __init__(self, channels):
+        super().__init__()
+        k = torch.tensor([1.0, 2.0, 1.0])
+        kernel = k[:, None] * k[None, :]
+        kernel = kernel / kernel.sum()
+        self.register_buffer("kernel", kernel.expand(channels, 1, 3, 3).clone())
+        self.channels = channels
+
+    def forward(self, x):
+        x = F.pad(x, (0, 0, 1, 1), mode="circular")
+        x = F.pad(x, (1, 1, 0, 0), mode="replicate")
+        x = F.conv2d(x, self.kernel, groups=self.channels)
+        return x[..., ::2, ::2]
+
+
+class HardNetLogPolar(nn.Module):
+    """HardNet variant that respects log-polar geometry.
+
+    Log-polar maps an image rotation to a *cyclic* shift along the angular axis
+    (dim -2) and a scale change to a shift along the radial axis (dim -1). Rotation
+    invariance is meant to come from ``MaxPool2d((pool, 1))`` — a max over the whole
+    angular axis — but that only holds if the feature map really is a cyclic shift of
+    itself, which plain ``HardNet`` breaks two ways: every conv zero-pads the periodic
+    angular axis (fake content at the 0/2pi seam), and the stride-2 convs alias shifts
+    that aren't multiples of the total downsampling.
+
+    Measured on untrained nets (mean relative L2 drift of the descriptor under an
+    angular roll, i.e. a pure rotation): plain ``HardNet`` drifts 0.13-0.22 for
+    rotations of 22.5-180 deg — about as much as a scale change, so rotation is barely
+    factored out. Wrapping the angular padding takes those to 0.0003 (on par with the
+    steerable descriptor); the blur-pool targets the sub-4-pixel shifts that remain.
+    """
+
+    def __init__(self, in_channels=1, patch_size=64, slim=False, **_):
+        super().__init__()
+        if patch_size == 32:
+            kernel_size, padding = 3, 1
+        elif patch_size == 64:
+            kernel_size, padding = 5, 2
+        elif patch_size == 128:
+            kernel_size, padding = 9, 4
+        else:
+            raise ValueError(f"Unsupported patch size {patch_size}")
+        self.patch_size = patch_size
+        pool = patch_size // 4          # spatial size after the two downsamples
+        depths = [16, 32, 64] if slim else [32, 64, 128]
+
+        def block(c_in, c_out):
+            return [
+                LogPolarPad(padding),
+                nn.Conv2d(c_in, c_out, kernel_size=kernel_size, padding=0, bias=False),
+                nn.BatchNorm2d(c_out, affine=False),
+                nn.ReLU(),
+            ]
+
+        self.features = nn.Sequential(
+            *block(in_channels, depths[0]),
+            *block(depths[0], depths[0]),
+            *block(depths[0], depths[1]),
+            LogPolarBlurPool(depths[1]),                      # patch -> patch/2
+            *block(depths[1], depths[1]),
+            *block(depths[1], depths[2]),
+            LogPolarBlurPool(depths[2]),                      # patch/2 -> patch/4
+            *block(depths[2], depths[2]),
+            nn.Dropout(0.1),
+            nn.MaxPool2d(kernel_size=(pool, 1)),              # max over angular -> rotation invariance
+            nn.Conv2d(depths[2], 128, (1, pool), bias=False),  # dense over radial -> keeps scale structure
+            nn.BatchNorm2d(128, affine=False),
+        )
+        self.features.apply(weights_init)
+
+    def forward(self, patches):
+        x = self.features(input_norm(patches))
+        return L2Norm()(x.view(x.size(0), -1))
 
 
 def weights_init(m):

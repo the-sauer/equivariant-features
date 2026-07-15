@@ -20,4 +20,4 @@ This module contains the implementations of the models used in this thesis.
 
 from .blob_canon import BlobCanonicalization
 from .blob_descriptor import *
-from .hardnet import HardNet
+from .hardnet import HardNet, HardNetLogPolar
