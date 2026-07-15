@@ -14,15 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import os
+
 import omegaconf
 
 try:
     from .blobboards import *
 except ImportError as e:
     print("Could not import blobboards dataset. Make sure to install the BlobBoards.jl python bindings and to have the Julia package installed. Error was:", e)
-from .colmap import *
-from .constant import *
-from .kaggle import *
 
 
 def get_dataset(dataset_cfg):

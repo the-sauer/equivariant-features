@@ -18,10 +18,6 @@
 This module contains the implementations of the models used in this thesis.
 """
 
-from .approach_one import AffineFeatureNetCanonicalOne, AffineFeatureNetOne
-from .approach_two import AffineFeatureNetCanonicalTwo
 from .blob_canon import BlobCanonicalization
 from .blob_descriptor import *
 from .hardnet import HardNet
-from .scale import NeuralScaleSpaceSESN
-from .unet import AffineEquivariantUNet

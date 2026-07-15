@@ -14,22 +14,23 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import logging
-
-import kornia
 import pytorch_metric_learning.losses as pml_losses
 import torch
-import torchvision
 
 from ...evaluate import fpr
 
 
 class Contrastive(torch.nn.Module):
+    """Metric-learning loss over already-extracted descriptor features.
+
+    Callers pass ``{"features": (N, D), "indices": (N,)}``; entries sharing an
+    index are positives (see ``process_batch_blobs`` / ``process_batch_canonicalize``).
+    """
+
     def __init__(
         self,
         contrastive_loss: str = "NPairsLoss",
         contrastive_loss_kwargs: dict = None,
-        patch_size: tuple[int, int] = (32, 32),
         **_
     ):
         super().__init__()
@@ -40,81 +41,9 @@ class Contrastive(torch.nn.Module):
                 self.contrastive_loss = getattr(pml_losses, contrastive_loss)(**(contrastive_loss_kwargs or {}))
             except AttributeError:
                 raise ValueError(f"Unsupported distance metric: {contrastive_loss}")
-        self.patch_size = patch_size
-        self.patch_scale = torch.diag(
-            torch.Tensor([patch_size[0], patch_size[1], 1]).to(torch.float32)
-        ).unsqueeze(0)
-        self.translation_to_patch_center = torch.Tensor([
-            [1, 0, 0.5],
-            [0, 1, 0.5],
-            [0, 0, 1]
-        ]).to(torch.float32).unsqueeze(0)
 
-    def forward(
-        self,
-        x
-    ) -> torch.Tensor:
-        if "features" in x and "indices" in x:
-            if x["features"] is None:
-                logging.warning("No features found in batch, returning zero loss.")
-                return torch.Tensor([0]).to(x["device"])
-            return self.contrastive_loss((x["features"]), x["indices"])
-
-        descriptor_model = x["descriptor_model"]
-        if "pred" in x and "target" in x:
-            patch_scale = self.patch_scale.to(pred[0].device)
-            patch_translation = self.translation_to_patch_center(pred[0])
-            pred = x["pred"]
-            target = x["target"]
-
-            assert pred[1].dim() == 4
-            assert target[1].dim() == 4
-            if (torch.linalg.det(pred[0]) > 1e-6).int().sum() < 0.01 * pred[0].size(0) * pred[0].size(1) or torch.any(torch.sum((torch.linalg.det(pred[0]) > 1e-6).int(), dim=1) == 0):
-                logging.warning("More than 99%% of predicted transforms are degenerate.")
-                # We will try to increase the determinants first
-                return torch.Tensor([0]).to(pred[0].device)
-            pred_transform, pred_image = pred
-            pred_transform = pred_transform[:, ::16, ::16].reshape(pred_transform.size(0), -1, 3, 3)
-            target_transform, target_image = target
-            target_transform = target_transform[:, ::16, ::16].reshape(target_transform.size(0), -1, 3, 3)
-            pred_transform_masks = [(torch.linalg.det(pred_transform[i]) > 1e-6)  & (torch.linalg.det(target_transform[i]) > 1e-6) for i in range(pred_transform.size(0))]
-            pred_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-                torchvision.transforms.functional.rgb_to_grayscale(pred_image[i]).unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
-                patch_scale @ torch.linalg.inv(pred_transform[i][pred_transform_masks[i]]),
-                dsize=self.patch_size
-            ) for i in range(pred[0].size(0))])
-            target_patch = torch.cat([kornia.geometry.transform.warp_perspective(
-                torchvision.transforms.functional.rgb_to_grayscale(target_image[i]).unsqueeze(0).expand(pred_transform_masks[i].int().sum(), -1, -1, -1),
-                patch_scale @ torch.linalg.inv(target_transform[i][pred_transform_masks[i]]),
-                dsize=self.patch_size
-            ) for i in range(target[0].size(0))])
-        else:
-            patch_scale = self.patch_scale.to(x["detections_1"][0].device)
-            patch_translation = self.translation_to_patch_center.to(x["detections_1"][0].device)
-
-            patches_1 = torch.cat([kornia.geometry.transform.warp_perspective(
-                torchvision.transforms.functional.rgb_to_grayscale(x["img_1"][i]).unsqueeze(0).expand(x["detections_1"][i].size(0), -1, -1, -1),
-                patch_scale @ patch_translation @ torch.linalg.inv(x["detections_1"][i]),
-                dsize=self.patch_size
-            ) for i in range(len(x["detections_1"]))])
-            patches_2 = torch.cat([kornia.geometry.transform.warp_perspective(
-                torchvision.transforms.functional.rgb_to_grayscale(x["img_2"][i]).unsqueeze(0).expand(x["detections_2"][i].size(0), -1, -1, -1),
-                patch_scale @ patch_translation @ torch.linalg.inv(x["detections_2"][i]),
-                dsize=self.patch_size
-            ) for i in range(len(x["detections_2"]))])
-
-            pred_patch = patches_1
-            target_patch = patches_2
-
-        features_pred = descriptor_model(pred_patch)[0]
-        features_target = descriptor_model(target_patch)[0]
-        features = torch.cat([features_pred, features_target], dim=0)
-
-        loss = self.contrastive_loss(
-            features,
-            torch.cat([torch.arange(features_pred.size(0)), torch.arange(features_target.size(0))], dim=0).to(features.device)
-        )
-        return loss
+    def forward(self, x) -> torch.Tensor:
+        return self.contrastive_loss(x["features"], x["indices"])
 
 
 class FPR95(Contrastive):

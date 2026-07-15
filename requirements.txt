@@ -6,7 +6,6 @@ kornia >= 0.8, < 1
 lie-learn >= 0.0.2, < 1
 matplotlib
 numpy
-pycolmap >= 4.0, < 5
 python-dotenv
 pytorch-metric-learning >= 1.2, < 2
 torch >= 2.11, < 3

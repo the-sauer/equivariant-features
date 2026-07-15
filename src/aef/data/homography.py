@@ -64,26 +64,12 @@ def dataset_cache_key(params: dict) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-def flip(f):
-    def flipped_f(y, x):
-        return f(x, y)
-
-    return flipped_f
-
-
 def curry(f):
     def function(x):
         def inner(y):
             return f(x, y)
 
         return inner
-
-    return function
-
-
-def uncurry(f):
-    def function(x, y):
-        return f(y)(x)
 
     return function
 
@@ -107,16 +93,6 @@ def find_images(
     )(os.walk(dir))
 
 
-def load_images(
-    dir, size, extensions=[".jpg", ".jpeg", ".JPG", ".JPEG", ".png"]
-) -> torch.Tensor:
-    resize = torchvision.transforms.Resize(size)
-    return fchain(
-        torch.stack,
-        list,
-        curry(map)(resize),
-        curry(map)(torchvision.io.decode_image),
-    )(find_images(dir, extensions))
 
 
 def resolve_background_dir(background, kaggle_slug):
@@ -412,7 +388,7 @@ def extract_logpolar_patches(
 
 
 class HomographyData(torch.utils.data.Dataset):
-    images: torch.Tensor | list[str]
+    images: torch.Tensor
     transforms: torch.Tensor
     transforms_inv: torch.Tensor
     size: tuple[int, int]
@@ -493,20 +469,8 @@ class HomographyData(torch.utils.data.Dataset):
             self._load_cache(cache_path)
             return
 
-        if isinstance(images, torch.Tensor):
-            self.images = images
-            self.c = self.images.size(1)
-        else:
-            if in_memory:
-                self.images = (
-                    load_images(images, size=image_size).to(torch.float32) / 255
-                )
-                self.c = self.images.size(1)
-                self.resize = torchvision.transforms.Identity()  # Keine weitere Größenänderung erforderlich
-            else:
-                self.images = list(find_images(images))
-                self.resize = torchvision.transforms.Resize(image_size)
-                self.c = torchvision.io.decode_image(self.images[0]).size(0)
+        self.images = images
+        self.c = self.images.size(1)
         self.transform_params = transform_params
         self.transforms = torch.stack(
             [
@@ -599,17 +563,7 @@ class HomographyData(torch.utils.data.Dataset):
                 else:
                     actual_sift_batch_size = sift_batch_size
 
-                if hasattr(self, "images"):
-                    img = self.images[i : i + actual_sift_batch_size].cuda()
-                else:
-                    img = torch.stack(
-                        [
-                            self.load_and_resize(p)
-                            for p in self.images[i : i + sift_batch_size]
-                        ],
-                        dim=0,
-                    ).cuda()
-                    img = augmentation(img)
+                img = self.images[i : i + actual_sift_batch_size].cuda()
                 if (
                     gt_keypoint_coords is not None
                     and gt_keypoint_scales is not None
@@ -1023,29 +977,6 @@ class HomographyData(torch.utils.data.Dataset):
             labels, m=m, batch_size=batch_size, length_before_new_iter=len(labels)
         )
 
-    def load_and_resize(self, img_path):
-        return (
-            self.resize(
-                torchvision.io.decode_image(img_path, torchvision.io.ImageReadMode.GRAY)
-            ).to(torch.float32)
-            / 255
-        )
-
-    def resample_homographies(self):
-        self.transforms = torch.stack(
-            [
-                torch.stack(
-                    [
-                        torch.Tensor(sample_homography(self.size, **self.transform_params))
-                        for _ in range(self.transforms_per_image)
-                    ]
-                )
-                for _ in range(len(self.images))
-            ]
-        )
-        self.transforms_inv = torch.linalg.inv(self.transforms)
-        self.compute_patches()
-
 
     def get_collate_func(self):
         def collate_homography(batch):
@@ -1076,14 +1007,7 @@ class HomographyData(torch.utils.data.Dataset):
                     # Identity (un-warped) view reads the clean board; warped views
                     # read the composite (== clean board when compositing is off).
                     source = self.images_clean if (img_id % views == self.transforms.size(1)) else self.images
-                    try:
-                        img = source[board]
-                    except TypeError:
-                        img = (
-                            self.load_and_resize(source[board])
-                            if not self.in_memory
-                            else source[board]
-                        )
+                    img = source[board]
                     if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
                         img = kornia.geometry.transform.warp_perspective(
                             img.unsqueeze(0).expand(-1, 3, -1, -1),

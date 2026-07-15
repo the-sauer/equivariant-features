@@ -22,14 +22,11 @@ from typing import Callable
 from matplotlib import pyplot as plt
 import omegaconf
 import torch
-from torchvision.transforms import v2
 from tqdm import tqdm
 
 from . import losses
 from .canonicalizer import *
 from .descriptor import *
-from .detector import *
-from .scale import *
 
 
 class chain:
@@ -53,7 +50,11 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     print(f"Preparing experiment \033[1m{experiment_name}\033[0m")
     if hasattr(cfg, "logging") and cfg.logging is not None:
         os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-        checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
+        # Defaults to <log_dir>/<experiment_name>/checkpoints; override with
+        # `logging.checkpoint_dir`.
+        checkpoint_dir = getattr(cfg.logging, "checkpoint_dir", None) or os.path.join(
+            cfg.logging.dir, experiment_name, "checkpoints"
+        )
         os.makedirs(checkpoint_dir, exist_ok=True)
         logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
         logging.basicConfig(filename=logfile, level=logging.DEBUG, force=True)
@@ -199,18 +200,10 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         for label, datasets, loss_cfgs in validation_dataset
     ]
 
-    if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
-        # TODO: Check for all innner augmentations
-        augmentation = v2.Compose([
-            v2.ColorJitter(**cfg.training.augmentation.color_jitter),
-            v2.GaussianBlur(
-                cfg.training.augmentation.gaussian_blur.kernel_size,
-                sigma=cfg.training.augmentation.gaussian_blur.sigma
-            ),
-            v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
-        ])
-    else:
-        augmentation = lambda x: x  # noqa: E731
+    # Augmentation is applied by the dataset (`training.dataset.params.augmentation`,
+    # see HomographyData.compute_patches), which is also the only place a config sets
+    # it — the process_batch functions ignore this argument.
+    augmentation = lambda x: x  # noqa: E731
 
     return model, optimizer, scheduler, criterion, validation_entries, train_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
 
@@ -365,7 +358,7 @@ def train_func(process_batch):
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()
 
-                if cfg.logging.model_checkpoints and cfg.checkpoint_dir is not None:
+                if cfg.logging.model_checkpoints and checkpoint_dir is not None:
                     average_loss = cumulative_loss / n_items
                     checkpoint = {
                         "epoch": epoch,
@@ -380,7 +373,11 @@ def train_func(process_batch):
                             "x": x
                         }
                     }
-                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+                    # `latest.pth` is always refreshed (resume point); per-epoch
+                    # snapshots are opt-in via `logging.checkpoint_every_epoch`.
+                    if getattr(cfg.logging, "checkpoint_every_epoch", False):
+                        torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, "latest.pth"))
                     if average_loss < best_loss:
                         best_loss = average_loss
                         torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))

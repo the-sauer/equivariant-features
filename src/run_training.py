@@ -56,7 +56,7 @@ def train(cfg) -> None:
     train_func(eval(cfg.training.process_batch))(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="scale")
+@hydra.main(version_base=None, config_path="conf")
 def main(cfg: Config):
     dotenv.load_dotenv()
     train(cfg)

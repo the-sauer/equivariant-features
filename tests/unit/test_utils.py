@@ -4,11 +4,7 @@ import pytest
 import torch
 
 from aef.evaluate import fpr, fpr_from_distances
-from aef.train.losses.geodesic_loss import GeodesicLoss
-from aef.train.losses.rel_scale_loss import RELScaleLoss
-from aef.train.losses.reprojection_loss import Reprojection
-from aef.train.detector import homogenize, linearize_homography
-from aef.train.scale import compute_scale
+from aef.geometry import homogenize, linearize_homography
 from aef.transforms.affine import random_affine
 
 
@@ -49,14 +45,6 @@ def test_random_affine_scales_around_image_center(monkeypatch):
     torch.testing.assert_close(matrix, expected)
 
 
-def test_compute_scale_returns_ones_for_identity_homography():
-    homography = torch.eye(3, dtype=torch.float32).unsqueeze(0)
-
-    scale = compute_scale(homography, (4, 5))
-
-    torch.testing.assert_close(scale, torch.ones(1, 1, 4, 5))
-
-
 def test_linearize_homography_identity_is_identity_jacobian():
     homography = torch.eye(3, dtype=torch.float32).unsqueeze(0)
 
@@ -64,55 +52,6 @@ def test_linearize_homography_identity_is_identity_jacobian():
 
     expected = torch.eye(2, dtype=torch.float32).view(1, 1, 1, 2, 2).expand(1, 3, 4, -1, -1)
     torch.testing.assert_close(jacobian, expected)
-
-
-def test_geodesic_loss_matches_right_angle_rotation():
-    identity = torch.eye(3, dtype=torch.float32).unsqueeze(0)
-    quarter_turn = torch.tensor(
-        [
-            [0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=torch.float32,
-    ).unsqueeze(0)
-
-    loss = GeodesicLoss(reduction="mean")(quarter_turn, identity)
-
-    assert loss.item() == pytest.approx(math.pi / 2, rel=1e-5)
-
-
-@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
-def test_homography_reprojection_loss_identity_is_zero(reduction):
-    identity = torch.eye(3, dtype=torch.float32).reshape(1, 1, 1, 3, 3)
-    loss = Reprojection(reduction=reduction, stride=1)({
-        "pred": identity,
-        "target": identity,
-        "H": identity,
-    })
-
-    if reduction == "none":
-        assert loss.shape == (1, 100)
-        torch.testing.assert_close(loss, torch.zeros_like(loss))
-    else:
-        assert loss.item() == pytest.approx(0.0, abs=1e-7)
-
-
-def test_homography_reprojection_loss_rejects_unknown_metric():
-    identity = torch.eye(3, dtype=torch.float32).reshape(1, 1, 1, 3, 3)
-
-    with pytest.raises(ValueError, match="Unsupported distance metric"):
-        Reprojection(distance_metric="cosine", stride=1)({
-            "pred": identity,
-            "target": identity,
-            "H": identity,
-        })
-
-
-def test_relative_scale_loss_matches_mean_absolute_relative_error():
-    loss = RELScaleLoss()(torch.tensor([2.0, 4.0]), torch.tensor([1.0, 2.0]))
-
-    assert loss.item() == pytest.approx(1.0)
 
 
 def test_fpr_is_zero_when_positive_scores_rank_first():

@@ -17,7 +17,7 @@
 import kornia
 import torch
 
-from .detector import homogenize
+from ..geometry import homogenize
 from .losses.blob import BlobLoss
 from .losses.contrastive import Contrastive
 

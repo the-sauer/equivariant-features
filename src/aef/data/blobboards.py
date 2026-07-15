@@ -24,7 +24,7 @@ import pint
 import torch
 import torchvision
 
-from .homography import HomographyData, dataset_cache_key
+from .homography import HomographyData, dataset_cache_key, effective_params
 
 
 _ureg = pint.UnitRegistry()
@@ -64,10 +64,16 @@ class BlobBoardHomographyData(HomographyData):
         # seeds / "random" polarity): a hit reuses the exact same data.
         cache_path = None
         if cache_dir is not None:
-            key = dataset_cache_key(dict(
-                cls=type(self).__name__, num_boards=num_boards, image_size=image_size,
-                blobboard_params=blobboard_params, suffix=suffix, polarity=polarity,
-                resolution=resolution, seeds=seeds, **kwargs,
+            # Hash the *effective* params (constructor defaults overlaid with what was
+            # actually passed), so params left at their default — patch_size,
+            # supersample, patch_type, the logpolar factors, ... — still key the cache.
+            key = dataset_cache_key(effective_params(
+                (HomographyData.__init__, BlobBoardHomographyData.__init__),
+                dict(
+                    cls=type(self).__name__, num_boards=num_boards, image_size=image_size,
+                    blobboard_params=blobboard_params, suffix=suffix, polarity=polarity,
+                    resolution=resolution, seeds=seeds, **kwargs,
+                ),
             ))
             cache_path = os.path.join(cache_dir, f"blobboard_{key}.pt")
             if os.path.exists(cache_path):
@@ -161,33 +167,3 @@ class BlobBoardHomographyData(HomographyData):
             cache_path=cache_path,
             **kwargs
         )
-
-
-class BlobBoardAbsoluteScaleData(torch.utils.data.Dataset):
-    def __init__(self, num_boards, blobboard_params=None, image_size=(128, 128), split="train", polarity="dark"):
-        super().__init__()
-        if blobboard_params is None:
-            blobboard_params = {}
-        if polarity == "dark":
-            polarities = ["dark"] * num_boards
-        elif polarity == "light":
-            polarities = ["light"] * num_boards
-        else:
-            assert polarity == "random", "Polarity must be 'dark', 'light', or 'random'."
-            polarities = [random.choice(["dark", "light"]) for _ in range(num_boards)]
-        boards = [
-            blobboards.blob_pattern(*image_size, seed=s, polarity=p, **blobboard_params)
-            for s, p in zip(get_seeds(num_boards, split=split), polarities)
-        ]
-        self.data = torch.stack([torch.Tensor(board.pattern).unsqueeze(0) for board in boards])
-        self.num_blobs = torch.Tensor([len(board.blobs) for board in boards]).to(torch.int32)
-        self.blobs = torch.empty(len(boards), torch.max(self.num_blobs).item(), 3, dtype=torch.float32)
-        for i, board in enumerate(boards):
-            self.blobs[i, :len(board.blobs)] = torch.Tensor(board.blobs)
-        self.c = self.data.size(1)
-
-    def __getitem__(self, index):
-        return self.data[index], self.blobs[index], self.num_blobs[index]
-
-    def __len__(self):
-        return self.data.shape[0]
