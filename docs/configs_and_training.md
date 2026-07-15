@@ -108,3 +108,24 @@ DRY_RUN=1 ./launch_training_matrix.sh …              # print jobs, submit noth
   `model.params.n_rotations=8|4`.
 - Each job encodes `<net>_s<scale>` in its job name and `experiment_name`, so
   `squeue`, logs, and output dirs stay distinct.
+
+### Dataset prebuild
+
+The launcher first submits a **prebuild job array** and gives every training job
+`--dependency=afterok:<array id>`, so they all start from a warm dataset cache. Without
+it, jobs launched together would each cold-build the same boards: the cache only turns
+warm *after* a build finishes, so concurrent cold jobs duplicate the whole
+render + composite + SIFT + extract cost.
+
+- **One array task per distinct dataset** (`src/prebuild_datasets.py` with
+  `+prebuild_target=train|<split>`), so they build in parallel rather than in sequence.
+- **Dataset groups** (`NET_DATASET_GROUP` → `GROUP_CONFIG`) collapse networks that share
+  a dataset block: the cache key covers dataset params but *not* the model, so
+  `steerable`/`efficient8`/`efficient4` are one `cartesian` group and their datasets are
+  built once. A model-comparison sweep therefore prebuilds `4 scales × 5 datasets = 20`
+  tasks rather than 12 jobs × 5 redundant builds. If a group mapping is wrong the only
+  cost is a cache miss (the training job rebuilds it) — never a wrong dataset.
+- Size it with `PREBUILD_MEM` / `PREBUILD_CPUS` / `PREBUILD_TIME`; the array is
+  unthrottled, so Slurm runs as many tasks as the cluster allows. It needs a GPU
+  (SIFT + patch extraction run on CUDA). `NO_PREBUILD=1` skips the whole thing.
+- `VAL_SPLITS` in the launcher must match the split names in `validation.datasets`.
