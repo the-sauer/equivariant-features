@@ -14,6 +14,62 @@ tensor index + collate. The FPR95/contrastive label is the keypoint's feature id
 (`keypoints[..., 1]`), shared across a keypoint's views → those form the positive
 pairs.
 
+## Shape normalization — and the mirror bug
+
+`blob_normalizations` (`homography.py`) SVD-whitens the local Jacobian of the view's
+homography and **drops the rotational factor `U`**, so an elliptical blob maps to an
+isotropic one and the residual difference between an anchor and its positive is a pure
+rotation (which the descriptor is supposed to handle). Both extractors use it.
+
+**The bug (fixed):** an SVD is only unique up to a *reflection pair*
+(`det(U) = det(Vh) = -1`), and with `perspective: false` the sampled warps are
+similarities — **100% of them have singular-value ratio 1.0000**, i.e. degenerate
+singular values, so the factorization is *fully* ambiguous. torch was returning
+`N = Σ@Vh ∝ diag(-1,1)` (a **reflection**, with no angle dependence) for warped views
+while the identity view got `N = I`. The positive patch therefore came out **mirrored**
+relative to its own anchor.
+
+Measured on log-polar pairs (mean residual after the best angular alignment):
+
+| | best roll | best roll of **flipped** anchor | verdict |
+|---|--:|--:|:--|
+| before | 0.880 | **0.711** | mirrored |
+| after (`det>0` forced) | **0.711** | 0.880 | not mirrored |
+
+The two numbers swap exactly. **This hurt log-polar most**: a mirror is an angular
+*flip*, and no roll — hence no angular max-pool — can undo it, so it silently defeated
+that architecture's only invariance mechanism (see
+[log-polar descriptor](logpolar_descriptor.md)). The steerable path barely moved
+(anchor↔positive descriptor distance 0.092 → 0.089), consistent with `NoStride` working
+well — though that comparison used untrained nets and is weak evidence either way.
+
+The fix negates a row of `Vh` when `det(Vh) < 0`: that flips both dets and leaves
+`U@Σ@Vh` unchanged, so whatever survives dropping `U` is a proper rotation.
+`CACHE_VERSION` was bumped to 3 — the cache key covers constructor params, **not** this
+code, so pre-fix caches would otherwise be reused silently.
+
+**The residual rotation this leaves is deliberate — keep it.** Downstream the detector
+yields blobs at arbitrary orientation, so the training pairs *should* exercise the
+rotation the descriptor has to absorb; that is what makes the task realistic. A polar
+decomposition (`P = Vhᵀ Σ Vh`) would be rotation-free by construction and would strip it,
+training the descriptor on a distribution the deployed detector never produces. Only the
+**reflection** was wrong: a real homography has `det > 0` and never mirrors, so the
+mirror was a pure SVD-sign artifact injecting a deformation the downstream task cannot
+generate — and one no rotation-invariant descriptor can absorb.
+
+### Measuring patches — two traps
+
+Both of these produced confidently wrong conclusions before being caught:
+
+- **Normalize before comparing patches.** Raw L2 between an anchor (clean board, white
+  surround) and its positive (warped, grey surround) is dominated by the global
+  intensity offset, making matched pairs look no better than random ones. The networks
+  never see it (`HardNet.input_norm`), so neither should the metric.
+- **Seed numpy when comparing builds.** `sample_homography` uses an *unseeded* numpy
+  RNG, so every dataset construction draws different warps. Comparing two builds without
+  `np.random.seed(...)` compares two different random rotations, not the thing you
+  changed.
+
 ## `in_memory` is task-specific, not a free toggle
 
 `in_memory` decides *what a batch contains*, and the two `process_batch` functions

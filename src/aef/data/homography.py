@@ -33,8 +33,10 @@ from ..geometry import homogenize, linearize_homography
 from ..transforms.homography import sample_homography
 
 
-# Bump when a pipeline change makes previously written caches invalid.
-CACHE_VERSION = 2
+# Bump when a pipeline change makes previously written caches invalid. The key covers
+# constructor params, not this module's code, so an algorithm change needs a bump here.
+#   3: blob_normalizations forces a proper (det>0) factor — patch content changed.
+CACHE_VERSION = 3
 
 # Params that don't change a dataset's *contents* (so they must not split the cache).
 # Everything else a constructor accepts is hashed — including params left at their
@@ -246,6 +248,22 @@ def blob_normalizations(homographies, coords, device):
         )
     )
     _, S, Vh = torch.linalg.svd(normalizations)
+    # Force a proper (det>0) factor. torch's SVD may return a reflection pair
+    # (det(U)=det(Vh)=-1) — the factorization is only unique up to that sign, and for an
+    # isotropic warp the singular values are degenerate so it is fully ambiguous. The
+    # warp itself has det>0, so whatever is left after dropping U must be a *rotation*;
+    # if Vh carries a reflection the patch comes out MIRRORED relative to the identity
+    # view, which no rotation (nor log-polar angular pooling) can undo. Negating a row
+    # of Vh flips both dets, leaving U@Σ@Vh unchanged.
+    #
+    # The residual *rotation* this leaves is intentional: the detector yields blobs at
+    # arbitrary orientation downstream, so the training pairs should exercise exactly
+    # that. Do not "fix" it with a polar decomposition (P = Vh^T Σ Vh) — that is
+    # rotation-free by construction and would train on a distribution the deployed
+    # detector never produces. Only the reflection was wrong.
+    Vh = Vh.clone()
+    flip = torch.linalg.det(Vh) < 0
+    Vh[flip, -1, :] = -Vh[flip, -1, :]
     Σ = torch.zeros((S.size(0), 2, 2), dtype=torch.float32, device=device)
     Σ[:, 0, 0] = S[..., 0]
     Σ[:, 1, 1] = S[..., 1]

@@ -96,6 +96,38 @@ Caveats:
   invariance (the steerable reference reads 0.0001 untrained). Training cannot make the
   old architecture invariant; it can only spend capacity compensating for the seam.
 
+## The angular pooling: independent vs "locked"
+
+`MaxPool2d((pool, 1))` pools **each column independently** — every one of the 128
+channels × `pool` radial columns picks its own angle. A natural idea is to *lock* the
+pooling: choose one angular offset and read every column at it.
+
+Worth being precise about what that would buy, because it is **not** invariance:
+independent max-pooling is *already* exactly rotation-invariant (max over a cyclically
+shifted vector is unchanged — measured 0.0002). What locking buys is
+**discriminativeness**: independent pooling discards *which* angle each column peaked
+at, destroying the angular relationship between radii, so structurally different blobs
+can collapse to the same descriptor. The cost is rigidity — locking assumes one global
+rotation explains the whole patch, which fails under deformations that are not a pure
+rotation (perspective, anisotropy).
+
+**It is premature until the mirror is gone.** Positives were reaching the head
+*mirrored* (see [data pipeline → shape normalization](data_pipeline.md#shape-normalization--and-the-mirror-bug)),
+and a mirror is an angular *flip* that no angular pool — locked or not — can undo. With
+that fixed and `perspective: false` (warps are pure similarities), the residual really
+is a clean rotation, which is the regime where locking, or dropping the angular pool
+entirely, should pay off. Re-measure before investing.
+
+## `outer_factor` interacts with the blob scale
+
+The patch reaches `logpolar_outer_factor × σ`, in units of the blob's own scale. With
+`max_diameter_fraction: 0.4` a large blob at 16σ already extends several board-widths
+out (mostly fill), while a small blob at 16σ sees a sensible neighbourhood — so **no
+single `outer_factor` suits every blob**, and the scale bands span exactly that range.
+The sweep drives `scale` → `logpolar_outer_factor` ∈ {32, 64, 96, 128}, all well above
+the original default of 16; with transforms held fixed the matched-vs-random separation
+degrades gently as it grows (best ≈ 8–16). Treat large values with suspicion.
+
 ## Comparing them
 
 The baseline config keeps `name: HardNet`. The launcher adds a `logpolar_circ` entry that
