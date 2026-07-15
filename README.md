@@ -24,6 +24,27 @@ You can now run a training with
 python src/run_training.py --config-name (scale|detector|descriptor)
 ```
 
+For the blob-descriptor configs, one training run is
+```sh
+python src/run_training.py --config-name blob_descriptor_steerable scale=64
+```
+and a whole matrix of runs (one Slurm job per network × scale) is submitted with
+```sh
+./launch_training_matrix.sh -n my_sweep steerable efficient8 efficient4
+```
+
+## Documentation
+
+- [Blob-board data pipeline](docs/data_pipeline.md) — views/patches, background
+  compositing, garbage keypoints, the clean identity view, scale bands and equal-sized
+  validation splits.
+- [Configs, training & sweeps](docs/configs_and_training.md) — the base/leaf config
+  hierarchy, the single `scale` hyperparameter, `shared_params` + Hydra struct mode,
+  DataLoader workers, loss curves, and the matrix launcher.
+- [Steerable blob descriptors](docs/steerable_descriptors.md) — the `escnn` model
+  variants, why `NoStride` is heavy, and `BlobDescriptorEfficient` (design, benchmarks,
+  the equivariance trade-off).
+
 ## Gotchas
 
 If `juliacall` chooses an incompatible version for `BlobBoards.jl` (for example 1.11) set

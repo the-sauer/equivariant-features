@@ -225,3 +225,5 @@ outputs
 logs
 
 **/.DS_Store
+
+**/debug_imgs
