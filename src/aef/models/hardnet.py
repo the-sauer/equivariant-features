@@ -174,9 +174,13 @@ class HardNetLogPolar(nn.Module):
     rotations of 22.5-180 deg — about as much as a scale change, so rotation is barely
     factored out. Wrapping the angular padding takes those to 0.0003 (on par with the
     steerable descriptor); the blur-pool targets the sub-4-pixel shifts that remain.
+
+    The two fixes are separately toggleable (`circular_pad`, `antialias`) so they can be
+    ablated; turning both off reproduces the plain `HardNet` structure.
     """
 
-    def __init__(self, in_channels=1, patch_size=64, slim=False, **_):
+    def __init__(self, in_channels=1, patch_size=64, slim=False,
+                 circular_pad=True, antialias=True, **_):
         super().__init__()
         if patch_size == 32:
             kernel_size, padding = 3, 1
@@ -190,22 +194,28 @@ class HardNetLogPolar(nn.Module):
         pool = patch_size // 4          # spatial size after the two downsamples
         depths = [16, 32, 64] if slim else [32, 64, 128]
 
-        def block(c_in, c_out):
+        def block(c_in, c_out, stride=1):
+            pad = LogPolarPad(padding) if circular_pad else nn.ZeroPad2d(padding)
             return [
-                LogPolarPad(padding),
-                nn.Conv2d(c_in, c_out, kernel_size=kernel_size, padding=0, bias=False),
+                pad,
+                nn.Conv2d(c_in, c_out, kernel_size=kernel_size, stride=stride,
+                          padding=0, bias=False),
                 nn.BatchNorm2d(c_out, affine=False),
                 nn.ReLU(),
             ]
 
+        def down(c_in, c_out):
+            """Halve the resolution: blur-then-subsample, or a plain stride-2 conv."""
+            if antialias:
+                return [*block(c_in, c_out, stride=1), LogPolarBlurPool(c_out)]
+            return block(c_in, c_out, stride=2)
+
         self.features = nn.Sequential(
             *block(in_channels, depths[0]),
             *block(depths[0], depths[0]),
-            *block(depths[0], depths[1]),
-            LogPolarBlurPool(depths[1]),                      # patch -> patch/2
+            *down(depths[0], depths[1]),                      # patch -> patch/2
             *block(depths[1], depths[1]),
-            *block(depths[1], depths[2]),
-            LogPolarBlurPool(depths[2]),                      # patch/2 -> patch/4
+            *down(depths[1], depths[2]),                      # patch/2 -> patch/4
             *block(depths[2], depths[2]),
             nn.Dropout(0.1),
             nn.MaxPool2d(kernel_size=(pool, 1)),              # max over angular -> rotation invariance

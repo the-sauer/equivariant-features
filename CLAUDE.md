@@ -67,7 +67,7 @@ Patch extraction happens in module-level functions in `homography.py`:
 
 ### Models
 
-`src/aef/models/` holds the equivariant architectures: `blob_descriptor.py` (`BlobDescriptorNoStride`, `BlobDescriptorEfficient` + older `HardNet`/`Deep`/`Robust`/`Hierarchical` variants), `hardnet.py`, `blob_canon.py`. `asel/` is a **vendored** equivariant-conv library (affine steerable convs), integrated into the tree rather than pip-installed; it is a dependency of `BlobCanonicalization`. See `docs/steerable_descriptors.md`.
+`src/aef/models/` holds the equivariant architectures: `blob_descriptor.py` (`BlobDescriptorNoStride`, `BlobDescriptorEfficient` + older `HardNet`/`Deep`/`Robust`/`Hierarchical` variants), `hardnet.py` (`HardNet` and `HardNetLogPolar` — the log-polar-aware variant), `blob_canon.py`. `asel/` is a **vendored** equivariant-conv library (affine steerable convs), integrated into the tree rather than pip-installed; it is a dependency of `BlobCanonicalization`. See `docs/steerable_descriptors.md` (cartesian/steerable) and `docs/logpolar_descriptor.md` (log-polar; note plain `HardNet` is **not** rotation-invariant on log-polar patches).
 
 ## Notes
 
