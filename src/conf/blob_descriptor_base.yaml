@@ -42,17 +42,11 @@ training:
       # unpinned board seeds), so runs sharing a key see identical data.
       cache_dir: /raid/data/hsa/datasets/homography_cache
       augmentation:
-        color_jitter:
-          brightness: 0.5
-          contrast: 1
-          saturation: 1
+        color_jitter: {}
         gaussian_blur:
-          kernel_size: 31
-          sigma: 5.0
-        gaussian_noise:
-          mean: 0.0
-          sigma: 0.1
-  batch_size: 2048
+          kernel_size: [5, 5]
+        gaussian_noise: {}
+  batch_size: 4096
   optimizer:
     name: SGD
     params:
@@ -102,7 +96,6 @@ validation:
         max_diameter_fraction: 0.4
         min_scale: 0.2
         frame_width: 10
-      max_keypoints: 2400   # cap per split so overall/small/medium/large are the same size
       # Board-on-scene compositing + garbage distractors, pinned via background_seed
       # so the validation set is reproducible. Bands filter on raw intrinsic scales,
       # so a randomized placement scale does not muddy small/medium/large.
@@ -117,18 +110,21 @@ validation:
         - name: FPR95
     - name: small
       params:
+        max_keypoints: 2400   # cap per split so small/medium/large are the same size
         scale_quantile_range: [0.0, 0.33]   # lower third of blob scales
       loss:
         - name: FPR95
           weight: 0   # monitor only; does not affect best.pth
     - name: medium
       params:
+        max_keypoints: 2400   # cap per split so small/medium/large are the same size
         scale_quantile_range: [0.33, 0.66]   # middle third of blob scales
       loss:
         - name: FPR95
           weight: 0   # monitor only; does not affect best.pth
     - name: large
       params:
+        max_keypoints: 2400   # cap per split so small/medium/large are the same size
         scale_quantile_range: [0.66, 1.0]   # upper third of blob scales
       loss:
         - name: FPR95

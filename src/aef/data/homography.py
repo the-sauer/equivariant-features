@@ -468,7 +468,7 @@ class HomographyData(torch.utils.data.Dataset):
     def __init__(
         self,
         images: Union[str, torch.Tensor],
-        image_size: tuple[int, int] = (512, 512),
+        image_size: tuple[int, int] = (2000, 2000),
         in_memory=True,
         transform_params=None,
         transforms_per_image=1,
@@ -532,7 +532,7 @@ class HomographyData(torch.utils.data.Dataset):
                 v2.ColorJitter(**augmentation.color_jitter),
                 v2.GaussianBlur(
                     kernel_size=getattr(augmentation.gaussian_blur, 'kernel_size'),
-                    sigma=getattr(augmentation.gaussian_blur, 'sigma')
+                    # sigma=getattr(augmentation.gaussian_blur, 'sigma')
                 ),
                 v2.GaussianNoise(**augmentation.gaussian_noise),
             ])

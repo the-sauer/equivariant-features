@@ -17,8 +17,8 @@ model:
     in_channels: 1
 
 training:
-  batch_size: 1024
   # (inherits base num_workers: 8 — the light model is more data-bound than steerable)
+  batch_size: 2048
   dataset:
     params:
       patch_type: cartesian
