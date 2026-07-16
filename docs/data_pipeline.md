@@ -132,10 +132,12 @@ Both of these produced confidently wrong conclusions before being caught:
   surround) and its positive (warped, grey surround) is dominated by the global
   intensity offset, making matched pairs look no better than random ones. The networks
   never see it (`HardNet.input_norm`), so neither should the metric.
-- **Seed numpy when comparing builds.** `sample_homography` uses an *unseeded* numpy
-  RNG, so every dataset construction draws different warps. Comparing two builds without
-  `np.random.seed(...)` compares two different random rotations, not the thing you
-  changed.
+- **Set `homography_seed` when comparing builds.** By default `sample_homography` draws
+  from numpy's *global* RNG, so every dataset construction gets different warps and two
+  builds differ by a random rotation on top of whatever you changed. `homography_seed`
+  threads one `default_rng` through every draw, making the whole sequence a function of
+  the seed — with it fixed, two builds are bit-identical (verified: same transforms,
+  same extracted patches).
 
 ## `in_memory` is task-specific, not a free toggle
 
@@ -266,6 +268,13 @@ boards; each keeps a third of the **raw intrinsic** blob-scale distribution via
 `[0.66,1.0]`; `overall` keeps all). Filtering on *raw* scales (not the placement-scaled
 ones) keeps the bands clean even with a randomized placement scale.
 
+**The bands also share their warps** (`homography_seed: 40` in `shared_params`). Pinning
+`seeds` alone was not enough: each band builds its own dataset and so drew its *own*
+warps from the global RNG, meaning the bands differed by a random rotation on top of the
+scale filter they exist to isolate. With the seed fixed, every band sees the same warp of
+each board, so a gap between `small` and `large` is attributable to blob scale. Verified
+by construction: without the seed the bands' `transforms` differ; with it they are equal.
+
 - `max_keypoints` caps each split to a fixed count (deterministic subsample) **after**
   the band filter, so all four splits are exactly the same size (`overall` becomes a
   subsample of the full pool, not the literal union of the bands).
@@ -317,11 +326,15 @@ dataset to disk and reuses it on the next run.
   wasteful but correct. Saving is best-effort: an unwritable `cache_dir` warns and the
   run continues.
 
-**Caveat — a hit reuses the exact same random draw.** Homographies are sampled with an
-unseeded RNG, and board seeds (when `seeds` is unset) and `polarity: random` are random
-per run; the cache freezes whichever draw was written first. That is *desirable* for
-pinned validation sets and for controlled model comparisons, but it means repeats
-sharing a key see identical data. Clear the entry (or vary a keyed param) to force a
+**Caveat — a hit reuses the exact same random draw.** Unless `homography_seed` is set
+the warps are drawn from numpy's global RNG, and board seeds (when `seeds` is unset) and
+`polarity: random` are random per run; the cache freezes whichever draw was written
+first. That is *desirable* for pinned validation sets and for controlled model
+comparisons, but it means repeats sharing a key see identical data — and, more
+awkwardly, that the reproducibility is a property of the *cache file* rather than the
+config. Setting `homography_seed` moves it into the config, where a cache miss
+reproduces the same warps instead of silently drawing new ones. It is part of the key,
+so two seeds get separate entries. Clear the entry (or vary a keyed param) to force a
 fresh draw. Since patches are pre-extracted once per run and never recomputed
 (there is no re-sampling of homographies mid-run), caching is semantically identical *within* a run.
 

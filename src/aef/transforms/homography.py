@@ -44,6 +44,7 @@ def sample_homography(
         translation_overflow: float = 0.0,
         fit_to_frame: bool = False,
         min_fit_scale: float = 0.0,
+        rng=None,
 ) -> torch.Tensor:
     """Sample a random valid homography.
 
@@ -77,14 +78,22 @@ def sample_homography(
             since even the worst-case fit still covers ~24% of the frame. Set >0 to floor the
             shrink at the cost of re-introducing minor clipping for extreme transforms. Only
             used when ``fit_to_frame`` is True.
+        rng: A numpy ``Generator`` to draw from, or None for numpy's global RNG (the
+            historical behaviour — a different draw on every call, unreproducible).
+            Thread *one* generator across calls rather than passing a fresh
+            ``default_rng(seed)`` each time: the stream must advance, or every view of
+            every board gets the identical homography.
 
     Returns:
         An `array` of shape `(3,3)` corresponding to the homography.
     """
+    # Both the module and a Generator expose .normal/.uniform with these signatures.
+    rng = np.random if rng is None else rng
+
     def _truncated_normal(loc, scale, shape):
-        result = np.random.normal(loc, scale, shape)
+        result = rng.normal(loc, scale, shape)
         while any(result < loc - 2 * scale) or any(result > loc + 2 * scale):
-            result = np.random.normal(loc, scale, shape)
+            result = rng.normal(loc, scale, shape)
             logging.debug("Recalculated truncated normal")
         return result
     
@@ -126,7 +135,7 @@ def sample_homography(
             valid = np.arange(start=1, stop=n_scales + 1)  # all scales are valid except scale=1
         else:
             valid = np.where(np.all((scaled >= 0.0) & (scaled <= 1.0), axis=(1, 2)))[0]
-        idx = valid[int(np.random.uniform(low=0, high=valid.shape[0]))]
+        idx = valid[int(rng.uniform(low=0, high=valid.shape[0]))]
         pts2 = scaled[idx]
 
     # Random translation
@@ -137,8 +146,8 @@ def sample_homography(
             t_max += translation_overflow
         pts2 += np.expand_dims(
             np.stack([
-                np.random.uniform(low=-t_min[0], high=t_max[0]),
-                np.random.uniform(low=-t_min[1], high=t_max[1])
+                rng.uniform(low=-t_min[0], high=t_max[0]),
+                rng.uniform(low=-t_min[1], high=t_max[1])
             ]),
             axis=0,
         )
@@ -158,7 +167,7 @@ def sample_homography(
             valid = np.arange(1, n_angles + 1)  # all angles are valid, except angle=0
         else:
             valid = np.where(np.all((rotated >= 0.0) & (rotated <= 1.0), axis=(1, 2)))[0]
-        idx = valid[int(np.random.uniform(low=0, high=valid.shape[0]))]
+        idx = valid[int(rng.uniform(low=0, high=valid.shape[0]))]
         pts2 = rotated[idx]
 
     # Rescale to actual size

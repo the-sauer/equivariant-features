@@ -23,6 +23,7 @@ import os
 from typing import Iterable, Union
 
 import kornia
+import numpy as np
 import omegaconf
 import torch
 import torchvision
@@ -472,6 +473,8 @@ class HomographyData(torch.utils.data.Dataset):
         in_memory=True,
         transform_params=None,
         transforms_per_image=1,
+        homography_seed=None,  # seed the per-view warp draw; None = numpy's global RNG, i.e. a different draw every build
+
         augmentation=None,
         sift_batch_size=1000,
         sift_min_response_threshold=0.03,
@@ -549,13 +552,32 @@ class HomographyData(torch.utils.data.Dataset):
             return
 
         self.images = images
+        if tuple(self.images.shape[-2:]) != tuple(self.size):
+            # `image_size` is a claim about the rasters, not an instruction to resize
+            # them: the sampled warps, the placement similarity (which centres the board
+            # on the frame) and the collate's warp all build frames of this size and
+            # sample the raster as if it filled them. A mismatch misplaces the board
+            # silently rather than raising anywhere downstream.
+            raise ValueError(
+                f"image_size {tuple(self.size)} must equal the raster shape "
+                f"{tuple(self.images.shape[-2:])}"
+            )
         self.c = self.images.size(1)
         self.transform_params = transform_params
+        # One generator threaded across every call, not one per call: the stream has to
+        # advance or every board/view would get the identical warp.
+        homography_rng = (
+            None if homography_seed is None else np.random.default_rng(homography_seed)
+        )
         self.transforms = torch.stack(
             [
                 torch.stack(
                     [
-                        torch.Tensor(sample_homography(image_size, **transform_params))
+                        torch.Tensor(
+                            sample_homography(
+                                image_size, rng=homography_rng, **transform_params
+                            )
+                        )
                         for _ in range(transforms_per_image)
                     ]
                 )

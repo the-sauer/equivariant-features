@@ -96,6 +96,11 @@ validation:
         max_diameter_fraction: 0.4
         min_scale: 0.2
         frame_width: 10
+      # Pin the warps so every band sees the SAME warp of each (already pinned) board.
+      # Without it each band draws its own from numpy's global RNG, so the bands differ
+      # by a random rotation on top of the scale filter they are meant to isolate —
+      # which is exactly the confound that makes their FPR95 numbers incomparable.
+      homography_seed: 40
       # Board-on-scene compositing + garbage distractors, pinned via background_seed
       # so the validation set is reproducible. Bands filter on raw intrinsic scales,
       # so a randomized placement scale does not muddy small/medium/large.
