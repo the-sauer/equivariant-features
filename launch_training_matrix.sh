@@ -31,6 +31,22 @@ declare -A CONFIG=(
   [efficient8]=blob_descriptor_efficient
   [efficient4]=blob_descriptor_efficient
 )
+# Default submission order — SLOWEST LAST, and the only thing that defers the slow nets
+# on this cluster. PriorityType is multifactor but every PriorityWeight* is 0 (TRES
+# unset), so `site_factor + SUM(weight * factor)` is identical for every job and Slurm
+# falls back to its equal-priority tiebreak: job id. Submission order therefore *is* the
+# schedule.
+#
+# `--nice` does NOT work here, so don't reach for it: with a zero baseline the nice'd
+# priority is `0 - N`, which Slurm clamps back up (0 is reserved for held jobs). Measured
+# — two jobs differing only by `--nice=10000` both came back PENDING at priority 1.
+# It becomes a real lever only once some PriorityWeight* is non-zero.
+#
+# Bash associative arrays are UNORDERED, so the previous `${!CONFIG[@]}` was hash order —
+# steerable landed last by accident, and renaming or adding a network reshuffles it
+# silently. Must cover every CONFIG key (checked below).
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ steerable)
+
 # per-network scale values
 declare -A SCALES=(
   [steerable]="32 64 96 128"
@@ -133,7 +149,16 @@ while [[ $# -gt 0 ]]; do
     *)  NETS+=("$1"); shift ;;
   esac
 done
-[[ ${#NETS[@]} -eq 0 ]] && NETS=("${!CONFIG[@]}")
+# A CONFIG entry missing from NET_ORDER would silently vanish from the default matrix,
+# so fail loudly instead of quietly training four networks when you asked for five.
+for net in "${!CONFIG[@]}"; do
+  case " ${NET_ORDER[*]} " in
+    *" ${net} "*) ;;
+    *) echo "!! '${net}' is in CONFIG but not NET_ORDER — add it (slowest last)" >&2
+       exit 1 ;;
+  esac
+done
+[[ ${#NETS[@]} -eq 0 ]] && NETS=("${NET_ORDER[@]}")
 
 # Dated subfolder shared by every run in this matrix (empty -> no grouping).
 if [[ -n "$RUN_NAME" ]]; then
