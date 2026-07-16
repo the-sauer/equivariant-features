@@ -14,12 +14,18 @@ tensor index + collate. The FPR95/contrastive label is the keypoint's feature id
 (`keypoints[..., 1]`), shared across a keypoint's views → those form the positive
 pairs.
 
-## Shape normalization — and the mirror bug
+## Shape normalization — and three bugs
 
 `blob_normalizations` (`homography.py`) SVD-whitens the local Jacobian of the view's
 homography and **drops the rotational factor `U`**, so an elliptical blob maps to an
 isotropic one and the residual difference between an anchor and its positive is a pure
 rotation (which the descriptor is supposed to handle). Both extractors use it.
+
+This one function has now produced three separate bugs — the mirror below, plus a
+double scale correction and a mis-evaluated Jacobian. All three shared a signature:
+patches that *looked* plausible in isolation but did not match their own anchor.
+
+### The mirror bug
 
 **The bug (fixed):** an SVD is only unique up to a *reflection pair*
 (`det(U) = det(Vh) = -1`), and with `perspective: false` the sampled warps are
@@ -56,6 +62,67 @@ training the descriptor on a distribution the deployed detector never produces. 
 **reflection** was wrong: a real homography has `det > 0` and never mirrors, so the
 mirror was a pure SVD-sign artifact injecting a deformation the downstream task cannot
 generate — and one no rotation-invariant descriptor can absorb.
+
+### The double scale correction
+
+**The bug (fixed):** `blob_normalizations` returned `Σ@Vh = Uᵀ inv(J)`, which removes
+the Jacobian's **size** as well as its shape. The extractors then divide by the
+keypoint's `scales`, which *already* carries the warp's `sqrt(det J)` — so the size came
+out twice. The identity view (`J = I`) was unaffected, so every warped view disagreed
+with its own anchor by a factor `1/sqrt(det J)`.
+
+Measured on a pure-zoom homography (apparent radius of the anchor blob inside a
+cartesian patch; the model's own centre-mask formula expects a constant 2.0 px):
+
+| zoom | 1.0 | 0.8 | 0.6 | 0.5 | 0.4 | 0.3 |
+|---|--:|--:|--:|--:|--:|--:|
+| before | 2.03 | 2.52 | 3.24 | 3.99 | 5.01 | 6.63 |
+| after | 2.03 | 2.03 | 2.03 | 2.03 | 2.03 | 2.03 |
+
+**This hurt log-polar worst — again.** A radial zoom is a *rigid horizontal shift* on a
+log-spaced radial axis: `log(1/sqrt(det J)) · 30.8` px ≈ **18 of 64 px** at a typical
+warp. The fix normalizes the factor to `det == 1` — shape and orientation only, size
+left to `scales`, which is the only place it belongs.
+
+### The Jacobian evaluated at the wrong point
+
+**The bug (fixed):** `linearize_homography(H, coords)` differentiates `H` at a point of
+its **domain**. Both `blob_normalizations` and `__getitem__`'s `scale_factor` passed the
+*warped* coords — and `__getitem__` passed the un-normalized homogeneous vector, whose
+overall scale the formula is not even invariant to. Measured error on a sampled
+homography: up to **2.25×** in `sqrt(det J)`. It is invisible for affine warps and only
+bites because `perspective_amplitude` is non-zero.
+
+`blob_normalizations` wants `inv(J_H(p))` at the source point `p`, which by the chain
+rule *is* the Jacobian of the inverse homography at the warped point — so it now
+linearizes `inv(homographies)` at `coords`, fixing the evaluation point and removing a
+`torch.linalg.inv` at once. `__getitem__` linearizes at the source coords.
+
+### What the two fixes were worth
+
+Each anchor vs its own positive and vs the hardest *other* same-scale blob on the same
+board (348 anchors, best NCC over rotations; margin = pos − hard-neg):
+
+| σ_w | before: pos / margin / separable | after: pos / margin / separable |
+|---|--:|--:|
+| [0.8, 1.0) | 0.166 / **−0.013** / **47%** | 0.987 / 0.310 / **100%** |
+| [1.0, 1.5) | 0.875 / 0.138 / 70% | 0.993 / 0.322 / **100%** |
+| [2.0, 3.0) | 0.822 / 0.189 / 73% | 0.989 / 0.371 / **100%** |
+| [5, 10) | 0.673 / 0.173 / 71% | 0.985 / 0.476 / **100%** |
+| [20, ∞) | 0.213 / 0.075 / 79% | 0.654 / 0.478 / **100%** |
+
+At σ_w ≈ 0.9 the pre-fix pipeline was **worse than chance**: a blob's true positive
+resembled it *less* than a random other blob did. Those were the pairs SupCon was being
+asked to pull together. On a single min-scale log-polar pair the anchor↔positive NCC
+went **0.179 → 0.782** (det-1 alone) → **0.989** (both fixes).
+
+`CACHE_VERSION` was bumped to **4**. The invariant is pinned by
+`tests/unit/test_blob_normalizations.py`: `N @ J_H(p)` must be exactly `sqrt(det J)`
+times a rotation — one assertion that catches both bugs (verified to fail on the old
+code, not assumed to).
+
+See [scale budget and jitter](scale_budget_and_jitter.md) for what this implies about
+blob size, and note that **any patch measurement taken before these fixes is void**.
 
 ### Measuring patches — two traps
 
@@ -113,6 +180,15 @@ normalization (which assumes isotropy) stays valid — a general affine would si
 break it. Placement + coord/scale transform + lighting live in
 `sample_placement_similarity` / `composite_board` (`homography.py`).
 
+**Backgrounds are resized to cover + centre-crop, not stretched.** `load_background`
+used to pass a 2-element size to `torchvision.resize`, which honours it exactly and so
+squashed a landscape photo onto the square canvas. Backgrounds are what the garbage
+keypoints — the dataset's pure negatives — are detected on, so distorting their image
+statistics makes those negatives unrepresentative. Note the scene is always resized to
+the canvas: source photos **below** the frame resolution get upsampled, making the
+negatives artificially easy. At 300 dpi (1772 px canvas) a ≥2000 px source downsamples
+cleanly; this is one more reason not to raise the camera dpi.
+
 ## The identity (reference) view stays clean
 
 The un-warped identity view is the canonical *reference* patch: it gets **no
@@ -123,6 +199,26 @@ identity branch of `__getitem__`/the collate, and an augmentation gate in
 `compute_patches` (`img_id % views == views-1` → no aug). When `background` is unset
 the `_clean` arrays alias the mains, so only the (always-on) augmentation gate differs
 from plain-white boards.
+
+It also gets **no jitter** (below). Both views read rasters rendered at the same
+`resolution` — note that `resolution` selects *which board you get*, not just how
+finely it is sampled (see
+[scale budget and jitter](scale_budget_and_jitter.md#resolution-picks-the-board-not-just-its-sampling)).
+
+## Simulated detector error (jitter)
+
+Coords and scales come from exact Julia GT, but at inference they come from a detector
+that misses them. `keypoint_jitter` (std, **in px** of the warped frame) and
+`scale_jitter` (log-normal relative std) perturb the **warped views only**;
+`jitter_seed` varies the draw, which is keyed on the flat index and therefore fixed per
+(keypoint, view) — with `in_memory: true` the patch is extracted once, so this perturbs
+the training pair rather than resampling per epoch.
+
+Both default to `0.0` (off). The measured detector error is ~1.0 px and ~±5%; scale
+error is *far* more damaging than position error, and over-jittering costs real
+discriminative power — see
+[scale budget and jitter](scale_budget_and_jitter.md#jitter) before raising either.
+`tests/unit/test_jitter.py` pins that the identity view is never jittered.
 
 ## Background "garbage" keypoints
 
@@ -200,7 +296,14 @@ dataset to disk and reuses it on the next run.
   `data_dir`, `cache_dir`, `extraction_batch_size` and `sift_batch_size` are excluded —
   they don't change the data.
   The *algorithm* is not hashed: if you change the compositing/garbage code itself,
-  bump `CACHE_VERSION` (in `homography.py`) by hand.
+  bump `CACHE_VERSION` (in `homography.py`) by hand. Currently **4** (3 → 4: the scale
+  normalization fixes, which change the patch footprint of every warped view).
+- **A new named param must be added to the key by hand.** `effective_params` sees the
+  constructor defaults, but `BlobBoardHomographyData` builds its key dict from an
+  explicit list plus `**kwargs` — so a param declared in its *signature* is not in
+  `kwargs`, and would silently key at its default and reuse a stale cache. Add it next
+  to `resolution`. (Params that ride through `**kwargs`, like the jitter settings, are
+  keyed automatically.)
 - **Checked before board generation**: `BlobBoardHomographyData` derives the key from
   its params and, on a hit, skips rendering entirely (the slowest step) — so the check
   cannot live in `HomographyData` alone.

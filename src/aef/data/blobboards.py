@@ -53,7 +53,7 @@ class BlobBoardHomographyData(HomographyData):
         blobboard_params=None,
         suffix="train",
         polarity="dark",
-        resolution=300,
+        resolution=300,  # print density; also fixes the frame size — and the board's blob layout (see below)
         seeds=None,  # explicit board seeds; pins the board(s) so e.g. scale-split validation sets share one board
         cache_dir=None,  # if set: reuse a prepared dataset from here, else build it and save it there
         **kwargs
@@ -92,6 +92,11 @@ class BlobBoardHomographyData(HomographyData):
         kwargs.setdefault("in_memory", False)
         if not isinstance(blobboard_params, dict):
             blobboard_params = omegaconf.OmegaConf.to_container(blobboard_params, resolve=True)
+        else:
+            # Copy: the unit attachment below is not idempotent, so mutating the
+            # caller's dict makes a second dataset built from the same params dict
+            # re-multiply board_size by mm and fail in the Julia bridge.
+            blobboard_params = dict(blobboard_params)
         if "board_size" in blobboard_params:
             blobboard_params["board_size"] = (
                 blobboard_params["board_size"][0] * _ureg.mm,
@@ -113,6 +118,11 @@ class BlobBoardHomographyData(HomographyData):
             board_seeds = board_seeds[:num_boards]
         else:
             board_seeds = get_seeds(num_boards, split=suffix)
+        # `resolution` is not just a sampling density: the packer snaps blob centres to
+        # pixel centres and collides against grid-snapped boxes, so its layout is a
+        # function of the pixel grid. The same seed at 300 vs 600 dpi yields a
+        # *different board* (1189 vs 1202 blobs, unrelated layouts) — changing it gives
+        # a new draw, not a finer rendering of the same one.
         boards = []
         for s, p in zip(board_seeds, polarity):
             board = blobboards.blob_board(

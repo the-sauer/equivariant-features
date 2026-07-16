@@ -36,7 +36,10 @@ from ..transforms.homography import sample_homography
 # Bump when a pipeline change makes previously written caches invalid. The key covers
 # constructor params, not this module's code, so an algorithm change needs a bump here.
 #   3: blob_normalizations forces a proper (det>0) factor — patch content changed.
-CACHE_VERSION = 3
+#   4: scale normalization fixed — blob_normalizations is now det-1 (size is left to
+#      `scales`, which no longer double-corrects) and every Jacobian is evaluated at
+#      the source point. Both change the patch footprint of every warped view.
+CACHE_VERSION = 4
 
 # Params that don't change a dataset's *contents* (so they must not split the cache).
 # Everything else a constructor accepts is hashed — including params left at their
@@ -144,9 +147,23 @@ def resolve_background_dir(background, kaggle_slug):
 
 def load_background(path, size):
     """Decode one background image as a single grayscale channel in ``[0, 1]``,
-    resized to ``size`` (H, W)."""
+    covering ``size`` (H, W) at its original aspect ratio.
+
+    Resize-to-fit-the-short-side then centre crop, rather than resizing straight to
+    ``size``: the latter takes a 2-element size, which torchvision honours exactly,
+    stretching a landscape photo onto a square canvas. Backgrounds are what the
+    garbage keypoints are detected on — they are the dataset's pure negatives — so
+    distorting their image statistics makes those negatives unrepresentative.
+    """
     img = torchvision.io.decode_image(path, torchvision.io.ImageReadMode.GRAY)
-    img = torchvision.transforms.functional.resize(img, list(size))
+    h, w = img.shape[-2:]
+    target_h, target_w = int(size[0]), int(size[1])
+    # Scale so both axes cover the target, then trim the overhang.
+    scale = max(target_h / h, target_w / w)
+    img = torchvision.transforms.functional.resize(
+        img, [max(target_h, int(round(h * scale))), max(target_w, int(round(w * scale)))]
+    )
+    img = torchvision.transforms.functional.center_crop(img, [target_h, target_w])
     return img.to(torch.float32) / 255.0
 
 
@@ -232,20 +249,31 @@ def composite_board(board, background, A, size, lighting=True, shading_strength=
 
 
 def blob_normalizations(homographies, coords, device):
-    """Affine shape normalization for each keypoint.
+    """Affine *shape* normalization for each keypoint.
 
-    Whitens the local Jacobian of ``homographies`` at ``coords`` (dropping the
-    rotational part via SVD) so that the elliptical blob maps to an isotropic
-    one. Shared by the cartesian and log-polar patch extractors.
+    Whitens the local Jacobian of ``homographies`` (dropping the rotational part
+    via SVD) so that the elliptical blob maps to an isotropic one. Shared by the
+    cartesian and log-polar patch extractors.
+
+    ``coords`` are the keypoint's coordinates in the *warped* frame — the codomain
+    of ``homographies``. ``linearize_homography`` differentiates at a point of its
+    map's *domain*, so it must never be handed ``coords`` together with
+    ``homographies``. What is wanted, ``inv(J_H(p))`` at the source point ``p``, is
+    by the chain rule the Jacobian of the inverse homography at the warped point —
+    hence linearizing ``inv(homographies)`` here. These coincide only for a purely
+    affine warp.
+
+    The factor is normalized to ``det == 1``: shape and orientation only, never
+    size. ``scales`` already carries the warp's ``sqrt(det J)`` and the extractors
+    divide by it, so a factor that also removed the size would remove it twice and
+    leave the same blob at a view-dependent size in its patch.
     """
-    normalizations = torch.linalg.inv(
-        linearize_homography(
-            homographies,
-            coords=torch.cat(
-                [coords, torch.ones((1, 1)).expand(coords.size(0), 1).to(device)],
-                dim=-1,
-            ),
-        )
+    normalizations = linearize_homography(
+        torch.linalg.inv(homographies),
+        coords=torch.cat(
+            [coords, torch.ones((1, 1)).expand(coords.size(0), 1).to(device)],
+            dim=-1,
+        ),
     )
     _, S, Vh = torch.linalg.svd(normalizations)
     # Force a proper (det>0) factor. torch's SVD may return a reflection pair
@@ -267,7 +295,9 @@ def blob_normalizations(homographies, coords, device):
     Σ = torch.zeros((S.size(0), 2, 2), dtype=torch.float32, device=device)
     Σ[:, 0, 0] = S[..., 0]
     Σ[:, 1, 1] = S[..., 1]
-    return Σ @ Vh
+    normalization = Σ @ Vh
+    # Shape only — hand the size back to `scales` (see the docstring).
+    return normalization / torch.linalg.det(normalization).abs().sqrt().view(-1, 1, 1)
 
 
 def extract_multiscale_patches(
@@ -470,6 +500,9 @@ class HomographyData(torch.utils.data.Dataset):
         background_seed=0,  # base RNG seed for placement/background choice/garbage; per-board seed derives from this + board index
         shuffle_keypoints=True,  # shuffle keypoint order once so appended garbage isn't clustered in the last batches
         shuffle_seed=0,  # RNG seed for that shuffle; fixed so a split's batch composition is stable across runs
+        keypoint_jitter=0.0,  # std of the simulated detector position error, in px of the warped frame
+        scale_jitter=0.0,  # std of the simulated detector scale error, log-normal relative (0.05 = +/-5%)
+        jitter_seed=0,  # RNG seed for the jitter; per-view draw derives from this + the flat index
         cache_path=None,  # if set: load the prepared dataset from here when it exists, else build and save it
         **_,
     ):
@@ -488,6 +521,9 @@ class HomographyData(torch.utils.data.Dataset):
         self.logpolar_inner_factor = logpolar_inner_factor
         self.logpolar_outer_factor = logpolar_outer_factor
         self.supersample = supersample
+        self.keypoint_jitter = float(keypoint_jitter)
+        self.scale_jitter = float(scale_jitter)
+        self.jitter_seed = int(jitter_seed)
         self.precomputed_patches = None  # Platzhalter für RAM-Modus
 
         if augmentation is not None:
@@ -849,6 +885,9 @@ class HomographyData(torch.utils.data.Dataset):
         "size", "c", "in_memory", "patch_type", "patch_size", "patch_scale_factors",
         "logpolar_inner_factor", "logpolar_outer_factor", "supersample",
         "transform_params", "patches_available", "extraction_batch_size",
+        # __getitem__ reads these on every access, including after a cache load
+        # (which returns from __init__ before they would otherwise be set).
+        "keypoint_jitter", "scale_jitter", "jitter_seed",
     )
 
     def _save_cache(self, path):
@@ -926,8 +965,6 @@ class HomographyData(torch.utils.data.Dataset):
                     imgs_tensor = torch.stack(
                         [images[img_id] for img_id in img_ids], dim=0
                     ).cuda()
-                    # for i, img in enumerate(images.values()):
-                    #     torchvision.utils.save_image(img, f"./debug_imgs/img_{i}.png")
 
                     if self.patch_type == "logpolar":
                         patches = extract_logpolar_patches(
@@ -970,14 +1007,17 @@ class HomographyData(torch.utils.data.Dataset):
             base_scale = self.keypoint_scales_clean[keypoint_i]
             scale_factor = torch.tensor(1.0)
         else:
-            keypoint_coords = self.transforms[homography_i, homography_j] @ torch.cat(
+            transform = self.transforms[homography_i, homography_j]
+            source_coords = torch.cat(
                 [self.keypoint_coords[keypoint_i], torch.ones((1,))], dim=-1
-            ).unsqueeze(-1)
+            )
+            keypoint_coords = transform @ source_coords.unsqueeze(-1)
+            # Linearize at the source point: `transform`'s domain is the composite
+            # frame. Its warped image is the wrong point, and the un-normalized
+            # homogeneous form doubly so — linearize_homography is not invariant to
+            # that vector's overall scale.
             scale_factor = (
-                linearize_homography(
-                    self.transforms[homography_i, homography_j].unsqueeze(0),
-                    coords=keypoint_coords.view(1, 1, 1, 3),
-                )
+                linearize_homography(transform.unsqueeze(0), coords=source_coords.view(1, 3))
                 .view(2, 2)
                 .det()
                 .abs()
@@ -985,6 +1025,33 @@ class HomographyData(torch.utils.data.Dataset):
             )
             keypoint_coords = (keypoint_coords[:2] / keypoint_coords[2:]).squeeze(-1)
             base_scale = self.keypoint_scales[keypoint_i]
+
+        scale = base_scale * scale_factor
+        # Simulated detector error, on the warped views only — the identity view is
+        # the clean reference. Coords and scale here come from exact GT, so without
+        # this the descriptor never sees the localization error a real detector makes.
+        # The draw is keyed on the flat index, so it is fixed per (keypoint, view):
+        # with in_memory=True the patch is extracted once, so this perturbs the
+        # training pair rather than resampling per epoch.
+        if homography_j != self.transforms.size(1) and (
+            self.keypoint_jitter > 0 or self.scale_jitter > 0
+        ):
+            generator = torch.Generator().manual_seed(self.jitter_seed + index)
+            if self.keypoint_jitter > 0:
+                # In absolute px, not units of the blob's scale: the detector's
+                # localization error is roughly constant (~1 px) across scales, so a
+                # scale-relative jitter would be an order of magnitude too large on
+                # the biggest blobs — which are the most jitter-sensitive. Expressing
+                # it in px reproduces the real effect, which falls hardest on the
+                # small blobs because their patch is normalized by a small sigma.
+                keypoint_coords = keypoint_coords + torch.randn(
+                    2, generator=generator
+                ) * self.keypoint_jitter
+            if self.scale_jitter > 0:
+                # Log-normal: scale error is relative, and must stay positive.
+                scale = scale * torch.exp(
+                    torch.randn((), generator=generator) * self.scale_jitter
+                )
 
         label = self.keypoints[keypoint_i, 1]
         if getattr(self, "keypoint_is_garbage", None) is not None and bool(
@@ -1002,7 +1069,7 @@ class HomographyData(torch.utils.data.Dataset):
                 ]
             ),
             "keypoint_coords": keypoint_coords,
-            "scales": base_scale * scale_factor,
+            "scales": scale,
             "homographies": (
                 self.transforms[homography_i, homography_j]
                 if homography_j < self.transforms.size(1)

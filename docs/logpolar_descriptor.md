@@ -111,12 +111,16 @@ can collapse to the same descriptor. The cost is rigidity — locking assumes on
 rotation explains the whole patch, which fails under deformations that are not a pure
 rotation (perspective, anisotropy).
 
-**It is premature until the mirror is gone.** Positives were reaching the head
-*mirrored* (see [data pipeline → shape normalization](data_pipeline.md#shape-normalization--and-the-mirror-bug)),
-and a mirror is an angular *flip* that no angular pool — locked or not — can undo. With
-that fixed and `perspective: false` (warps are pure similarities), the residual really
-is a clean rotation, which is the regime where locking, or dropping the angular pool
-entirely, should pay off. Re-measure before investing.
+**It was premature while the patches were broken.** Positives were reaching the head
+*mirrored*, and then — after that was fixed — still shifted along the radial axis by a
+double scale correction (see
+[data pipeline → shape normalization](data_pipeline.md#shape-normalization--and-three-bugs)).
+Log-polar was the worst-hit path in **all three** bugs, which is not a coincidence: its
+two axes are exactly where those errors land. A mirror is an angular *flip* no angular
+pool can undo; a scale error is a rigid radial shift of ~18 of 64 px. With all three
+fixed and `perspective: false` (warps are pure similarities), the residual really is a
+clean rotation — the regime where locking, or dropping the angular pool entirely, should
+pay off. Re-measure before investing.
 
 ## `outer_factor` interacts with the blob scale
 
@@ -127,6 +131,16 @@ single `outer_factor` suits every blob**, and the scale bands span exactly that 
 The sweep drives `scale` → `logpolar_outer_factor` ∈ {32, 64, 96, 128}, all well above
 the original default of 16; with transforms held fixed the matched-vs-random separation
 degrades gently as it grows (best ≈ 8–16). Treat large values with suspicion.
+
+**That sweep predates the scale-normalization fixes and is void** — it was measured when
+every warped patch was radially shifted by `log(1/sqrt(det J))·30.8` px, which is
+precisely a change of effective `outer_factor`, so the sweep was partly measuring the
+bug. Re-run it. What *is* measured post-fix (see
+[scale budget and jitter](scale_budget_and_jitter.md#small-blobs-are-not-the-problem)):
+at `outer=16` the large blobs are the weak end — anchor↔positive NCC falls to 0.827 at
+σ_w>10 and 0.654 at σ_w>20, while sub-pixel blobs sit at 0.98. That is the "extends
+several board-widths out" failure above, now with a number on it, and it argues for
+*smaller* `outer_factor`, or one that adapts to the blob's scale.
 
 ## Comparing them
 
