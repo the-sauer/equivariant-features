@@ -38,6 +38,8 @@ def sample_homography(
         scaling_amplitude: float = 0.1,
         perspective_amplitude_x: float = 0.1,
         perspective_amplitude_y: float = 0.1,
+        min_perspective_amplitude_x: float = 0.0,
+        min_perspective_amplitude_y: float = 0.0,
         patch_ratio: float = 0.5,
         max_angle: float | str = np.pi,
         allow_artifacts: bool = False,
@@ -115,9 +117,9 @@ def sample_homography(
         if not allow_artifacts:
             perspective_amplitude_x = min(perspective_amplitude_x, margin)
             perspective_amplitude_y = min(perspective_amplitude_y, margin)
-        perspective_displacement = _truncated_normal(0.0, perspective_amplitude_y / 2, (1,))
-        h_displacement_left = _truncated_normal(0.0, perspective_amplitude_x / 2, (1,))
-        h_displacement_right = _truncated_normal(0.0, perspective_amplitude_x / 2, (1,))
+        perspective_displacement = _truncated_normal(0.0, (perspective_amplitude_y - min_perspective_amplitude_y) / 2, (1,)) + min_perspective_amplitude_y
+        h_displacement_left = _truncated_normal(0.0, (perspective_amplitude_x - min_perspective_amplitude_x) / 2, (1,)) + min_perspective_amplitude_x
+        h_displacement_right = _truncated_normal(0.0, (perspective_amplitude_x - min_perspective_amplitude_x) / 2, (1,)) + min_perspective_amplitude_x
         pts2 += np.stack([
             np.concatenate([h_displacement_left, perspective_displacement], axis=0),
             np.concatenate([h_displacement_left, -perspective_displacement], axis=0),

@@ -1,5 +1,6 @@
 defaults:
   - blob_descriptor_base
+  - homography_validation
   - dgx
   - _self_
 
@@ -16,6 +17,7 @@ model:
     in_channels: 1
 
 training:
+  num_epochs: 10
   batch_size: 1024
   num_workers: 6   # escnn forward is GPU-bound, so fewer loader workers keep the GPU fed
   dataset:

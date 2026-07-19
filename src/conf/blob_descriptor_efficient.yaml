@@ -1,5 +1,6 @@
 defaults:
   - blob_descriptor_base
+  - homography_validation
   - dgx
   - _self_
 
@@ -17,6 +18,7 @@ model:
     in_channels: 1
 
 training:
+  num_epochs: 50
   # (inherits base num_workers: 8 — the light model is more data-bound than steerable)
   batch_size: 2048
   dataset:

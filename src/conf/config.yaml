@@ -1,10 +1,4 @@
 training:
-  batch_size: 1
-  num_epochs: 60
-  feature_sampling:
-    num_features: 1000
-    # stride: 12
-    # detector: harris
   dataset:
     params:
       data_dir: /data/datasets

@@ -1,5 +1,6 @@
 defaults:
   - blob_descriptor_base
+  - homography_validation
   - dgx
   - _self_
 
@@ -15,6 +16,7 @@ model:
     patch_size: 64
 
 training:
+  num_epochs: 100
   dataset:
     params:
       patch_type: logpolar

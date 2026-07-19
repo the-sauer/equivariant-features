@@ -3,7 +3,6 @@ defaults:
   - _self_
 
 training:
-  num_epochs: 50
   patch_size: 64
   process_batch: process_batch_blobs
   m_per_class: 4
@@ -20,6 +19,8 @@ training:
       supersample: 3   # sub-taps per output pixel per axis, area-averaged (patch anti-aliasing)
       transform_params:
         fit_to_frame: true
+        perspective_amplitude_x: 0.3
+        perspective_amplitude_y: 0.3
       blobboard_params:
         board_size: [142, 142]
         cutoff: 2
