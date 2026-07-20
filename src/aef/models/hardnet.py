@@ -20,13 +20,27 @@ import torch.nn.functional as F
 from .utils import L2Norm
 
 
-def input_norm(x):
-    """Per-patch mean/std normalization (shift-invariant)."""
+def input_norm(x, mask=None):
+    """Per-patch mean/std normalization (shift-invariant).
+
+    ``mask`` (broadcastable to ``x``, 1 = valid, 0 = invalid) restricts the
+    statistics to valid pixels and sets invalid pixels to 0 (== the normalized
+    mean), so off-board fill does not skew the normalization. ``mask=None``
+    reproduces the original all-pixel behaviour bit-for-bit.
+    """
     flat = x.view(x.size(0), -1)
-    mp = torch.mean(flat, dim=1)
-    sp = torch.std(flat, dim=1) + 1e-7
-    return ((x - mp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(x)) /
-            sp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(1).expand_as(x))
+    if mask is None:
+        mp = torch.mean(flat, dim=1)
+        sp = torch.std(flat, dim=1) + 1e-7
+        return ((x - mp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(x)) /
+                sp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(1).expand_as(x))
+    m = mask.expand_as(x).reshape(x.size(0), -1)
+    n = m.sum(dim=1).clamp(min=1.0)
+    mp = (flat * m).sum(dim=1) / n
+    var = (((flat - mp.unsqueeze(1)) ** 2) * m).sum(dim=1) / n
+    sp = torch.sqrt(var) + 1e-7
+    xn = (x - mp.detach().view(-1, 1, 1, 1)) / sp.detach().view(-1, 1, 1, 1)
+    return xn * mask.expand_as(x)
 
 
 class HardNet(nn.Module):
@@ -158,6 +172,29 @@ class LogPolarBlurPool(nn.Module):
         return x[..., ::2, ::2]
 
 
+class AngularRFFTMag(nn.Module):
+    """Cyclic-shift-invariant angular embedding — a drop-in for the angular max-pool.
+
+    A rotation is a circular shift of the angular axis (dim -2). The magnitude of the
+    angular DFT is invariant to that shift (the shift lives entirely in the phase, and
+    ``|X_k|`` drops it), exactly for integer-bin shifts. Unlike the max-pool — which
+    keeps a single peak per (channel, radius) — this keeps the strength of every
+    angular frequency, i.e. the whole angular *shape* minus its orientation, which is
+    the structure the max-pool discards. ``n_harmonics`` keeps only the lowest ``F``
+    frequencies (rotation/shape info concentrates there) to bound the descriptor size.
+    """
+
+    def __init__(self, n_harmonics=None):
+        super().__init__()
+        self.n_harmonics = n_harmonics
+
+    def forward(self, x):                       # (B, C, A, R)
+        mag = torch.fft.rfft(x, dim=-2).abs()   # (B, C, A // 2 + 1, R) — shift-invariant
+        if self.n_harmonics is not None:
+            mag = mag[:, :, : self.n_harmonics, :]
+        return mag
+
+
 class HardNetLogPolar(nn.Module):
     """HardNet variant that respects log-polar geometry.
 
@@ -177,10 +214,28 @@ class HardNetLogPolar(nn.Module):
 
     The two fixes are separately toggleable (`circular_pad`, `antialias`) so they can be
     ablated; turning both off reproduces the plain `HardNet` structure.
+
+    Two further **opt-in** heads (default off, so the module is unchanged unless asked):
+
+    - ``head="fft"`` replaces the angular max-pool with :class:`AngularRFFTMag` — same
+      rotation invariance, but it keeps the full angular spectrum (``n_harmonics`` low
+      bins) instead of a single peak per (channel, radius).
+    - ``learned_mask=True`` makes the head *mask-aware*. The pre-head feature map is
+      downweighted by the **GT mask on anchors** (identity view, where the off-board
+      region is given) and by a **predicted** ``m_pred`` on targets (warped view, where
+      it is not) — a small 1x1 predictor emits ``m_pred`` in [0, 1] from the trunk
+      features. ``forward`` returns ``(descriptor, m_pred)`` so the caller can add a
+      standalone loss supervising ``m_pred`` on the **targets** against their true board
+      coverage (the anchor's mask is given, not predicted). The predictor thus learns to
+      supply, at test time, the target mask that is no longer available.
+
+    Both leave the default ``head="maxpool"``/``learned_mask=False`` path — including
+    its ``state_dict`` keys — byte-for-byte identical to the original.
     """
 
     def __init__(self, in_channels=1, patch_size=64, slim=False,
-                 circular_pad=True, antialias=True, **_):
+                 circular_pad=True, antialias=True,
+                 head="maxpool", n_harmonics=None, learned_mask=False, **_):
         super().__init__()
         if patch_size == 32:
             kernel_size, padding = 3, 1
@@ -191,6 +246,8 @@ class HardNetLogPolar(nn.Module):
         else:
             raise ValueError(f"Unsupported patch size {patch_size}")
         self.patch_size = patch_size
+        self.head_type = head
+        self.learned_mask = learned_mask
         pool = patch_size // 4          # spatial size after the two downsamples
         depths = [16, 32, 64] if slim else [32, 64, 128]
 
@@ -210,7 +267,7 @@ class HardNetLogPolar(nn.Module):
                 return [*block(c_in, c_out, stride=1), LogPolarBlurPool(c_out)]
             return block(c_in, c_out, stride=2)
 
-        self.features = nn.Sequential(
+        trunk_layers = [
             *block(in_channels, depths[0]),
             *block(depths[0], depths[0]),
             *down(depths[0], depths[1]),                      # patch -> patch/2
@@ -218,15 +275,65 @@ class HardNetLogPolar(nn.Module):
             *down(depths[1], depths[2]),                      # patch/2 -> patch/4
             *block(depths[2], depths[2]),
             nn.Dropout(0.1),
-            nn.MaxPool2d(kernel_size=(pool, 1)),              # max over angular -> rotation invariance
-            nn.Conv2d(depths[2], 128, (1, pool), bias=False),  # dense over radial -> keeps scale structure
-            nn.BatchNorm2d(128, affine=False),
-        )
-        self.features.apply(weights_init)
+        ]
 
-    def forward(self, patches):
-        x = self.features(input_norm(patches))
-        return L2Norm()(x.view(x.size(0), -1))
+        # Angular reduction head: max-pool (one peak) or DFT-magnitude (full spectrum).
+        if head == "maxpool":
+            angular_reduce = nn.MaxPool2d(kernel_size=(pool, 1))  # max over angular
+            final_angular = 1
+        elif head == "fft":
+            n_harm = n_harmonics if n_harmonics is not None else (pool // 2 + 1)
+            angular_reduce = AngularRFFTMag(n_harmonics=n_harm)
+            final_angular = n_harm
+        else:
+            raise ValueError(f"Unsupported head {head!r} (expected 'maxpool' or 'fft')")
+        head_layers = [
+            angular_reduce,
+            nn.Conv2d(depths[2], 128, (final_angular, pool), bias=False),  # dense over radial
+            nn.BatchNorm2d(128, affine=False),
+        ]
+
+        if head == "maxpool" and not learned_mask:
+            # Exact original structure and state_dict keys — full backward compatibility.
+            self.features = nn.Sequential(*trunk_layers, *head_layers)
+        else:
+            self.trunk = nn.Sequential(*trunk_layers)
+            self.head = nn.Sequential(*head_layers)
+            if learned_mask:
+                # 1x1 predictor: per-cell validity in [0, 1] from the trunk features.
+                self.mask_head = nn.Sequential(nn.Conv2d(depths[2], 1, 1), nn.Sigmoid())
+        self.apply(weights_init)
+
+    def _validity_weight(self, feat, mask, m_pred, is_anchor):
+        """Per-cell validity weight at trunk resolution: GT on anchors, ``m_pred`` else."""
+        _, _, A, R = feat.shape
+        if mask is None or is_anchor is None:
+            return m_pred                                     # no GT routing available
+        gt = F.adaptive_avg_pool2d(mask, (A, R))              # (B,1,A,R), board coverage
+        a = is_anchor.view(-1, 1, 1, 1).to(feat.dtype)
+        return a * gt + (1.0 - a) * m_pred
+
+    def forward(self, patches, mask=None, is_anchor=None):
+        # Default path: identical to the original (self.features only exists then).
+        if hasattr(self, "features"):
+            x = self.features(input_norm(patches))
+            return L2Norm()(x.view(x.size(0), -1))
+
+        # Masked input-norm on anchors (known off-board fill); plain on targets/unknown.
+        if self.learned_mask and mask is not None and is_anchor is not None:
+            a = is_anchor.view(-1, 1, 1, 1).to(patches.dtype)
+            innorm_mask = a * mask + (1.0 - a) * torch.ones_like(mask)
+            x = input_norm(patches, mask=innorm_mask)
+        else:
+            x = input_norm(patches)
+
+        feat = self.trunk(x)                                  # (B, C, A, R)
+        m_pred = None
+        if self.learned_mask:
+            m_pred = self.mask_head(feat)                     # (B, 1, A, R) in [0, 1]
+            feat = feat * self._validity_weight(feat, mask, m_pred, is_anchor)
+        d = L2Norm()(self.head(feat).view(patches.size(0), -1))
+        return (d, m_pred) if self.learned_mask else d
 
 
 def weights_init(m):
@@ -237,7 +344,7 @@ def weights_init(m):
     if isinstance(m, nn.Conv2d):
         nn.init.orthogonal_(m.weight.data, gain=0.6)
         try:
-            nn.init.constant(m.bias.data, 0.01)
+            nn.init.constant_(m.bias.data, 0.01)
         except:
             pass
     return

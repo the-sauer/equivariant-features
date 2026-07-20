@@ -122,6 +122,96 @@ fixed and `perspective: false` (warps are pure similarities), the residual reall
 clean rotation — the regime where locking, or dropping the angular pool entirely, should
 pay off. Re-measure before investing.
 
+## The DFT-magnitude head and mask-aware pooling
+
+Two **opt-in** heads on `HardNetLogPolar` act on exactly the two weaknesses above — the
+max-pool's lost angular structure, and the off-board junk. Both default off, so the
+plain `HardNetLogPolar` (angular max-pool, no mask) — including its `state_dict` keys —
+is byte-for-byte unchanged unless a config asks otherwise.
+
+### `head="fft"` — keep the whole angular spectrum, not one peak
+
+A rotation is a *cyclic shift* of the angular axis (dim −2). The magnitude of the
+angular DFT is invariant to that shift — it lives entirely in the phase, and `|X_k|`
+drops it — exactly for integer-bin shifts, the same regime the max-pool is exact in.
+`AngularRFFTMag` replaces `MaxPool2d((pool, 1))` with `torch.fft.rfft(...).abs()`,
+keeping the lowest `n_harmonics` frequency magnitudes:
+
+```python
+nn.MaxPool2d(kernel_size=(pool, 1))    # keeps ONE peak per (channel, radius)
+AngularRFFTMag(n_harmonics=F)          # keeps |X_0..F-1| == the angular autocorrelation
+```
+
+Where the max-pool collapses each `(channel, radius)` angular profile to a single scalar
+(its peak), the magnitude spectrum is — by Wiener–Khinchin — the profile's full circular
+**autocorrelation**: the entire angular *shape* minus its orientation. A one-bump ring
+and a two-bump ring have the same peak but different spectra, so this directly repairs
+the "structurally different blobs collapse to the same descriptor" failure named above.
+It is not a strict superset (the peak is a nonlinear order-statistic the power spectrum
+does not determine), and it still discards the *relative* phase between radii — that gap
+is the bispectrum's to fill. Measured on an untrained net, the fft head's angular-roll
+drift is ≈1e-7, on par with the max-pool.
+
+### `learned_mask=True` — mask-aware pooling without a target mask
+
+Part of every patch is off-board junk. The two views are treated **asymmetrically**:
+
+- **Anchor** (identity view, clean board): its board mask is *given* to the network and
+  used directly — the learned predictor is not used here. (For the anchor the validity
+  is just the out-of-bounds `oob` region, since the clean board fills the frame.)
+- **Target** (warped view, composited on a real background): the predictor emits a
+  per-cell estimate `m_pred ∈ [0, 1]` from the trunk features, which is *both* used to
+  weight the target's descriptor *and* trained by a standalone loss.
+
+Concretely the head:
+
+- downweights the pre-head feature map by the **given GT mask on anchors** and by the
+  **predicted `m_pred` on targets** (masked `input_norm` likewise uses the given mask on
+  anchors);
+- returns `(descriptor, m_pred)` so `process_batch_blobs` can add a BCE that supervises
+  `m_pred` **on the targets** against their *true* board coverage (weight
+  `training.mask_loss_weight`).
+
+The GT the target is supervised against is the real warped board coverage, co-sampled
+from `_board_masks` on the same log-polar lattice when `precompute_masks=true` — **not**
+`oob`, because a warped view's off-board region is real background *inside* the frame.
+This is the standard train-supervise / test-predict pattern: the true target mask exists
+in synthetic training but not at test, so the predictor learns to supply it. No relative
+orientation is ever needed, because the mask co-rotates with the patch.
+
+Two honest caveats, both to **measure**, not assume:
+
+- **Anchor-white vs target-real-background.** The anchor's off-board is bland/white; a
+  real target's is textured scene. The predictor only generalizes to test-time targets
+  if it has *seen* varied junk — so this pairs with strong off-board augmentation
+  (`garbage_fraction` / background variety), otherwise it overfits the training scenes.
+- **The fft head is junk-fragile.** The DFT is global over angle, so off-board content
+  smears into *every* coefficient — unlike the max-pool, which lets each channel dodge a
+  low-junk angle. That is *why* the mask path pairs with it. When you evaluate, track a
+  junk-sensitivity probe (descriptor change when the off-board region is scrambled), not
+  only FPR95 and the angular-roll drift.
+
+### Toggling and ablating
+
+The knobs ride through the usual config dicts (`model.params.head`,
+`model.params.n_harmonics`, `model.params.learned_mask`,
+`training.dataset.params.precompute_masks`, `training.mask_loss_weight`). A ready config
+bundles them:
+
+```sh
+pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
+  python src/run_training.py --config-name blob_descriptor_logpolar_fftmask
+```
+
+The launcher exposes both as first-class variants — `logpolar_fft` (fft head only,
+shares the plain `logpolar` dataset) and `logpolar_fftmask` (fft head + learned mask, its
+own `precompute_masks` dataset). To run the head/mask ablation against the max-pool
+baseline in one warm-cache matrix:
+
+```sh
+./launch_training_matrix.sh -n lpfft logpolar logpolar_fft logpolar_fftmask
+```
+
 ## `outer_factor` interacts with the blob scale
 
 The patch reaches `logpolar_outer_factor × σ`, in units of the blob's own scale. With

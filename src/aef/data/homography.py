@@ -40,7 +40,9 @@ from ..transforms.homography import sample_homography
 #   4: scale normalization fixed — blob_normalizations is now det-1 (size is left to
 #      `scales`, which no longer double-corrects) and every Jacobian is evaluated at
 #      the source point. Both change the patch footprint of every warped view.
-CACHE_VERSION = 4
+#   5: optional per-patch log-polar validity mask (`precompute_masks`) added to the
+#      cached state; bumped so pre-v5 caches (which lack the tensor) are rebuilt.
+CACHE_VERSION = 5
 
 # Params that don't change a dataset's *contents* (so they must not split the cache).
 # Everything else a constructor accepts is hashed — including params left at their
@@ -380,6 +382,8 @@ def extract_logpolar_patches(
     inner_factor=2.0,
     outer_factor=32.0,
     supersample=3,
+    return_mask=False,
+    mask_imgs=None,
 ):
     """Extract a log-polar patch around each keypoint.
 
@@ -452,10 +456,28 @@ def extract_logpolar_patches(
     oob = (grid.abs() > 1.0).any(dim=-1, keepdim=True).permute(0, 3, 1, 2)
     patches = torch.where(oob, torch.ones_like(patches), patches)
 
+    # Per-sample board validity (1 = on the board, 0 = off-board). When a board-coverage
+    # image is given (``mask_imgs``, same frame as ``imgs``) it is sampled on the *same*
+    # lattice — this is the true validity for a warped/composited view, where off-board
+    # is real background *inside* the frame. Without one, fall back to ``~oob`` (correct
+    # for the identity/anchor view, whose board raster fills the frame).
+    valid = None
+    if return_mask:
+        if mask_imgs is not None:
+            valid = torch.nn.functional.grid_sample(
+                mask_imgs, grid, mode="bilinear", padding_mode="zeros", align_corners=True,
+            )
+        else:
+            valid = (~oob).to(patches.dtype)
+
     # Area-average each output pixel's supersampled footprint.
     if ss > 1:
         patches = torch.nn.functional.avg_pool2d(patches, kernel_size=ss, stride=ss)
+        if valid is not None:
+            valid = torch.nn.functional.avg_pool2d(valid, kernel_size=ss, stride=ss)
 
+    if return_mask:
+        return patches, valid
     return patches
 
 
@@ -489,6 +511,7 @@ class HomographyData(torch.utils.data.Dataset):
         logpolar_inner_factor=2.0,
         logpolar_outer_factor=32.0,
         supersample=3,  # sub-taps per output pixel per axis, area-averaged (both patch types)
+        precompute_masks=False,  # logpolar only: also cache a per-patch board-validity mask (GT for the anchor view, for the learned-mask descriptor head)
         scale_quantile_range=None,  # (lo, hi) in [0, 1]: keep keypoints whose intrinsic blob scale falls in this quantile band
         scale_range=None,  # (lo, hi) absolute blob-scale bounds; alternative to scale_quantile_range
         max_keypoints=None,  # cap the kept keypoints to a fixed count (deterministic subsample) so different splits are exactly the same size
@@ -524,6 +547,8 @@ class HomographyData(torch.utils.data.Dataset):
         self.logpolar_inner_factor = logpolar_inner_factor
         self.logpolar_outer_factor = logpolar_outer_factor
         self.supersample = supersample
+        self.precompute_masks = bool(precompute_masks) and patch_type == "logpolar"
+        self.precomputed_masks = None  # (N, 1, patch_size, patch_size) validity, if enabled
         self.keypoint_jitter = float(keypoint_jitter)
         self.scale_jitter = float(scale_jitter)
         self.jitter_seed = int(jitter_seed)
@@ -901,11 +926,11 @@ class HomographyData(torch.utils.data.Dataset):
         "transforms", "transforms_inv",
         "keypoints", "keypoint_coords", "keypoint_scales",
         "keypoint_coords_clean", "keypoint_scales_clean", "keypoint_is_garbage",
-        "images", "images_clean", "precomputed_patches",
+        "images", "images_clean", "precomputed_patches", "precomputed_masks",
     )
     _CACHE_META = (
         "size", "c", "in_memory", "patch_type", "patch_size", "patch_scale_factors",
-        "logpolar_inner_factor", "logpolar_outer_factor", "supersample",
+        "logpolar_inner_factor", "logpolar_outer_factor", "supersample", "precompute_masks",
         "transform_params", "patches_available", "extraction_batch_size",
         # __getitem__ reads these on every access, including after a cache load
         # (which returns from __init__ before they would otherwise be set).
@@ -962,6 +987,11 @@ class HomographyData(torch.utils.data.Dataset):
                 (len(self), n_channels, self.patch_size, self.patch_size),
                 dtype=torch.float32,
             )
+            if self.precompute_masks:
+                self.precomputed_masks = torch.empty(
+                    (len(self), 1, self.patch_size, self.patch_size),
+                    dtype=torch.float32,
+                )
 
             # Wir nutzen einen temporären DataLoader, um die bestehende Logik wiederzuverwenden
             extraction_loader = torch.utils.data.DataLoader(
@@ -988,6 +1018,15 @@ class HomographyData(torch.utils.data.Dataset):
                         [images[img_id] for img_id in img_ids], dim=0
                     ).cuda()
 
+                    # Board-coverage images (un-augmented — augmentation is photometric
+                    # and would corrupt the 0/1 mask; the geometry is already baked in).
+                    mask_tensor = None
+                    if self.precompute_masks:
+                        mask_images = batch["mask_images"]
+                        mask_tensor = torch.stack(
+                            [mask_images[img_id] for img_id in img_ids], dim=0
+                        ).cuda()
+
                     if self.patch_type == "logpolar":
                         patches = extract_logpolar_patches(
                             imgs_tensor,
@@ -998,7 +1037,12 @@ class HomographyData(torch.utils.data.Dataset):
                             inner_factor=self.logpolar_inner_factor,
                             outer_factor=self.logpolar_outer_factor,
                             supersample=self.supersample,
+                            return_mask=self.precompute_masks,
+                            mask_imgs=mask_tensor,
                         )
+                        if self.precompute_masks:
+                            patches, valid = patches
+                            self.precomputed_masks[idx : idx + valid.size(0)] = valid.cpu()
                     else:
                         patches = extract_multiscale_patches(
                             imgs_tensor,
@@ -1102,6 +1146,14 @@ class HomographyData(torch.utils.data.Dataset):
         # NEU: Falls fertig berechnet, geben wir den Patch direkt hier mit raus
         if self.patches_available:
             res["patch"] = self.precomputed_patches[index]
+            if getattr(self, "precomputed_masks", None) is not None:
+                # GT board-validity mask + anchor flag for the learned-mask head. The
+                # identity view (homography_j == last) is the anchor whose mask is GT;
+                # warped views carry a mask too but the head predicts theirs instead.
+                res["mask"] = self.precomputed_masks[index]
+                res["is_anchor"] = torch.tensor(
+                    homography_j == self.transforms.size(1), dtype=torch.bool
+                )
 
         return res
 
@@ -1145,33 +1197,58 @@ class HomographyData(torch.utils.data.Dataset):
             if not needs_images:
                 # Patches sind da, packe sie in den Batch
                 res["patches"] = torch.stack([item["patch"] for item in batch])
+                if "mask" in batch[0]:
+                    res["masks"] = torch.stack([item["mask"] for item in batch])
+                    res["is_anchor"] = torch.stack([item["is_anchor"] for item in batch])
             else:
                 # Fallback Logik für dynamische Extraktion (in_memory=False)
                 img_ids = {item["keypoint"][0].item() for item in batch}
                 views = self.transforms.size(1) + 1
                 imgs = {}
+                mask_imgs = {} if self.precompute_masks else None
                 for img_id in img_ids:
                     board = img_id // views
+                    is_identity = img_id % views == self.transforms.size(1)
                     # Identity (un-warped) view reads the clean board; warped views
                     # read the composite (== clean board when compositing is off).
-                    source = self.images_clean if (img_id % views == self.transforms.size(1)) else self.images
+                    source = self.images_clean if is_identity else self.images
                     img = source[board]
+                    # Board-coverage source in the SAME frame: full validity on the clean
+                    # raster (identity), else the composite board mask. Warped by the
+                    # identical transform below so it stays aligned with `img`.
+                    if self.precompute_masks:
+                        if is_identity or self._board_masks is None:
+                            msrc = torch.ones((1, *self.size), device=img.device)
+                        else:
+                            msrc = self._board_masks[board].to(img.device)
                     if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
+                        transform = self.transforms[
+                            img_id // (self.transforms.size(1) + 1),
+                            img_id % (self.transforms.size(1) + 1) - 1,
+                        ].unsqueeze(0)
                         img = kornia.geometry.transform.warp_perspective(
                             img.unsqueeze(0).expand(-1, 3, -1, -1),
-                            (
-                                self.transforms[
-                                    img_id // (self.transforms.size(1) + 1),
-                                    img_id % (self.transforms.size(1) + 1) - 1,
-                                ]
-                            ).unsqueeze(0),
+                            transform,
                             self.size,
                             padding_mode="fill",
                             fill_value=torch.tensor([1.0, 1.0, 1.0], device=img.device),
                         ).squeeze(0)[:1]
+                        if self.precompute_masks:
+                            # Off-board (outside the warped board) -> 0 = invalid.
+                            msrc = kornia.geometry.transform.warp_perspective(
+                                msrc.unsqueeze(0).expand(-1, 3, -1, -1),
+                                transform,
+                                self.size,
+                                padding_mode="fill",
+                                fill_value=torch.tensor([0.0, 0.0, 0.0], device=img.device),
+                            ).squeeze(0)[:1]
                     assert img.size(0) == 1
                     imgs[img_id] = img
+                    if self.precompute_masks:
+                        mask_imgs[img_id] = msrc
                 res["images"] = imgs
+                if self.precompute_masks:
+                    res["mask_images"] = mask_imgs
 
             return res
 

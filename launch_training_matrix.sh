@@ -7,8 +7,9 @@
 # (see the leaf configs; a single `scale=<x>` threads it everywhere).
 #
 # Usage:
-#   ./launch_training_matrix.sh                 # submit the full matrix
+#   ./launch_training_matrix.sh                 # submit the DEFAULT_SWEEP (see below)
 #   ./launch_training_matrix.sh steerable       # only the given network(s)
+#   ./launch_training_matrix.sh "${NET_ORDER[@]}"  # (from a shell) the full matrix
 #   ./launch_training_matrix.sh -n my_sweep     # group all runs under
 #                                               #   <logdir>/YYYY_MM_DD_my_sweep/
 #   DRY_RUN=1 ./launch_training_matrix.sh       # print the jobs without submitting
@@ -28,6 +29,8 @@ declare -A CONFIG=(
   [steerable]=blob_descriptor_steerable
   [logpolar]=blob_descriptor_logpolar
   [logpolar_circ]=blob_descriptor_logpolar
+  [logpolar_fft]=blob_descriptor_logpolar
+  [logpolar_fftmask]=blob_descriptor_logpolar_fftmask
   [efficient8]=blob_descriptor_efficient
   [efficient4]=blob_descriptor_efficient
 )
@@ -45,22 +48,30 @@ declare -A CONFIG=(
 # Bash associative arrays are UNORDERED, so the previous `${!CONFIG[@]}` was hash order —
 # steerable landed last by accident, and renaming or adding a network reshuffles it
 # silently. Must cover every CONFIG key (checked below).
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ steerable)
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_fftmask steerable)
+
+# What a bare (no-arg) invocation submits. NET_ORDER above stays the full registry (it
+# must list every CONFIG key, and fixes the slowest-last schedule); DEFAULT_SWEEP just
+# picks which of them run by default. Any of the other nets is still runnable by name.
+# Currently: the log-polar angular-head ablation ladder (max-pool -> fft -> fft+mask).
+DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_fftmask)
 
 # per-network scale values
 declare -A SCALES=(
-  [steerable]="32 64 96 128"
-  [logpolar]="32 64 96 128"
-  [logpolar_circ]="32 64 96 128"
-  [efficient8]="32 64 96 128"
-  [efficient4]="32 64 96 128"
+  [steerable]="8 16 32 64 96 128"
+  [logpolar]="8 16 32 64 96 128"
+  [logpolar_circ]="8 16 32 64 96 128"
+  [logpolar_fft]="8 16 32 64 96 128"
+  [logpolar_fftmask]="8 16 32 64 96 128"
+  [efficient8]="8 16 32 64 96 128"
+  [efficient4]="8 16 32 64 96 128"
 )
 # Patch anti-aliasing: sub-taps per output pixel per axis, area-averaged. This is a
 # *dataset* param, so each value is its own dataset (and its own cache entry) — the
 # matrix is the full cross product NETS x SCALES x SUPERSAMPLES, so adding values here
 # multiplies both the training jobs and the prebuild tasks. Set to a single value to
 # switch the sweep off.
-SUPERSAMPLES=(1 2 4)
+SUPERSAMPLES=(3)
 # extra hydra overrides per network (e.g. C8 vs C4 for the efficient descriptor).
 # NoStride-vs-Efficient FPR95 comparison: run `steerable efficient8 efficient4`.
 declare -A NET_EXTRA=(
@@ -69,6 +80,11 @@ declare -A NET_EXTRA=(
   # log-polar-aware HardNet (circular angular padding + antialiased stride) vs the
   # plain one; same config/dataset, so they share the prebuilt datasets.
   [logpolar_circ]="model.name=HardNetLogPolar"
+  # DFT-magnitude angular head instead of the max-pool (keeps the full angular
+  # spectrum). No mask, so it shares the plain `logpolar` dataset.
+  [logpolar_fft]="model.name=HardNetLogPolar model.params.head=fft model.params.n_harmonics=5"
+  # `logpolar_fftmask` (FFT head + learned mask) needs no NET_EXTRA — its dedicated
+  # config `blob_descriptor_logpolar_fftmask` sets the model + `precompute_masks`.
 )
 
 # ---- Dataset groups (drive the prebuild) ------------------------------------
@@ -83,10 +99,15 @@ declare -A NET_DATASET_GROUP=(
   [efficient4]=cartesian
   [logpolar]=logpolar
   [logpolar_circ]=logpolar
+  [logpolar_fft]=logpolar
+  # The learned-mask variant needs `precompute_masks=true`, which is a *dataset* param
+  # and so a distinct cache — its own group, built from the fftmask config.
+  [logpolar_fftmask]=logpolar_mask
 )
 declare -A GROUP_CONFIG=(
   [cartesian]=blob_descriptor_steerable
   [logpolar]=blob_descriptor_logpolar
+  [logpolar_mask]=blob_descriptor_logpolar_fftmask
 )
 # Validation split names from `validation.datasets` — one prebuild task each.
 VAL_SPLITS=(overall small medium large)
@@ -111,6 +132,8 @@ PREBUILD_TIME="${PREBUILD_TIME:-4:00:00}"
 declare -A NET_MEM=(
   [logpolar]=32GB
   [logpolar_circ]=32GB
+  [logpolar_fft]=32GB
+  [logpolar_fftmask]=32GB
   [efficient8]=32GB
   [efficient4]=32GB
 )
@@ -122,6 +145,8 @@ declare -A NET_CPUS=(
   [steerable]=8
   [logpolar]=10
   [logpolar_circ]=10
+  [logpolar_fft]=10
+  [logpolar_fftmask]=10
   [efficient8]=10
   [efficient4]=10
 )
@@ -158,7 +183,7 @@ for net in "${!CONFIG[@]}"; do
        exit 1 ;;
   esac
 done
-[[ ${#NETS[@]} -eq 0 ]] && NETS=("${NET_ORDER[@]}")
+[[ ${#NETS[@]} -eq 0 ]] && NETS=("${DEFAULT_SWEEP[@]}")
 
 # Dated subfolder shared by every run in this matrix (empty -> no grouping).
 if [[ -n "$RUN_NAME" ]]; then

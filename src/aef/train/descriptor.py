@@ -23,7 +23,18 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
 
     patches = data["patches"].to(device)
 
-    features = model(patches)
+    # Optional learned-mask inputs (only present when the dataset has
+    # ``precompute_masks=True``). Absent -> the model is called exactly as before,
+    # so plain descriptors (HardNet, cartesian) are untouched.
+    mask = data["masks"].to(device) if "masks" in data else None
+    is_anchor = data["is_anchor"].to(device) if "is_anchor" in data else None
+
+    if mask is not None or is_anchor is not None:
+        out = model(patches, mask=mask, is_anchor=is_anchor)
+    else:
+        out = model(patches)
+    # A mask-aware model returns (descriptor, predicted_mask); everything else a tensor.
+    features, m_pred = out if isinstance(out, tuple) else (out, None)
     features = features.view(features.size(0), -1)
 
     # Drop keypoints that fell outside the image frame after warping — their
@@ -34,4 +45,24 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
     in_bound_mask = torch.all((coords >= 0) & (coords < bound), dim=-1)
     features = features[in_bound_mask]
     keypoints = keypoints[in_bound_mask]
-    return {n: (c({"features": features, "indices": keypoints[..., 1]}), w, r) for n, (c, w, r) in criterion.items()}
+    losses = {n: (c({"features": features, "indices": keypoints[..., 1]}), w, r)
+              for n, (c, w, r) in criterion.items()}
+
+    # Standalone mask loss: supervise the predictor on the TARGET (warped) views against
+    # their true board coverage. The anchor's mask is *given* (used directly, not
+    # predicted), so it is excluded here; the predictor exists to supply, at test time,
+    # the target mask we no longer have. Restricted to in-bound targets — out-of-frame
+    # patches are meaningless white fill.
+    if m_pred is not None and mask is not None and is_anchor is not None:
+        target = (~is_anchor.view(-1).bool()) & in_bound_mask
+        if target.any():
+            _, _, a_dim, r_dim = m_pred.shape
+            gt = torch.nn.functional.adaptive_avg_pool2d(mask, (a_dim, r_dim))
+            bce = torch.nn.functional.binary_cross_entropy(
+                m_pred[target].clamp(1e-6, 1 - 1e-6), gt[target].clamp(0.0, 1.0)
+            )
+        else:
+            bce = (m_pred * 0.0).sum()
+        weight = float(getattr(getattr(cfg, "training", None), "mask_loss_weight", 1.0))
+        losses["mask_bce"] = (bce, weight, True)
+    return losses

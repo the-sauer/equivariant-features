@@ -86,6 +86,10 @@ class TrainingConfig(TrainValConfig):
     augmentation: Optional[AugmentationConfig]
     loss: str | LossConfig | list[str | LossConfig]
     optimizer: str | OptimizerConfig | dict[str, OptimizerConfig]
+    # Weight of the learned-mask supervision loss (process_batch_blobs); only used
+    # when the model is mask-aware. Read via getattr with a 1.0 default, so omitting
+    # it changes nothing for existing configs.
+    mask_loss_weight: float = 1.0
 
 
 @dataclass
