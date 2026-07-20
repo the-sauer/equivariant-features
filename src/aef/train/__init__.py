@@ -16,6 +16,7 @@
 
 import itertools
 import logging
+import math
 import os
 from typing import Callable
 
@@ -351,7 +352,17 @@ def train_func(process_batch):
 
                 _, ax = plt.subplots()
                 for n, v in y_val.items():
-                    ax.semilogy(x, v, label=n)
+                    (line,) = ax.semilogy(x, v, label=n)
+                    # Mark the best (lowest) value reached so far with a dashed
+                    # rule in the series' own colour, plus a small label of that
+                    # value pinned to the right edge.
+                    finite = [val for val in v if math.isfinite(val)]
+                    if finite:
+                        best = min(finite)
+                        ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
+                        ax.annotate(f"{best:.4g}", xy=(1, best), xycoords=("axes fraction", "data"),
+                                    xytext=(2, 0), textcoords="offset points", va="center", ha="left",
+                                    fontsize=7, color=line.get_color(), clip_on=False)
                 ax.set_title(plot_title)
                 ax.set_xlabel("Epoch")
                 ax.set_ylabel("Average Validation Loss")
