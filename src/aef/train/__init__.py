@@ -351,23 +351,40 @@ def train_func(process_batch):
                 logging.info("finished epoch [%d/%d], avg val losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{k}: {y_val[k][-1]}" for k in val_keys))
 
                 _, ax = plt.subplots()
+                # Mark each series' best (lowest) value with a dashed rule in its
+                # own colour, plus a small label of that value pinned to the right
+                # edge. Labels are collected first, then nudged apart in log space
+                # so that near-equal bests don't overprint each other.
+                best_marks = []
                 for n, v in y_val.items():
                     (line,) = ax.semilogy(x, v, label=n)
-                    # Mark the best (lowest) value reached so far with a dashed
-                    # rule in the series' own colour, plus a small label of that
-                    # value pinned to the right edge.
                     finite = [val for val in v if math.isfinite(val)]
                     if finite:
                         best = min(finite)
                         ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
-                        ax.annotate(f"{best:.4g}", xy=(1, best), xycoords=("axes fraction", "data"),
-                                    xytext=(2, 0), textcoords="offset points", va="center", ha="left",
-                                    fontsize=7, color=line.get_color(), clip_on=False)
+                        best_marks.append((best, line.get_color()))
+                # Minimum vertical gap between labels, in decades (log10 units);
+                # walking bottom-to-top, push each label up if it crowds the one
+                # below it.
+                min_gap = 0.16
+                prev = None
+                for best, color in sorted(best_marks, key=lambda m: m[0]):
+                    log_best = math.log10(best) if best > 0 else math.log10(1e-5)
+                    if prev is not None and log_best - prev < min_gap:
+                        log_best = prev + min_gap
+                    prev = log_best
+                    ax.annotate(f"{best:.4g}", xy=(1, 10 ** log_best), xycoords=("axes fraction", "data"),
+                                xytext=(2, 0), textcoords="offset points", va="center", ha="left",
+                                fontsize=7, color=color, clip_on=False)
                 ax.set_title(plot_title)
                 ax.set_xlabel("Epoch")
                 ax.set_ylabel("Average Validation Loss")
                 ax.set_xlim(0, 100)
-                ax.set_ylim(1e-5, 1)
+                # Lower bound defaults to 1e-3, but expands downward (with a little
+                # headroom) whenever a series dips below it so the curve stays visible.
+                data_min = min((b for b, _ in best_marks), default=1e-3)
+                lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
+                ax.set_ylim(lower, 1)
                 ax.legend()
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()
