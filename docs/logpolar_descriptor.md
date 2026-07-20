@@ -150,7 +150,9 @@ the "structurally different blobs collapse to the same descriptor" failure named
 It is not a strict superset (the peak is a nonlinear order-statistic the power spectrum
 does not determine), and it still discards the *relative* phase between radii — that gap
 is the bispectrum's to fill. Measured on an untrained net, the fft head's angular-roll
-drift is ≈1e-7, on par with the max-pool.
+drift is ≈1e-7, on par with the max-pool. The theory (Fourier–Mellin, the shift theorem,
+Wiener–Khinchin, the bispectral upgrade) and references are collected in
+[fft_theory.md](fft_theory.md).
 
 ### `learned_mask=True` — mask-aware pooling without a target mask
 
@@ -246,3 +248,49 @@ dataset group and share prebuilt datasets (verified: the prebuild stays at 60 ta
 
 The individual fixes can be carried through to FPR95 the same way, e.g.
 `model.name=HardNetLogPolar model.params.antialias=false` for variant (b).
+
+## Architecture directions to try
+
+Ranked by value-for-effort, tied to the failure modes above. "(arch)" is a model change;
+"(data)" is a pipeline change that tends to matter more than most model tweaks.
+
+1. **Put some phase back in the head (arch).** The single biggest discriminative lever
+   after `head="fft"`. Magnitude-only discards the *relative* phase between ripples,
+   which is real shape (structurally different blobs can then collide). Two tiers, both
+   computed from the same `rfft` and concatenated with `|X_k|` before the final linear
+   layer, both still rotation-invariant: **relative-phase features** (`Δ_k = φ_k − k·φ_1`,
+   cheap, first-harmonic reference) and the **low-order bispectrum** (triple products
+   `X_{k1}X_{k2}\overline{X_{k1+k2}}`, no reference, complete). Full derivation and code
+   in [fft_theory.md → keeping phase](fft_theory.md#keeping-phase-while-staying-rotation-invariant).
+   Note: depth-after-DFT cannot substitute — the discarded phase is an information loss,
+   not a capacity limit.
+2. **Union the peak with the spectrum (arch, ~free).** Max-pool keeps a nonlinear
+   order-statistic (the peak) the power spectrum does not determine; the spectrum keeps
+   the autocorrelation the peak does not. Concatenate both angular reductions
+   (`[AngularRFFTMag(x) ; max_angular(x)]`) before the final layer — strictly richer than
+   either, no invariance risk.
+3. **Modernize the trunk (arch).** The trunk is a plain 2019-HardNet conv stack. Residual
+   connections and a HyNet-style normalization (filter-response norm + a learnable
+   component) in place of `BatchNorm(affine=False)` gave measurable FPR95 gains over
+   HardNet in the descriptor literature. Diffuse "probably helps"; ablate behind a flag.
+4. **Orientation head from `∠X_1` (arch, near-free).** The phase of the angular
+   fundamental is a continuous, differentiable orientation estimate the `fft` head
+   already computes. Expose it to (a) supervise against the known relative rotation
+   (an equivariance-teaching loss) or (b) canonicalize (the "locked pooling" idea from
+   *independent vs locked* above).
+5. **Attend/gate the pooling with the mask (arch).** Make the angular reduction
+   mask-weighted (weight the DFT input / soft-attention pool gated by `m_pred`) instead of
+   a plain multiplicative downweight — the structural counter to the fft head's
+   junk-fragility. Only if the junk-sensitivity probe shows the input-weight is not
+   enough.
+6. **Higher angular resolution (data).** The ~0.07 fine-rotation residual is *inherent* to
+   64 angular bins (5.6° = one bin, see the ablation); more bins is the only thing that
+   shrinks it, at compute cost.
+7. **Adaptive / multi-band `outer_factor` (data).** "No single `outer_factor` suits every
+   blob" (above) is architectural in spirit: read several radial annuli (a radial pyramid)
+   or scale `outer_factor` to the blob, rather than one fixed band. Likely beats any head
+   tweak for the large-blob regime the scale-budget doc quantifies.
+
+First two to run: **#1 (relative-phase/bispectrum)** for discriminativeness and
+**#7 (adaptive `outer_factor`)** for the large-blob regime — both target *measured*
+failures.
