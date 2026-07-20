@@ -78,11 +78,14 @@ declare -A NET_EXTRA=(
   [efficient8]="model.params.n_rotations=8"
   [efficient4]="model.params.n_rotations=4"
   # log-polar-aware HardNet (circular angular padding + antialiased stride) vs the
-  # plain one; same config/dataset, so they share the prebuilt datasets.
-  [logpolar_circ]="model.name=HardNetLogPolar"
+  # plain one. `precompute_masks=true` here is NOT used by the model (learned_mask is
+  # off) — it only makes the dataset cache key match `logpolar_fftmask`, so all three
+  # log-polar variants share ONE prebuilt (mask-carrying) dataset. HardNetLogPolar
+  # accepts and ignores the mask inputs, so no mask loss is added.
+  [logpolar_circ]="model.name=HardNetLogPolar training.dataset.params.precompute_masks=true validation.shared_params.params.precompute_masks=true"
   # DFT-magnitude angular head instead of the max-pool (keeps the full angular
-  # spectrum). No mask, so it shares the plain `logpolar` dataset.
-  [logpolar_fft]="model.name=HardNetLogPolar model.params.head=fft model.params.n_harmonics=5"
+  # spectrum). Shares the same mask dataset (mask ignored, as above).
+  [logpolar_fft]="model.name=HardNetLogPolar model.params.head=fft model.params.n_harmonics=5 training.dataset.params.precompute_masks=true validation.shared_params.params.precompute_masks=true"
   # `logpolar_fftmask` (FFT head + learned mask) needs no NET_EXTRA — its dedicated
   # config `blob_descriptor_logpolar_fftmask` sets the model + `precompute_masks`.
 )
@@ -98,10 +101,12 @@ declare -A NET_DATASET_GROUP=(
   [efficient8]=cartesian
   [efficient4]=cartesian
   [logpolar]=logpolar
-  [logpolar_circ]=logpolar
-  [logpolar_fft]=logpolar
-  # The learned-mask variant needs `precompute_masks=true`, which is a *dataset* param
-  # and so a distinct cache — its own group, built from the fftmask config.
+  # circ/fft/fftmask all share ONE mask-carrying dataset: the mask channel is a superset
+  # the mask-less variants simply ignore, so the boards/SIFT/patches are built once. Only
+  # the plain `logpolar` variant (model `HardNet`, which can't take the mask kwargs)
+  # keeps the mask-less `logpolar` group.
+  [logpolar_circ]=logpolar_mask
+  [logpolar_fft]=logpolar_mask
   [logpolar_fftmask]=logpolar_mask
 )
 declare -A GROUP_CONFIG=(
