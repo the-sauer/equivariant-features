@@ -21,60 +21,88 @@ import numpy as np
 import torch
 
 
-def _load_all_sequences(f, sequences=None, patch_type="cartesian"):
+# Single-mode `.tracks` layout (BlobBoards >= single-type/single-scale format):
+# one file holds exactly ONE patch type at ONE scale, so `tracks/patches` is a
+# single (N, P, P) dataset (no per-mode `patches/<type>` group). Each patch has a
+# companion board-in-frame mask under `tracks/masks`, and every sequence carries
+# an `is_anchor` group attribute (1 = GT anchor sequence, 0 = tracked). The single
+# patch type / scale are recorded as attributes on the `tracks` group.
+def _select_sequences(seqs, sequences):
+    # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (anchor). The
+    # `sequences` filter is a set of board uids; match the trailing hex uid of each
+    # name (works for both forms).
+    if sequences is None:
+        return list(seqs.keys())
+    def uid_of(s):
+        m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", s)
+        return m[1] if m else None
+    return [s for s in seqs.keys() if uid_of(s) in sequences]
+
+
+def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
-    Returns (patches, track_ids, track_lengths) with track_ids offset so
-    they are globally unique across sequences.
+    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor).
+    `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
+    `is_anchor` is a per-patch uint8 array (broadcast from the per-sequence flag).
+    Track ids keep their stored (board-offset) values — not remapped.
     """
     seqs = f["sequences"]
-    seq_names = list(filter(lambda s: re.fullmatch("\\w+_([A-Fa-f0-9]+)\\)?", s)[1] in sequences, seqs.keys())) if sequences is not None else list(seqs.keys())
+    seq_names = _select_sequences(seqs, sequences)
 
-    all_patches = []
-    all_track_ids = []
-    all_track_lengths = []
-    tid_offset = 0
-    if patch_type == "original":
-        all_affine_shapes = []
+    all_patches, all_masks = [], []
+    all_track_ids, all_track_lengths = [], []
+    all_affine_shapes, all_is_anchor = [], []
 
     for name in seq_names:
         sg = seqs[name]
         g = sg["tracks"]
-        patches = g[f"patches/{patch_type}"][:]
-        track_ids = g["track_id"][:]# + tid_offset
-        track_lengths = g["track_lengths"][:]
-        n_tracks = int(g["n_tracks"][()])
-        if patch_type == "original":
-            all_affine_shapes.append(g["affine_shapes"][:])
+        patches = g["patches"][:]
+        n = patches.shape[0]
         all_patches.append(patches)
-        all_track_ids.append(track_ids)
-        all_track_lengths.append(track_lengths)
-        tid_offset += n_tracks
+        all_track_ids.append(g["track_id"][:])
+        all_track_lengths.append(g["track_lengths"][:])
+        if with_mask:
+            all_masks.append(g["masks"][:] if "masks" in g else np.ones_like(patches))
+        if with_affine:
+            all_affine_shapes.append(g["affine_shapes"][:])
+        is_anchor = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
+        all_is_anchor.append(np.full(n, is_anchor, dtype=np.uint8))
 
-    patches = np.concatenate(all_patches) if all_patches else np.zeros((0, 64, 64), dtype=np.float32)
-    track_ids = np.concatenate(all_track_ids) if all_track_ids else np.zeros(0, dtype=np.int32)
-    track_lengths = np.concatenate(all_track_lengths) if all_track_lengths else np.zeros(0, dtype=np.int32)
-    if patch_type == "original":
-        affine_shapes = np.concatenate(all_affine_shapes)
-    else:
-        affine_shapes = None
+    def cat(parts, empty):
+        return np.concatenate(parts) if parts else empty
 
-    return patches, track_ids, track_lengths, affine_shapes
+    patches = cat(all_patches, np.zeros((0, 64, 64), dtype=np.float32))
+    track_ids = cat(all_track_ids, np.zeros(0, dtype=np.int32))
+    track_lengths = cat(all_track_lengths, np.zeros(0, dtype=np.int32))
+    masks = cat(all_masks, np.zeros((0, 64, 64), dtype=np.float32)) if with_mask else None
+    affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
+    is_anchor = cat(all_is_anchor, np.zeros(0, dtype=np.uint8))
+
+    return patches, masks, track_ids, track_lengths, affine_shapes, is_anchor
 
 
-def load_untracked_patches(f, sequences=None):
+def load_untracked_patches(f, sequences=None, with_mask=False):
+    """Load confuser (untracked) patches, optionally with their in-frame masks.
+
+    Returns `patches` (or `(patches, masks)` when `with_mask`).
+    """
     seqs = f["sequences"]
-    seq_names = list(filter(lambda s: re.fullmatch("\\w+_([A-Fa-f0-9]+)\\)?", s)[1] in sequences, seqs.keys())) if sequences is not None else list(seqs.keys())
-    parts = []
+    seq_names = _select_sequences(seqs, sequences)
+    parts, mask_parts = [], []
     for name in seq_names:
         sg = seqs[name]
         if "untracked" in sg:
             parts.append(sg["untracked/patches"][:])
-    if parts:
-        patches = np.concatenate(parts)
-    else:
-        patches = np.empty((0, 64, 64), dtype=np.float32)
-    return patches
+            if with_mask:
+                ug = sg["untracked"]
+                mask_parts.append(ug["masks"][:] if "masks" in ug
+                                  else np.ones_like(parts[-1]))
+    patches = np.concatenate(parts) if parts else np.empty((0, 64, 64), dtype=np.float32)
+    if not with_mask:
+        return patches
+    masks = np.concatenate(mask_parts) if mask_parts else np.empty((0, 64, 64), dtype=np.float32)
+    return patches, masks
 
 
 class BlobTrackData(torch.utils.data.Dataset):
@@ -96,79 +124,74 @@ class BlobTrackData(torch.utils.data.Dataset):
         sequences=None,
         include_untracked=False,
         max_untracked_to_tracked_ratio=1.0,
-        patch_type="cartesian"
+        patch_type="cartesian",   # informational: one file = one patch type
+        with_mask=False,
     ):
+        self.with_mask = with_mask
+        if not load_into_memory:
+            raise NotImplementedError("BlobTrackData only supports load_into_memory=True")
+
         with h5py.File(h5_path, "r") as f:
-            all_patches, track_ids, track_lengths, affine_shapes = _load_all_sequences(f, sequences, patch_type)
+            (all_patches, all_masks, track_ids, _track_lengths,
+             affine_shapes, is_anchor) = _load_all_sequences(f, sequences, with_mask=with_mask)
 
-            # # Identify valid tracks (long enough for positive pairs)
-            # valid_set = set(
-            #     (np.where(track_lengths >= min_track_length)[0] + 1).tolist()
-            # )  # track_ids are 1-based per sequence (offset applied)
+            self.patches = all_patches
+            self.labels = track_ids.astype(np.uint32)
+            self.affine_shapes = affine_shapes
+            self.masks = all_masks
+            self.is_anchor = is_anchor
 
-            # # Build mask of patches belonging to valid tracks
-            # mask = np.isin(track_ids, list(valid_set))
-
-            if load_into_memory:
-                self.patches = all_patches
-                self.labels = track_ids.astype(np.uint32)
-                self.affine_shapes = affine_shapes
-                
-                if include_untracked:
-                    self.untracked_patches = load_untracked_patches(f, sequences)
-
-                self.untracked_patches = self.untracked_patches[:int(len(self.patches) * max_untracked_to_tracked_ratio)] if include_untracked else None
+            if include_untracked:
+                ut = load_untracked_patches(f, sequences, with_mask=with_mask)
+                ut_patches, ut_masks = ut if with_mask else (ut, None)
+                keep = int(len(self.patches) * max_untracked_to_tracked_ratio)
+                self.untracked_patches = ut_patches[:keep]
+                self.untracked_masks = ut_masks[:keep] if with_mask else None
             else:
-                self._h5_path = h5_path
-                self._sequences = sequences
-                # self._indices = np.where(mask)[0]
-                self.patches = None
+                self.untracked_patches = None
+                self.untracked_masks = None
 
-            # self._raw_labels = track_ids[mask]
-
-        # Remap to contiguous 0-based labels
-        # unique, inverse = np.unique(self._raw_labels, return_inverse=True)
-        # self.labels = inverse.astype(np.int32)
-        # self.n_classes = len(unique)
-        if include_untracked:
+        if include_untracked and len(self.untracked_patches):
+            # Confusers get fresh singleton labels in a reserved band; they are
+            # negatives only (their is_anchor is 0, they carry no board mask).
+            n_ut = len(self.untracked_patches)
             untracked_start_label = (self.labels[0] & 0xFFFF0000) + 0x00008000
             self.labels = np.concatenate([
                 self.labels,
-                np.arange(untracked_start_label, untracked_start_label + len(self.untracked_patches), dtype=self.labels.dtype)
+                np.arange(untracked_start_label, untracked_start_label + n_ut, dtype=self.labels.dtype),
             ])
+            self.is_anchor = np.concatenate([self.is_anchor, np.zeros(n_ut, dtype=np.uint8)])
 
-        print(
-            f"BlobTrackDataset: {len(self.labels)} patches"
-        )
+        print(f"BlobTrackDataset: {len(self.labels)} patches (with_mask={with_mask})")
 
     def __len__(self):
         return len(self.labels)
 
-    def __getitem__(self, idx):
-        if self.patches is not None:
-            if idx >= self.patches.shape[0]:
-                patch = self.untracked_patches[idx - self.patches.shape[0]]
-            else:
-                patch = self.patches[idx]  # (P, P) float32
+    def _get_patch_mask(self, idx):
+        """Return (patch, mask) numpy (P, P) for a global index, spanning the
+        tracked block and the appended untracked (confuser) block."""
+        n_tracked = self.patches.shape[0]
+        if idx >= n_tracked:
+            j = idx - n_tracked
+            patch = self.untracked_patches[j]
+            mask = self.untracked_masks[j] if self.with_mask else None
         else:
-            with h5py.File(self._h5_path, "r") as f:
-                patches, _, _, affine_shape = _load_all_sequences(f, self._sequences)
-                patch = patches[self._indices[idx]]
+            patch = self.patches[idx]
+            mask = self.masks[idx] if self.with_mask else None
+        return patch, mask
 
-        patch = torch.from_numpy(patch).unsqueeze(0).transpose(1, 2)  # (1, P, P)
-        label = self.labels[idx]
-        if self.affine_shapes:
-            affine_shape = torch.from_numpy(patch).unsqueeze(0).transpose(1, 2)
-            return {
-                "patch": patch,
-                "label": label,
-                "affine_shape": affine_shape
-            }
-        else:
-            return {
-                "patch": patch,
-                "label": label,
-            }
+    def __getitem__(self, idx):
+        patch, mask = self._get_patch_mask(idx)
+        # (P, P) -> (1, P, P), transposed to undo Julia column-major storage.
+        patch = torch.from_numpy(patch).unsqueeze(0).transpose(1, 2)
+        item = {"patch": patch, "label": self.labels[idx]}
+        if self.affine_shapes is not None:
+            item["affine_shape"] = torch.from_numpy(self.affine_shapes[idx]) if idx < self.patches.shape[0] \
+                else torch.eye(2)
+        if self.with_mask:
+            item["mask"] = torch.from_numpy(mask).unsqueeze(0).transpose(1, 2)
+            item["is_anchor"] = int(self.is_anchor[idx])
+        return item
 
 
 if __name__ == "__main__":
@@ -178,7 +201,12 @@ if __name__ == "__main__":
     val_sequences = []
     with h5py.File(track_file, "r") as f:
         for i, seq in enumerate(f["sequences"].keys()):
-            board_id = re.fullmatch("\\w+_([A-Fa-f0-9]+)", seq)[1]
+            # Names are `<media>_<uid>` (tracked) or `<uid>` (anchor); take the
+            # trailing hex uid either way.
+            m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", seq)
+            if m is None:
+                continue
+            board_id = m[1]
 
             if board_id not in test_sequences and board_id not in val_sequences and board_id not in train_sequences:
                 if i % 10 == 0:

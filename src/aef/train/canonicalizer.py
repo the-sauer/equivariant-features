@@ -40,7 +40,8 @@ def extract_patches(imgs, _homographies, coords, scales, patch_size=64, scale_fa
     return patches
 
 
-def process_batch_canonicalize(model, data, criterion, _augmentation, device, cfg, optimizer=None):
+def process_batch_canonicalize(model, data, criterion, _augmentation, device, cfg, optimizer=None,
+                               validation=False, **_):
     # assert "affine_shape" in data, "canonicalization requires ground truth shape to be available"
     with torch.no_grad():
         img = data["images"]

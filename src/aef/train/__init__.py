@@ -330,7 +330,7 @@ def train_func(process_batch):
                     loop = tqdm(chain(*loaders), leave=True)
                     loop.set_description(f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]")
                     for data in loop:
-                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg)
+                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg, validation=True)
                         batch_items = data["keypoints"].size(0)
                         loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                         # Weighted total drives best.pth selection; with the

@@ -17,7 +17,8 @@
 import torch
 
 
-def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
+def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
+                        validation=False, **_):
     keypoints = data["keypoints"].to(device)
     coords = data["keypoint_coords"].to(device)
 
@@ -26,8 +27,13 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg, **_):
     # Optional learned-mask inputs (only present when the dataset has
     # ``precompute_masks=True``). Absent -> the model is called exactly as before,
     # so plain descriptors (HardNet, cartesian) are untouched.
-    mask = data["masks"].to(device) if "masks" in data else None
-    is_anchor = data["is_anchor"].to(device) if "is_anchor" in data else None
+    #
+    # During VALIDATION the GT mask is withheld from the network: at test time the
+    # mask is unavailable and the model must predict it, so validation must mirror
+    # that (feed patches only, no mask / no is_anchor). This also skips the anchor
+    # mask-supervision BCE below, which needs the GT mask.
+    mask = data["masks"].to(device) if ("masks" in data and not validation) else None
+    is_anchor = data["is_anchor"].to(device) if ("is_anchor" in data and not validation) else None
 
     if mask is not None or is_anchor is not None:
         out = model(patches, mask=mask, is_anchor=is_anchor)
