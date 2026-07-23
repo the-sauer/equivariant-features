@@ -166,7 +166,7 @@ class BlobTrackData(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        h5_path,
+        h5_path=None,
         min_track_length=2,
         load_into_memory=True,
         sequences=None,
@@ -177,6 +177,9 @@ class BlobTrackData(torch.utils.data.Dataset):
         with_mask=False,
         **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
+        if h5_path is None:
+            raise ValueError("h5_path must be provided")
+
         self.with_mask = with_mask
         if not load_into_memory:
             raise NotImplementedError("BlobTrackData only supports load_into_memory=True")

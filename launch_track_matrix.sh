@@ -46,10 +46,10 @@ DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_fftmask)
 # model's scale knob has to agree with the checkpoint).
 declare -A SCALES=(
   [steerable]="8 16 32 64 96 128"
-  [logpolar]="8 16 32 64 96 128"
-  [logpolar_circ]="8 16 32 64 96 128"
-  [logpolar_fft]="8 16 32 64 96 128"
-  [logpolar_fftmask]="8 16 32 64 96 128"
+  [logpolar]="96"
+  [logpolar_circ]="96"
+  [logpolar_fft]="96"
+  [logpolar_fftmask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
 )
@@ -64,7 +64,7 @@ declare -A NET_EXTRA=(
   [efficient8]="model.params.n_rotations=8"
   [efficient4]="model.params.n_rotations=4"
   [logpolar_circ]="model.name=HardNetLogPolar"
-  [logpolar_fft]="model.name=HardNetLogPolar model.params.head=fft model.params.n_harmonics=5"
+  [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=5"
 )
 
 # ---- Slurm resources --------------------------------------------------------

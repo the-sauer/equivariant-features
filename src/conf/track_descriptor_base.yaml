@@ -22,12 +22,13 @@ track_path: ???
 scale: 64.0
 
 training:
+  ignore_mask: true
   patch_size: 64
   process_batch: process_batch_blobs
   m_per_class: 4          # SupCon/FPR95 need >=1 positive pair per batch -> class-balanced sampler
   num_workers: 8
   num_epochs: 50
-  batch_size: 1024
+  batch_size: 7800
   dataset:
     name: BlobTrackData
     params:
@@ -37,6 +38,46 @@ training:
       load_into_memory: true
       include_untracked: true          # confusers as extra negatives
       max_untracked_to_tracked_ratio: 1.0
+      sequences:
+        - "028"
+        - "08d"
+        - "14b"
+        - "187"
+        - "232"
+        - "25d"
+        - "2f7"
+        - "2fe"
+        - "336"
+        - "452"
+        - "568"                             
+        - "5b6"
+        - "5e2"
+        - "602"
+        - "695"
+        - "6a6"
+        - "6b0"
+        - "7ff"
+        - "88b"
+        - "8a1"
+        - "940"
+        - "942"
+        - "a28"
+        - "a2e"
+        - "a4b"
+        - "a62"
+        - "b70"
+        - "b9f"
+        - "bce"
+        - "c8e"
+        - "d42"
+        - "da0"
+        - "e89"
+        - "ef7"
+        - "f23"
+        - "f3f"
+        - "f71"
+        - "f80"
+        - "fde"
   optimizer:
     name: AdamW
     params:
@@ -59,6 +100,18 @@ validation:
       min_track_length: 2
       load_into_memory: true
       include_untracked: true
+      sequences:
+        - "102"
+        - "291"
+        - "536"
+        - "662"
+        - "878"
+        - "9ca"
+        - "b0b"
+        - "cf2"
+        - "eee"
+        - "f75"
+
   loss:
     - name: FPR95
 

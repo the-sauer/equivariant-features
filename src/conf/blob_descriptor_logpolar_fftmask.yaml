@@ -1,5 +1,6 @@
 defaults:
   - blob_descriptor_logpolar
+  - dgx
   - _self_
 
 # Log-polar descriptor with the DFT-magnitude head + learned mask-aware pooling.
@@ -26,6 +27,8 @@ training:
   dataset:
     params:
       precompute_masks: true
+  loss:
+    - name: SupCon
 
 validation:
   shared_params:

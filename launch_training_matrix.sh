@@ -29,6 +29,7 @@ declare -A CONFIG=(
   [steerable]=blob_descriptor_steerable
   [logpolar]=blob_descriptor_logpolar
   [logpolar_circ]=blob_descriptor_logpolar
+  [logpolar_circ_nomask]=blob_descriptor_logpolar
   [logpolar_fft]=blob_descriptor_logpolar
   [logpolar_fftmask]=blob_descriptor_logpolar_fftmask
   [efficient8]=blob_descriptor_efficient
@@ -48,7 +49,7 @@ declare -A CONFIG=(
 # Bash associative arrays are UNORDERED, so the previous `${!CONFIG[@]}` was hash order —
 # steerable landed last by accident, and renaming or adding a network reshuffles it
 # silently. Must cover every CONFIG key (checked below).
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_fftmask steerable)
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_fftmask logpolar_circ_nomask steerable)
 
 # What a bare (no-arg) invocation submits. NET_ORDER above stays the full registry (it
 # must list every CONFIG key, and fixes the slowest-last schedule); DEFAULT_SWEEP just
@@ -60,9 +61,10 @@ DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_fftmask)
 declare -A SCALES=(
   [steerable]="8 16 32 64 96 128"
   [logpolar]="8 16 32 64 96 128"
-  [logpolar_circ]="8 16 32 64 96 128"
-  [logpolar_fft]="8 16 32 64 96 128"
-  [logpolar_fftmask]="8 16 32 64 96 128"
+  [logpolar_circ]="96"
+  [logpolar_circ_nomask]="96"
+  [logpolar_fft]="96 128"
+  [logpolar_fftmask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
 )
@@ -82,10 +84,11 @@ declare -A NET_EXTRA=(
   # off) — it only makes the dataset cache key match `logpolar_fftmask`, so all three
   # log-polar variants share ONE prebuilt (mask-carrying) dataset. HardNetLogPolar
   # accepts and ignores the mask inputs, so no mask loss is added.
-  [logpolar_circ]="model.name=HardNetLogPolar training.dataset.params.precompute_masks=true validation.shared_params.params.precompute_masks=true"
+  [logpolar_circ]="model.name=HardNetLogPolar ++training.dataset.params.precompute_masks=true ++validation.shared_params.params.precompute_masks=true"
+  [logpolar_circ_nomask]="++training.ignore_mask=true ++validation.shared_params.params.ignore_mask=true"
   # DFT-magnitude angular head instead of the max-pool (keeps the full angular
   # spectrum). Shares the same mask dataset (mask ignored, as above).
-  [logpolar_fft]="model.name=HardNetLogPolar model.params.head=fft model.params.n_harmonics=5 training.dataset.params.precompute_masks=true validation.shared_params.params.precompute_masks=true"
+  [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=5 ++training.dataset.params.precompute_masks=true ++validation.shared_params.params.precompute_masks=true"
   # `logpolar_fftmask` (FFT head + learned mask) needs no NET_EXTRA — its dedicated
   # config `blob_descriptor_logpolar_fftmask` sets the model + `precompute_masks`.
 )
@@ -101,6 +104,7 @@ declare -A NET_DATASET_GROUP=(
   [efficient8]=cartesian
   [efficient4]=cartesian
   [logpolar]=logpolar
+  [logpolar_circ_nomask]=logpolar
   # circ/fft/fftmask all share ONE mask-carrying dataset: the mask channel is a superset
   # the mask-less variants simply ignore, so the boards/SIFT/patches are built once. Only
   # the plain `logpolar` variant (model `HardNet`, which can't take the mask kwargs)
@@ -115,7 +119,7 @@ declare -A GROUP_CONFIG=(
   [logpolar_mask]=blob_descriptor_logpolar_fftmask
 )
 # Validation split names from `validation.datasets` — one prebuild task each.
-VAL_SPLITS=(overall small medium large)
+VAL_SPLITS=(overall far medium near)
 
 # ---- Slurm resources --------------------------------------------------------
 GRES="${GRES:-gpu:1}"
@@ -150,6 +154,7 @@ declare -A NET_CPUS=(
   [steerable]=8
   [logpolar]=10
   [logpolar_circ]=10
+  [logpolar_circ_nomask]=10
   [logpolar_fft]=10
   [logpolar_fftmask]=10
   [efficient8]=10
@@ -299,7 +304,7 @@ cd deps/BlobBoards.jl
 pixi run python ../../src/run_training.py \\
   --config-name ${cfg} scale=${scale} +experiment_name=${exp} \\
   training.dataset.params.supersample=${ss} \\
-  validation.shared_params.params.supersample=${ss} ${extra}
+  validation.shared_params.params.supersample=${ss} ++training.continue= ${extra}
 EOF
 )
   if [[ "$DRY_RUN" == "1" ]]; then

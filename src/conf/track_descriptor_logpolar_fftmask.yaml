@@ -18,6 +18,7 @@ model:
     learned_mask: true
 
 training:
+  ignore_mask: false
   mask_loss_weight: 1.0
   dataset:
     params:

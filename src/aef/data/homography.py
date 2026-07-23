@@ -124,8 +124,6 @@ def find_images(
     )(os.walk(dir))
 
 
-
-
 def resolve_background_dir(background, kaggle_slug):
     """Resolve a directory of background scene images.
 
@@ -380,7 +378,7 @@ def extract_logpolar_patches(
     scales,
     patch_size=64,
     inner_factor=2.0,
-    outer_factor=32.0,
+    outer_factor=96.0,
     supersample=3,
     return_mask=False,
     mask_imgs=None,

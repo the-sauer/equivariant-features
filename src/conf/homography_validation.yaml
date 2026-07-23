@@ -19,6 +19,12 @@ validation:
         max_diameter_fraction: 0.4
         min_scale: 0.2
         frame_width: 10
+      transform_params:
+        fit_to_frame: true
+        allow_artifacts: true
+        perspective_amplitude_x: 0.3
+        perspective_amplitude_y: 0.3
+        translation: false
       # Pin the warps so every band sees the SAME warp of each (already pinned) board.
       # Without it each band draws its own from numpy's global RNG, so the bands differ
       # by a random rotation on top of the scale filter they are meant to isolate —

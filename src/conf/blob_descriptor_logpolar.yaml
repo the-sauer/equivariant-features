@@ -1,6 +1,6 @@
 defaults:
   - blob_descriptor_base
-  - homography_validation
+  # - homography_validation
   - dgx
   - _self_
 
@@ -16,12 +16,15 @@ model:
     patch_size: 64
 
 training:
-  num_epochs: 100
+  batch_size: 4096
+  num_epochs: 500
+  ignore_mask: false
   dataset:
     params:
       patch_type: logpolar
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: "${scale}"
+      precompute_masks: true
 
 validation:
   shared_params:
@@ -29,3 +32,5 @@ validation:
       patch_type: logpolar
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: "${scale}"
+      precompute_masks: true
+      ignore_mask: false
