@@ -14,11 +14,59 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import collections
+import random
 import re
 
 import h5py
 import numpy as np
 import torch
+
+
+class _ListBatchSampler:
+    """A precomputed, deterministic batch sampler: yields the same list of index
+    lists every epoch (so validation FPR is comparable across epochs)."""
+
+    is_batch_sampler = True   # marks this for the batch_sampler= DataLoader path
+
+    def __init__(self, batches):
+        self.batches = batches
+
+    def __iter__(self):
+        return iter(self.batches)
+
+    def __len__(self):
+        return len(self.batches)
+
+
+class _ReshufflingBatchSampler:
+    """Balanced batch sampler that repacks with a fresh shuffle every epoch.
+
+    Used for TRAINING: positive track groups and confusers are fixed, but their
+    order (and thus the batch composition) is re-randomized each epoch for training
+    diversity, while ``__len__`` stays stable for the progress bar.
+    """
+
+    is_batch_sampler = True
+
+    def __init__(self, pack, pos_groups, confusers, batch_size, confuser_fraction, seed):
+        self._pack = pack
+        self._pos = pos_groups
+        self._conf = confusers
+        self._bs = batch_size
+        self._cf = confuser_fraction
+        self._seed = seed
+        self._epoch = 0
+        self._len = len(pack(pos_groups, confusers, batch_size, confuser_fraction,
+                             random.Random(seed)))
+
+    def __iter__(self):
+        rng = random.Random(self._seed + self._epoch)
+        self._epoch += 1
+        return iter(self._pack(self._pos, self._conf, self._bs, self._cf, rng))
+
+    def __len__(self):
+        return self._len
 
 
 # Single-mode `.tracks` layout (BlobBoards >= single-type/single-scale format):
@@ -204,34 +252,97 @@ class BlobTrackData(torch.utils.data.Dataset):
     def _split_sequences(h5_path, split):
         """Return the set of board uids belonging to a train/val/test split.
 
-        Same residue rule as the ``__main__`` bootstrap below and BlobBoards'
-        ``get_seeds``: enumerating the file's sequences, index ``% 10 == 0`` is
-        test, ``== 1`` is validation, and the rest is training. Selecting by uid
-        (not sequence name) keeps a board's anchor and tracked sequences together.
+        A board's anchor and tracked sequences SHARE a uid (names are ``<uid>`` or
+        ``<media>_<uid>``), so the split must be decided per *uid*, assigned once on
+        first sight — otherwise the same board could land in val via one sequence and
+        train via another, leaking data across splits. Same residue rule as the
+        ``__main__`` bootstrap: on a uid's first occurrence, enumeration index
+        ``% 10 == 0`` is test, ``== 1`` is validation, the rest is training.
         """
         assert split in ("train", "val", "test"), f"Unknown split {split!r}"
-        selected = set()
+        assigned = {}
         with h5py.File(h5_path, "r") as f:
             for i, seq in enumerate(f["sequences"].keys()):
                 m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", seq)
                 if m is None:
                     continue
-                grp = "test" if i % 10 == 0 else ("val" if i % 10 == 1 else "train")
-                if grp == split:
-                    selected.add(m[1])
-        return selected
+                uid = m[1]
+                if uid in assigned:
+                    continue
+                assigned[uid] = "test" if i % 10 == 0 else ("val" if i % 10 == 1 else "train")
+        return {uid for uid, grp in assigned.items() if grp == split}
 
-    def get_sampler(self, batch_size, m=4):
-        """Class-balanced sampler: ``m`` patches per track id per batch.
+    def _grouped_indices(self):
+        """Split the dataset's global indices into positive track groups (a
+        ``track_id`` with >= 2 patches, so it can form a positive pair — its anchor
+        patch is one of them) and confusers (singleton track_ids + the untracked
+        block, one representative index each — they can only ever be negatives)."""
+        groups = collections.defaultdict(list)
+        for i, lab in enumerate(self.labels):
+            groups[int(lab)].append(i)
+        pos_groups = [inds for inds in groups.values() if len(inds) >= 2]
+        confusers = [inds[0] for inds in groups.values() if len(inds) == 1]
+        return pos_groups, confusers
 
-        Contrastive losses (SupCon/FPR95) need multiple views of the same track
-        in a batch to form positive pairs; plain shuffling scatters them. The
-        per-sample label is the track id. Mirrors ``HomographyData.get_sampler``.
+    @staticmethod
+    def _pack_balanced(pos_groups, confusers, batch_size, confuser_fraction, rng):
+        """Pack whole positive groups + distinct confusers into batches.
+
+        Each batch is filled with whole track groups up to ``1 - confuser_fraction``
+        of ``batch_size`` (guaranteeing >= 1 positive pair, since a group has >= 2
+        members), then topped up with that many distinct confusers as negatives.
+        No index is ever repeated within a batch, so there are no distance-0
+        "positives" — the trap that MPerClassSampler falls into when it samples a
+        singleton class ``m`` times with replacement. ``rng`` fixes the shuffle.
         """
-        from pytorch_metric_learning.samplers import MPerClassSampler
+        pos_groups = list(pos_groups)
+        confusers = list(confusers)
+        rng.shuffle(pos_groups)
+        rng.shuffle(confusers)
+        n_conf = max(0, round(batch_size * confuser_fraction))
+        n_pos = max(1, batch_size - n_conf)
 
-        return MPerClassSampler(
-            self.labels, m=m, batch_size=batch_size, length_before_new_iter=len(self.labels)
+        def take_confusers(cursor):
+            if not (n_conf and confusers):
+                return [], cursor
+            k = min(n_conf, len(confusers))
+            take = [confusers[(cursor + j) % len(confusers)] for j in range(k)]
+            return take, (cursor + k) % len(confusers)
+
+        batches, cur, cursor = [], [], 0
+        for grp in pos_groups:
+            # Flush before this group would push the positive block past its budget,
+            # but always keep at least one group per batch (>= 1 positive pair).
+            if cur and len(cur) + len(grp) > n_pos:
+                conf, cursor = take_confusers(cursor)
+                batches.append(cur + conf)
+                cur = []
+            cur.extend(grp)
+        if cur:
+            conf, cursor = take_confusers(cursor)
+            batches.append(cur + conf)
+        return batches
+
+    def get_sampler(self, batch_size, m=None, confuser_fraction=0.5, seed=0):
+        """Balanced TRAINING batch sampler, re-randomized each epoch.
+
+        Contrastive losses (SupCon) need positive pairs in a batch. The obvious
+        ``MPerClassSampler`` is wrong for track data: every confuser is its own
+        singleton class, so it would sample that one patch ``m`` times with
+        replacement — duplicate rows with the same label, i.e. distance-0 fake
+        positives that pull unmatchable background blobs together. Instead this
+        packs whole track groups as positives (no duplication) and adds distinct
+        confusers as negatives, exactly like the eval sampler but reshuffled each
+        epoch. ``m`` is accepted for the loop's ``m_per_class`` hook but unused —
+        whole groups already provide multiple views per track.
+        """
+        pos_groups, confusers = self._grouped_indices()
+        n_conf = max(0, round(batch_size * confuser_fraction))
+        print(f"BlobTrackData train sampler: {len(pos_groups)} matchable tracks + "
+              f"{len(confusers)} confusers (~{batch_size - n_conf} pos / {n_conf} conf "
+              f"per batch, reshuffled each epoch)")
+        return _ReshufflingBatchSampler(
+            self._pack_balanced, pos_groups, confusers, batch_size, confuser_fraction, seed
         )
 
     def get_collate_func(self):
@@ -262,6 +373,38 @@ class BlobTrackData(torch.utils.data.Dataset):
             return res
 
         return collate_track
+
+    def get_eval_batch_sampler(self, batch_size, confuser_fraction=0.5, seed=0):
+        """Balanced validation batches, each guaranteed to contain positive pairs.
+
+        FPR95 is NaN for any batch with no same-``track_id`` pair (see
+        ``evaluate.fpr_from_distances``). In a ``.tracks`` file each ``track_id``
+        appears at most once per sequence, so a track's matching observations live
+        in *other* sequences (its anchor, or another media of the board) — a
+        contiguous ``shuffle=False`` slice almost never captures two of them, hence
+        the all-NaN validation. This sampler instead groups patches by ``track_id``
+        and packs each batch as:
+
+          * whole track groups (ids with >= 2 patches) — each already carries its
+            anchor patch, so anchor<->tracked positives are guaranteed — filling
+            ``1 - confuser_fraction`` of the batch, then
+          * that many distinct confusers (singleton ids + the untracked block),
+            each used at most once so they only ever act as negatives (no
+            distance-0 duplicate "positives").
+
+        One pass over the positive tracks defines an epoch; the packing is seeded,
+        so every epoch sees the same batches (comparable FPR curves). Batch sizes
+        are approximate (whole groups), which the loss/metric handle fine.
+        """
+        pos_groups, confusers = self._grouped_indices()
+        batches = self._pack_balanced(
+            pos_groups, confusers, batch_size, confuser_fraction, random.Random(seed)
+        )
+        n_conf = max(0, round(batch_size * confuser_fraction))
+        print(f"BlobTrackData eval sampler: {len(batches)} batches from {len(pos_groups)} "
+              f"matchable tracks + {len(confusers)} confusers "
+              f"(~{batch_size - n_conf} pos / {n_conf} conf per batch)")
+        return _ListBatchSampler(batches)
 
 
 if __name__ == "__main__":

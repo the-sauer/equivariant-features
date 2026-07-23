@@ -180,14 +180,26 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
             if m_per_class and hasattr(d, "get_sampler")
             else None
         )
-        train_loader.append(torch.utils.data.DataLoader(
-            d,
-            batch_size=cfg.training.batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
-            collate_fn=d.get_collate_func(),
-            **_loader_kwargs(train_workers, persistent=True),
-        ))
+        # A dataset may return a *batch* sampler (yields index lists) rather than a
+        # per-sample sampler — BlobTrackData does, to guarantee positive pairs and
+        # avoid the singleton-confuser duplication MPerClassSampler would introduce.
+        # Those are mutually exclusive with batch_size/shuffle/sampler on DataLoader.
+        if getattr(sampler, "is_batch_sampler", False):
+            train_loader.append(torch.utils.data.DataLoader(
+                d,
+                batch_sampler=sampler,
+                collate_fn=d.get_collate_func(),
+                **_loader_kwargs(train_workers, persistent=True),
+            ))
+        else:
+            train_loader.append(torch.utils.data.DataLoader(
+                d,
+                batch_size=cfg.training.batch_size,
+                shuffle=sampler is None,
+                sampler=sampler,
+                collate_fn=d.get_collate_func(),
+                **_loader_kwargs(train_workers, persistent=True),
+            ))
     def build_criterion(loss_cfgs):
         return {
             loss_cfg.name: (
@@ -204,15 +216,30 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     # Pair each dataset with its own criterion + loader(s) so their metrics are
     # accumulated and reported separately (keyed ``<loss>@<label>``) rather than
     # pooled into a single number across all validation datasets.
+    #
+    # A dataset that exposes ``get_eval_batch_sampler`` (BlobTrackData) drives a
+    # class-balanced batch_sampler so every validation batch contains positive
+    # pairs — a plain contiguous ``shuffle=False`` slice of a track file has its
+    # matching observations scattered across sequences, so most batches would have
+    # no positive and FPR95 would be NaN. ``validation.confuser_fraction`` (default
+    # 0.5) sets how much of each batch is hard-negative confusers.
+    val_conf_frac = float(getattr(cfg.validation, "confuser_fraction", 0.5))
+
+    def _val_loader(d):
+        if hasattr(d, "get_eval_batch_sampler"):
+            batch_sampler = d.get_eval_batch_sampler(
+                cfg.validation.batch_size, confuser_fraction=val_conf_frac
+            )
+            return torch.utils.data.DataLoader(
+                d, batch_sampler=batch_sampler, collate_fn=d.get_collate_func(),
+                **_loader_kwargs(val_workers, persistent=False))
+        return torch.utils.data.DataLoader(
+            d, batch_size=cfg.validation.batch_size, shuffle=False,
+            collate_fn=d.get_collate_func(),
+            **_loader_kwargs(val_workers, persistent=False))
+
     validation_entries = [
-        (
-            label,
-            [torch.utils.data.DataLoader(
-                d, batch_size=cfg.validation.batch_size, shuffle=False,
-                collate_fn=d.get_collate_func(),
-                **_loader_kwargs(val_workers, persistent=False)) for d in datasets],
-            build_criterion(loss_cfgs),
-        )
+        (label, [_val_loader(d) for d in datasets], build_criterion(loss_cfgs))
         for label, datasets, loss_cfgs in validation_dataset
     ]
 
