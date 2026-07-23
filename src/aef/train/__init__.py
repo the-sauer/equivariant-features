@@ -130,6 +130,21 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
         start_epoch = checkpoint["epoch"] + 1
         best_loss = float("inf") #checkpoint["best_loss"]
+    elif getattr(cfg.training, "init_from_checkpoint", None):
+        # Warm-start: load ONLY the model weights and start a FRESH run (epoch 0, new
+        # optimizer/scheduler). Distinct from `continue_from_checkpoint`, which resumes a
+        # run in place. Used to seed track training from a synthetic-descriptor checkpoint
+        # (see launch_track_matrix.sh). strict=False tolerates head/shape drift between
+        # the source model and this run's model, reporting what was skipped.
+        checkpoint = torch.load(cfg.training.init_from_checkpoint, map_location=device)
+        state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        msg = (f"Warm-started model from {cfg.training.init_from_checkpoint} "
+               f"(missing={len(missing)}, unexpected={len(unexpected)} keys)")
+        print("\033[1m" + msg + "\033[0m")
+        logging.info(msg)
+        start_epoch = 0
+        best_loss = float("inf")
     else:
         start_epoch = 0
         best_loss = float("inf")

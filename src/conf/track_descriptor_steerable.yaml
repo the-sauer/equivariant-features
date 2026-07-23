@@ -1,0 +1,22 @@
+# Steerable (NoStride) descriptor on track data. Model block mirrors
+# blob_descriptor_steerable so a run warm-started from that checkpoint matches.
+defaults:
+  - track_descriptor_base
+  - _self_
+
+scale: 64.0
+
+model:
+  name: BlobDescriptorNoStride
+  params:
+    scale_factors: ["${scale}"]
+    in_channels: 1
+
+training:
+  dataset:
+    params:
+      patch_type: cartesian
+validation:
+  dataset:
+    params:
+      patch_type: cartesian

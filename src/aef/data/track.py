@@ -122,14 +122,21 @@ class BlobTrackData(torch.utils.data.Dataset):
         min_track_length=2,
         load_into_memory=True,
         sequences=None,
+        split=None,   # "train"/"val"/"test": pick sequences by residue class (see _split_sequences)
         include_untracked=False,
         max_untracked_to_tracked_ratio=1.0,
         patch_type="cartesian",   # informational: one file = one patch type
         with_mask=False,
+        **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
         self.with_mask = with_mask
         if not load_into_memory:
             raise NotImplementedError("BlobTrackData only supports load_into_memory=True")
+
+        # Explicit `sequences` wins; otherwise a `split` name selects a residue class
+        # of the file's sequences so one `.tracks` file backs train/val/test.
+        if sequences is None and split is not None:
+            sequences = self._split_sequences(h5_path, split)
 
         with h5py.File(h5_path, "r") as f:
             (all_patches, all_masks, track_ids, _track_lengths,
@@ -192,6 +199,69 @@ class BlobTrackData(torch.utils.data.Dataset):
             item["mask"] = torch.from_numpy(mask).unsqueeze(0).transpose(1, 2)
             item["is_anchor"] = int(self.is_anchor[idx])
         return item
+
+    @staticmethod
+    def _split_sequences(h5_path, split):
+        """Return the set of board uids belonging to a train/val/test split.
+
+        Same residue rule as the ``__main__`` bootstrap below and BlobBoards'
+        ``get_seeds``: enumerating the file's sequences, index ``% 10 == 0`` is
+        test, ``== 1`` is validation, and the rest is training. Selecting by uid
+        (not sequence name) keeps a board's anchor and tracked sequences together.
+        """
+        assert split in ("train", "val", "test"), f"Unknown split {split!r}"
+        selected = set()
+        with h5py.File(h5_path, "r") as f:
+            for i, seq in enumerate(f["sequences"].keys()):
+                m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", seq)
+                if m is None:
+                    continue
+                grp = "test" if i % 10 == 0 else ("val" if i % 10 == 1 else "train")
+                if grp == split:
+                    selected.add(m[1])
+        return selected
+
+    def get_sampler(self, batch_size, m=4):
+        """Class-balanced sampler: ``m`` patches per track id per batch.
+
+        Contrastive losses (SupCon/FPR95) need multiple views of the same track
+        in a batch to form positive pairs; plain shuffling scatters them. The
+        per-sample label is the track id. Mirrors ``HomographyData.get_sampler``.
+        """
+        from pytorch_metric_learning.samplers import MPerClassSampler
+
+        return MPerClassSampler(
+            self.labels, m=m, batch_size=batch_size, length_before_new_iter=len(self.labels)
+        )
+
+    def get_collate_func(self):
+        """Collate track items into a ``process_batch_blobs``-compatible batch.
+
+        The blob process-batch keys are reused verbatim so track training runs
+        through the exact same loop/loss as the synthetic descriptor: ``keypoints``
+        carries the track id in column 1 (the contrastive ``indices``). The patches
+        are already canonicalized, so there is no frame to fall out of — zero
+        ``keypoint_coords`` inside a ``(1, 1)`` ``image_size`` keep every sample
+        in-bounds for the frame filter in ``process_batch_blobs``.
+        """
+        def collate_track(batch):
+            n = len(batch)
+            labels = torch.tensor([int(item["label"]) for item in batch], dtype=torch.long)
+            res = {
+                # (N, 2): column 0 unused (feature/image id), column 1 = contrastive index.
+                "keypoints": torch.stack([torch.zeros(n, dtype=torch.long), labels], dim=1),
+                "keypoint_coords": torch.zeros(n, 2),
+                "image_size": torch.tensor([1.0, 1.0]),
+                "patches": torch.stack([item["patch"] for item in batch]),
+            }
+            if "mask" in batch[0]:
+                res["masks"] = torch.stack([item["mask"] for item in batch])
+                res["is_anchor"] = torch.tensor(
+                    [int(item["is_anchor"]) for item in batch], dtype=torch.long
+                )
+            return res
+
+        return collate_track
 
 
 if __name__ == "__main__":

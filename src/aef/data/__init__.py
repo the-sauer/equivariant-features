@@ -23,6 +23,13 @@ try:
 except ImportError as e:
     print("Could not import blobboards dataset. Make sure to install the BlobBoards.jl python bindings and to have the Julia package installed. Error was:", e)
 
+try:
+    # Track dataset (real-image track patches from a `.tracks` HDF5 file); needs only
+    # h5py, no Julia bridge. Exported so `dataset.name: BlobTrackData` resolves here.
+    from .track import BlobTrackData
+except ImportError as e:
+    print("Could not import track dataset:", e)
+
 
 def get_dataset(dataset_cfg):
     if isinstance(dataset_cfg, omegaconf.ListConfig):
