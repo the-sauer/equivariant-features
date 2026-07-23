@@ -308,7 +308,7 @@ def train_func(process_batch):
                     logging.warning("Loss is NaN or Inf at batch %d, skipping this batch", i)
                     continue
                     
-                cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
+                cumulative_losses = {n: (cumulative_losses[n] if n in cumulative_losses else 0) + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
                 cumulative_loss += loss.item() * data["keypoints"].size(0)
                 n_items += data["keypoints"].size(0)
                 if loss.requires_grad:
@@ -352,7 +352,7 @@ def train_func(process_batch):
             ax.set_title(plot_title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
-            ax.set_xlim(0, 100)
+            ax.set_xlim(0, min(100, cfg.training.num_epochs))
             ax.set_ylim(bottom=0)
             ax.legend()
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
@@ -385,6 +385,9 @@ def train_func(process_batch):
                         for n, (l, _, r) in losses.items():
                             if r and torch.isfinite(l).all():
                                 key = report_key(label, n)
+                                if key not in cumulative_losses:
+                                    cumulative_losses[key] = 0.0
+                                    cumulative_items[key] = 0
                                 cumulative_losses[key] += l.item() * batch_items
                                 cumulative_items[key] += batch_items
                         loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
@@ -421,7 +424,7 @@ def train_func(process_batch):
                 ax.set_title(plot_title)
                 ax.set_xlabel("Epoch")
                 ax.set_ylabel("Average Validation Loss")
-                ax.set_xlim(0, 100)
+                ax.set_xlim(0, cfg.training.num_epochs)
                 # Lower bound defaults to 1e-3, but expands downward (with a little
                 # headroom) whenever a series dips below it so the curve stays visible.
                 data_min = min((b for b, _ in best_marks), default=1e-3)
