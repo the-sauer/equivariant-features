@@ -75,28 +75,74 @@ class _ReshufflingBatchSampler:
 # companion board-in-frame mask under `tracks/masks`, and every sequence carries
 # an `is_anchor` group attribute (1 = GT anchor sequence, 0 = tracked). The single
 # patch type / scale are recorded as attributes on the `tracks` group.
+# Blob-index field width for the collision-free remap (see `_load_all_sequences`).
+# Boards observed with up to ~1330 blobs (< 2**16); 16 bits leaves room to grow while
+# keeping the packed id in 32 bits (board_id in the high bits, blob index in the low).
+_BLOB_BITS = 16
+
+
+def _uid_of(name):
+    # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (anchor); return
+    # the trailing hex board uid (works for both forms), or None if it doesn't match.
+    m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", name)
+    return m[1] if m else None
+
+
 def _select_sequences(seqs, sequences):
-    # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (anchor). The
-    # `sequences` filter is a set of board uids; match the trailing hex uid of each
-    # name (works for both forms).
+    # The `sequences` filter is a set of board uids; keep sequences whose uid matches.
     if sequences is None:
         return list(seqs.keys())
-    def uid_of(s):
-        m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", s)
-        return m[1] if m else None
-    return [s for s in seqs.keys() if uid_of(s) in sequences]
+    return [s for s in seqs.keys() if _uid_of(s) in sequences]
 
 
-def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True):
+def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
+                        unique_track_ids=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
     Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor).
     `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
     `is_anchor` is a per-patch uint8 array (broadcast from the per-sequence flag).
-    Track ids keep their stored (board-offset) values — not remapped.
+
+    ``unique_track_ids`` (default True) remaps track ids to be COLLISION-FREE across
+    boards. The stored ids are ``board_hash + blob_index`` packed into one ~16-bit
+    field, so different boards whose hashes are closer than their blob count share ids
+    — a measured ~34% of ids span >1 board, pairing unrelated blobs as false positives.
+    Here each board (identified by its sequence uid) gets a dense index, and the id is
+    repacked as ``(board_index << _BLOB_BITS) | (raw_id - board_base)`` — i.e. a clean
+    ``board_id | blob_index``. This preserves within-board matches (a board's anchor and
+    tracked media share the same raw ids, hence the same blob_index) while making every
+    board's id range disjoint. Assumes distinct uid => distinct board (holds for the
+    current files; the durable fix is a full-hash registry at export time).
     """
     seqs = f["sequences"]
     seq_names = _select_sequences(seqs, sequences)
+
+    board_index, board_base = {}, {}
+    if unique_track_ids:
+        board_uids = sorted({u for u in map(_uid_of, seq_names) if u is not None})
+        board_index = {u: i for i, u in enumerate(board_uids)}
+        # Board base = min raw id over ALL of a board's sequences, so anchor and tracked
+        # media of the same board map to the same blob_index.
+        for name in seq_names:
+            u = _uid_of(name)
+            if u is None:
+                continue
+            tid = seqs[name]["tracks"]["track_id"]
+            if tid.shape[0]:
+                mn = int(tid[:].min())
+                board_base[u] = min(board_base.get(u, mn), mn)
+
+    def remap(name, tid):
+        u = _uid_of(name)
+        if not unique_track_ids or u is None:
+            return tid.astype(np.int64)
+        blob_index = tid.astype(np.int64) - board_base[u]
+        if blob_index.size and (blob_index.min() < 0 or blob_index.max() >= (1 << _BLOB_BITS)):
+            raise ValueError(
+                f"blob_index out of range for board {u!r} (max {int(blob_index.max())}); "
+                f"raise _BLOB_BITS above {_BLOB_BITS}"
+            )
+        return (np.int64(board_index[u]) << _BLOB_BITS) | blob_index
 
     all_patches, all_masks = [], []
     all_track_ids, all_track_lengths = [], []
@@ -108,7 +154,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True):
         patches = g["patches"][:]
         n = patches.shape[0]
         all_patches.append(patches)
-        all_track_ids.append(g["track_id"][:])
+        all_track_ids.append(remap(name, g["track_id"][:]))
         all_track_lengths.append(g["track_lengths"][:])
         if with_mask:
             all_masks.append(g["masks"][:] if "masks" in g else np.ones_like(patches))
@@ -121,7 +167,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True):
         return np.concatenate(parts) if parts else empty
 
     patches = cat(all_patches, np.zeros((0, 64, 64), dtype=np.float32))
-    track_ids = cat(all_track_ids, np.zeros(0, dtype=np.int32))
+    track_ids = cat(all_track_ids, np.zeros(0, dtype=np.int64))
     track_lengths = cat(all_track_lengths, np.zeros(0, dtype=np.int32))
     masks = cat(all_masks, np.zeros((0, 64, 64), dtype=np.float32)) if with_mask else None
     affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
@@ -175,6 +221,8 @@ class BlobTrackData(torch.utils.data.Dataset):
         max_untracked_to_tracked_ratio=1.0,
         patch_type="cartesian",   # informational: one file = one patch type
         with_mask=False,
+        unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
+        log_stats=False,   # print a per-sequence / positive-structure breakdown on load
         **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
         if h5_path is None:
@@ -190,11 +238,18 @@ class BlobTrackData(torch.utils.data.Dataset):
             sequences = self._split_sequences(h5_path, split)
 
         with h5py.File(h5_path, "r") as f:
+            if log_stats:
+                self._log_sequence_stats(f, sequences, split=split,
+                                         unique_track_ids=unique_track_ids)
+
             (all_patches, all_masks, track_ids, _track_lengths,
-             affine_shapes, is_anchor) = _load_all_sequences(f, sequences, with_mask=with_mask)
+             affine_shapes, is_anchor) = _load_all_sequences(
+                f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids)
 
             self.patches = all_patches
-            self.labels = track_ids.astype(np.uint32)
+            # int64: remapped ids (board_id << 16 | blob_index) and the confuser band
+            # below can exceed uint32's comfortable range once boards accumulate.
+            self.labels = track_ids.astype(np.int64)
             self.affine_shapes = affine_shapes
             self.masks = all_masks
             self.is_anchor = is_anchor
@@ -210,13 +265,21 @@ class BlobTrackData(torch.utils.data.Dataset):
                 self.untracked_masks = None
 
         if include_untracked and len(self.untracked_patches):
-            # Confusers get fresh singleton labels in a reserved band; they are
-            # negatives only (their is_anchor is 0, they carry no board mask).
+            # Confusers get fresh singleton labels; they are negatives only (their
+            # is_anchor is 0, they carry no board mask). Those labels MUST be disjoint
+            # from every real track_id — a confuser sharing an id with a real track
+            # tells SupCon to pull an unmatchable background patch toward that track,
+            # corrupting the embedding. The old scheme ((labels[0] & 0xFFFF0000) +
+            # 0x8000 + arange) assumed confusers fit a 0x8000-wide band above one
+            # board's base; with n_ut >> 32768 that band overflowed into other boards'
+            # id ranges (measured: ~20k confusers colliding with real tracks). Start
+            # strictly above the global max instead, in int64 to preclude wraparound.
             n_ut = len(self.untracked_patches)
-            untracked_start_label = (self.labels[0] & 0xFFFF0000) + 0x00008000
+            self.labels = self.labels.astype(np.int64)
+            start = int(self.labels.max()) + 1 if len(self.labels) else 0
             self.labels = np.concatenate([
                 self.labels,
-                np.arange(untracked_start_label, untracked_start_label + n_ut, dtype=self.labels.dtype),
+                np.arange(start, start + n_ut, dtype=np.int64),
             ])
             self.is_anchor = np.concatenate([self.is_anchor, np.zeros(n_ut, dtype=np.uint8)])
 
@@ -250,6 +313,89 @@ class BlobTrackData(torch.utils.data.Dataset):
             item["mask"] = torch.from_numpy(mask).unsqueeze(0).transpose(1, 2)
             item["is_anchor"] = int(self.is_anchor[idx])
         return item
+
+    @staticmethod
+    def _log_sequence_stats(f, sequences, split=None, unique_track_ids=True):
+        """Print a per-sequence + positive-structure breakdown of the loaded data.
+
+        The whole point of a track descriptor is separating identities, so the
+        diagnostics centre on where positive pairs actually come from. Track ids are
+        counted the way the dataset uses them: when ``unique_track_ids`` is set, ids are
+        namespaced by board (``(uid, raw_id)``) so a ``track_id`` shared by two DIFFERENT
+        boards is NOT counted as matchable — those are cross-board collisions, reported
+        separately. So "matchable" here means a genuine within-board recurrence (a
+        board's anchor + a tracked media, or two media), which is the only kind that is
+        a true positive. If matchable/anchored is tiny, the data is why training stalls.
+        """
+        seqs = f["sequences"]
+        names = _select_sequences(seqs, sequences)
+
+        # Namespaced key: (board uid, raw id) when de-colliding, else the raw id alone
+        # (reproduces the pre-fix view). Also track raw-id -> set of boards for the
+        # cross-board collision report.
+        def key(u, t):
+            return (u, t) if unique_track_ids else t
+        track_total = collections.Counter()      # namespaced key -> patches
+        track_in_anchor = collections.defaultdict(bool)
+        raw_boards = collections.defaultdict(set)  # raw id -> set of board uids
+        per_seq = []   # (name, uid, is_anchor, n_patches, unique_keys:set, n_untracked)
+        for name in names:
+            sg = seqs[name]
+            u = _uid_of(name)
+            isa = int(sg.attrs.get("is_anchor", 0))
+            tid = sg["tracks"]["track_id"][:]
+            n_ut = sg["untracked/patches"].shape[0] if "untracked" in sg else 0
+            keys = {key(u, int(t)) for t in tid.tolist()}
+            per_seq.append((name, u, isa, len(tid), keys, n_ut))
+            for t, c in collections.Counter(tid.tolist()).items():
+                track_total[key(u, int(t))] += c
+                raw_boards[int(t)].add(u)
+                if isa:
+                    track_in_anchor[key(u, int(t))] = True
+
+        matchable = {k for k, c in track_total.items() if c >= 2}
+        anchored = sum(1 for k in matchable if track_in_anchor[k])
+        collisions = sum(1 for _t, bs in raw_boards.items() if len(bs) > 1)
+
+        tag = f" [{split}]" if split else ""
+        print(f"\n===== BlobTrackData sequence stats{tag}: {len(names)} sequences "
+              f"(unique_track_ids={unique_track_ids}) =====")
+        print(f"{'sequence':<30}{'kind':>8}{'patches':>9}{'tracks':>8}{'matchable':>10}{'confusers':>10}")
+        n_anchor_seq = n_tracked_seq = tot_patch = tot_conf = 0
+        for name, _u, isa, npat, keys, n_ut in per_seq:
+            kind = "anchor" if isa else "tracked"
+            n_match = len(keys & matchable)
+            print(f"{name[:30]:<30}{kind:>8}{npat:>9}{len(keys):>8}{n_match:>10}{n_ut:>10}")
+            n_anchor_seq += isa
+            n_tracked_seq += (not isa)
+            tot_patch += npat
+            tot_conf += n_ut
+
+        # Track-multiplicity histogram (how many patches share each namespaced id).
+        hist = collections.Counter()
+        for c in track_total.values():
+            bucket = "1" if c == 1 else "2" if c == 2 else "3-4" if c <= 4 else "5-9" if c <= 9 else "10+"
+            hist[bucket] += 1
+        order = ["1", "2", "3-4", "5-9", "10+"]
+        histstr = "  ".join(f"{b}:{hist.get(b, 0)}" for b in order)
+
+        n_tracks = len(track_total)
+        print(f"----- summary{tag}: {n_anchor_seq} anchor + {n_tracked_seq} tracked seqs, "
+              f"{tot_patch} track patches + {tot_conf} confusers -----")
+        print(f"  distinct track_ids: {n_tracks}  |  matchable (>=2 patches): {len(matchable)} "
+              f"({100*len(matchable)/max(1,n_tracks):.1f}%)  |  singleton: {n_tracks-len(matchable)}")
+        print(f"  of matchable: anchored (anchor<->tracked): {anchored} "
+              f"({100*anchored/max(1,len(matchable)):.1f}%)  |  tracked-only: {len(matchable)-anchored}")
+        print(f"  raw ids shared across >1 board (cross-board collisions): {collisions}"
+              f"{'  (de-collided by remap)' if unique_track_ids else '  !! NOT de-collided'}")
+        print(f"  track multiplicity histogram (patches per track): {histstr}")
+        if len(matchable) == 0:
+            print("  !! WARNING: NO matchable tracks — every batch is positive-free; "
+                  "check that track_ids are shared across a board's sequences.")
+        elif anchored == 0:
+            print("  !! WARNING: matchable tracks exist but NONE are anchored — positives are "
+                  "tracked<->tracked only; verify the anchor sequences share track_ids.")
+        print()
 
     @staticmethod
     def _split_sequences(h5_path, split):

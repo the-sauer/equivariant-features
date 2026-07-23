@@ -54,3 +54,54 @@ class FPR95(Contrastive):
 class SupCon(Contrastive):
     def __init__(self, **kwargs):
         super().__init__(contrastive_loss="SupConLoss", **kwargs)
+
+
+class Recall1(torch.nn.Module):
+    """Report-only diagnostic: top-1 nearest-neighbour retrieval accuracy — the
+    per-batch **true-positive rate**.
+
+    For every patch that has at least one same-``track_id`` partner in the batch,
+    check whether its nearest neighbour (in descriptor space, excluding itself) is a
+    true match. This is the quantity that most directly says "is the descriptor
+    telling tracks apart?" — SupCon going down while this stays near chance means the
+    embedding isn't actually separating identities. Returns NaN for a batch with no
+    positive pair (so it's skipped, like FPR95).
+    """
+
+    def __init__(self, **_):
+        super().__init__()
+
+    def forward(self, x) -> torch.Tensor:
+        f, y = x["features"], x["indices"]
+        n = f.size(0)
+        if n < 2:
+            return torch.full((1,), float("nan"), device=f.device)
+        same = y.unsqueeze(0) == y.unsqueeze(1)
+        has_pos = same.sum(1) > 1  # > 1 because the diagonal (self) always counts
+        if not bool(has_pos.any()):
+            return torch.full((1,), float("nan"), device=f.device)
+        d = torch.cdist(f, f)
+        d.fill_diagonal_(float("inf"))
+        nn = d.argmin(dim=1)
+        correct = same[torch.arange(n, device=f.device), nn]
+        return correct[has_pos].float().mean().view(1)
+
+
+class PosCoverage(torch.nn.Module):
+    """Report-only data-health diagnostic: the fraction of patches in the batch that
+    have >= 1 same-``track_id`` partner present (i.e. something to be pulled toward).
+
+    With the balanced sampler this should be high; a low value means the batches are
+    starved of positives and the contrastive signal is weak regardless of the model.
+    """
+
+    def __init__(self, **_):
+        super().__init__()
+
+    def forward(self, x) -> torch.Tensor:
+        y = x["indices"]
+        n = y.numel()
+        if n == 0:
+            return torch.full((1,), float("nan"), device=y.device)
+        same = y.unsqueeze(0) == y.unsqueeze(1)
+        return (same.sum(1) > 1).float().mean().view(1)

@@ -10,6 +10,12 @@
 # process_batch_blobs (its collate reuses the blob-batch keys). Warm-start a run from a
 # synthetic-descriptor checkpoint with `+training.init_from_checkpoint=<path>` (loads
 # model weights only, epoch 0) — see launch_track_matrix.sh.
+#
+# Split: only 18 of the 50 boards currently have tracked media (real anchor<->tracked
+# positives); the other 32 are anchor-only (they still ride in TRAIN as negatives and
+# will gain tracked media later). VAL is drawn from 5 tracked-media boards (25d, 5b6,
+# f80 = multi-media; cf2, f75 = single-media hard cases) ~2.3k real positives; every
+# other board (13 tracked-media + 32 anchor-only) is in TRAIN. Disjoint by board uid.
 defaults:
   - _self_
 
@@ -33,50 +39,57 @@ training:
     name: BlobTrackData
     params:
       h5_path: ${track_path}
-      split: train
       min_track_length: 2
       load_into_memory: true
       include_untracked: true          # confusers as extra negatives
       max_untracked_to_tracked_ratio: 1.0
+      # 45 boards = 13 tracked-media (real positives) + 32 anchor-only (negatives now,
+      # tracked media added later). Disjoint from the val boards below.
       sequences:
         - "028"
         - "08d"
+        - "102"
         - "14b"
         - "187"
         - "232"
-        - "25d"
+        - "291"
         - "2f7"
         - "2fe"
         - "336"
         - "452"
-        - "568"                             
-        - "5b6"
+        - "536"
+        - "568"
         - "5e2"
         - "602"
+        - "662"
         - "695"
         - "6a6"
         - "6b0"
         - "7ff"
+        - "878"
         - "88b"
         - "8a1"
         - "940"
         - "942"
+        - "9ca"
         - "a28"
         - "a2e"
         - "a4b"
         - "a62"
+        - "b0b"
         - "b70"
         - "b9f"
         - "bce"
         - "c8e"
         - "d42"
         - "da0"
+        - "dd2"
         - "e89"
+        - "eee"
         - "ef7"
         - "f23"
         - "f3f"
         - "f71"
-        - "f80"
         - "fde"
   optimizer:
     name: AdamW
@@ -88,6 +101,13 @@ training:
       - name: CosineAnnealingLR
   loss:
     - name: SupCon
+    # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
+    # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
+    # patches that even have a positive present.
+    - name: Recall1
+      weight: 0
+    - name: PosCoverage
+      weight: 0
 
 validation:
   batch_size: 1024
@@ -96,24 +116,22 @@ validation:
     name: BlobTrackData
     params:
       h5_path: ${track_path}
-      split: val
       min_track_length: 2
       load_into_memory: true
       include_untracked: true
+      # 5 tracked-media boards (~2.3k real anchor<->tracked positives). Disjoint from train.
       sequences:
-        - "102"
-        - "291"
-        - "536"
-        - "662"
-        - "878"
-        - "9ca"
-        - "b0b"
+        - "25d"
+        - "5b6"
         - "cf2"
-        - "eee"
         - "f75"
-
+        - "f80"
   loss:
     - name: FPR95
+    - name: Recall1
+      weight: 0
+    - name: PosCoverage
+      weight: 0
 
 logging:
   dir: /raid/data/hsa/logs
