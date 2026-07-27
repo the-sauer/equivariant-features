@@ -31,6 +31,8 @@ declare -A CONFIG=(
   [logpolar_circ]=blob_descriptor_logpolar
   [logpolar_circ_nomask]=blob_descriptor_logpolar
   [logpolar_fft]=blob_descriptor_logpolar
+  [logpolar_relphase]=blob_descriptor_logpolar
+  [logpolar_bispectrum]=blob_descriptor_logpolar
   [logpolar_fftmask]=blob_descriptor_logpolar_fftmask
   [efficient8]=blob_descriptor_efficient
   [efficient4]=blob_descriptor_efficient
@@ -49,13 +51,15 @@ declare -A CONFIG=(
 # Bash associative arrays are UNORDERED, so the previous `${!CONFIG[@]}` was hash order —
 # steerable landed last by accident, and renaming or adding a network reshuffles it
 # silently. Must cover every CONFIG key (checked below).
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_fftmask logpolar_circ_nomask steerable)
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_circ_nomask steerable)
 
 # What a bare (no-arg) invocation submits. NET_ORDER above stays the full registry (it
 # must list every CONFIG key, and fixes the slowest-last schedule); DEFAULT_SWEEP just
 # picks which of them run by default. Any of the other nets is still runnable by name.
-# Currently: the log-polar angular-head ablation ladder (max-pool -> fft -> fft+mask).
-DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_fftmask)
+# Currently: the log-polar angular-head ablation ladder, in order of how much of the
+# angular profile survives the head — max-pool (one peak) -> fft (|X_k|, no phase) ->
+# relphase / bispectrum (|X_k| + an invariant phase feature) -> fft+mask.
+DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask)
 
 # per-network scale values
 declare -A SCALES=(
@@ -64,6 +68,8 @@ declare -A SCALES=(
   [logpolar_circ]="96"
   [logpolar_circ_nomask]="96"
   [logpolar_fft]="96 128"
+  [logpolar_relphase]="96"
+  [logpolar_bispectrum]="96"
   [logpolar_fftmask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
@@ -89,6 +95,14 @@ declare -A NET_EXTRA=(
   # DFT-magnitude angular head instead of the max-pool (keeps the full angular
   # spectrum). Shares the same mask dataset (mask ignored, as above).
   [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=5 ++training.dataset.params.precompute_masks=true ++validation.shared_params.params.precompute_masks=true"
+  # The two phase-keeping heads: same rfft, but they append an invariant phase feature
+  # to the magnitudes instead of discarding the phase (docs/fft_theory.md). `relphase`
+  # references every harmonic to X_1 (cheap, fragile where |X_1| ~ 0); `bispectrum` uses
+  # reference-free triple products (complete, noisier — normalized by default). Both
+  # widen the final conv's angular input (5 rows -> 11 / 13), so a checkpoint from one
+  # head does not transfer that layer to another. Same shared mask dataset as above.
+  [logpolar_relphase]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=5 ++training.dataset.params.precompute_masks=true ++validation.shared_params.params.precompute_masks=true"
+  [logpolar_bispectrum]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=5 ++training.dataset.params.precompute_masks=true ++validation.shared_params.params.precompute_masks=true"
   # `logpolar_fftmask` (FFT head + learned mask) needs no NET_EXTRA — its dedicated
   # config `blob_descriptor_logpolar_fftmask` sets the model + `precompute_masks`.
 )
@@ -111,6 +125,8 @@ declare -A NET_DATASET_GROUP=(
   # keeps the mask-less `logpolar` group.
   [logpolar_circ]=logpolar_mask
   [logpolar_fft]=logpolar_mask
+  [logpolar_relphase]=logpolar_mask
+  [logpolar_bispectrum]=logpolar_mask
   [logpolar_fftmask]=logpolar_mask
 )
 declare -A GROUP_CONFIG=(
@@ -142,6 +158,8 @@ declare -A NET_MEM=(
   [logpolar]=32GB
   [logpolar_circ]=32GB
   [logpolar_fft]=32GB
+  [logpolar_relphase]=32GB
+  [logpolar_bispectrum]=32GB
   [logpolar_fftmask]=32GB
   [efficient8]=32GB
   [efficient4]=32GB
@@ -156,6 +174,8 @@ declare -A NET_CPUS=(
   [logpolar_circ]=10
   [logpolar_circ_nomask]=10
   [logpolar_fft]=10
+  [logpolar_relphase]=10
+  [logpolar_bispectrum]=10
   [logpolar_fftmask]=10
   [efficient8]=10
   [efficient4]=10

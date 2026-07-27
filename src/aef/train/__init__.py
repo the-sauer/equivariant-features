@@ -138,9 +138,19 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
         # the source model and this run's model, reporting what was skipped.
         checkpoint = torch.load(cfg.training.init_from_checkpoint, map_location=device)
         state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        # `strict=False` only forgives missing/unexpected KEYS — a key that exists with a
+        # different shape still raises. Angular heads differ in exactly that way (the
+        # final conv is (128, 128, rows, radial), and `rows` depends on the head), so drop
+        # the mismatched tensors here and let them start fresh.
+        own = model.state_dict()
+        mismatched = [k for k, v in state.items()
+                      if k in own and own[k].shape != getattr(v, "shape", own[k].shape)]
+        if mismatched:
+            state = {k: v for k, v in state.items() if k not in mismatched}
         missing, unexpected = model.load_state_dict(state, strict=False)
         msg = (f"Warm-started model from {cfg.training.init_from_checkpoint} "
-               f"(missing={len(missing)}, unexpected={len(unexpected)} keys)")
+               f"(missing={len(missing)}, unexpected={len(unexpected)} keys, "
+               f"shape-mismatched={len(mismatched)}: {mismatched})")
         print("\033[1m" + msg + "\033[0m")
         logging.info(msg)
         start_epoch = 0

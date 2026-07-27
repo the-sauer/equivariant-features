@@ -120,11 +120,18 @@ rotation, Kakarala 2012) — but it is a product of three coefficients, so more
 noise/scale-sensitive; normalize (divide by `|X_{k1}||X_{k2}||X_{k1+k2}|`) if only the
 phase-coupling is wanted.
 
-### How it plugs into the head
+### How it plugs into the head — implemented
 
 Both come from the `rfft` the head already computes — a few extra invariant scalars per
 `(channel, radius)`, concatenated with `|X_k|` before the final linear layer. No trunk
-change, no invariance change.
+change, no invariance change. They ship as two more angular heads in
+`src/aef/models/hardnet.py`:
+
+| head | class | rows per `(channel, radius)` for `F` harmonics |
+|------|-------|-----------------------------------------------|
+| `head="fft"` | `AngularRFFTMag` | `F` — `\|X_k\|` |
+| `head="relphase"` | `AngularRelPhase` | `F + 2(F−2)` — `\|X_k\|` + `Re/Im(c_k)`, `k ≥ 2` |
+| `head="bispectrum"` | `AngularBispectrum` | `F + 2·#{(k1,k2)}` — `\|X_k\|` + `Re/Im B(k1,k2)` |
 
 ```python
 X = torch.fft.rfft(feat, dim=-2)              # already computed by AngularRFFTMag
@@ -134,9 +141,29 @@ bisp  = X[:, :, k1] * X[:, :, k2] * X[:, :, k1 + k2].conj()                 # lo
 # feed [mag ; Re/Im(relph)]  or  [mag ; Re/Im(bisp)]  into the final Conv/Linear
 ```
 
+`c_0` and `c_1` are real by construction, so `relphase` only adds rows for `k ≥ 2`; the
+bispectrum keeps the low-order triples `1 ≤ k1 ≤ k2, k1 + k2 ≤ F−1` (`F = 5` → four
+pairs). `bispectrum_normalize=True` (the default) divides each triple by
+`|X_k1||X_k2||X_k1+k2|`, leaving pure phase coupling on the unit circle — the magnitudes
+are already in the first rows, and the raw triple product is cubic in scale.
+
+The extra rows widen the head's final conv (`(F, radial)` → `(rows, radial)`), so
+**that layer's weights do not transfer between heads**; warm-starting across heads drops
+it and reports the drop (`training.init_from_checkpoint`).
+
 Start with **relative-phase** (cheapest); move to the **low-order bispectrum** if the
 `|X_1|`-reference fragility bites or the completeness guarantee is wanted. Both attack the
-one thing magnitude-only discards — the relative "where" between ripples.
+one thing magnitude-only discards — the relative "where" between ripples. Both matrix
+launchers expose them as `logpolar_relphase` / `logpolar_bispectrum`:
+
+```sh
+./launch_training_matrix.sh -n lpphase logpolar_fft logpolar_relphase logpolar_bispectrum
+```
+
+`tests/unit/test_angular_phase_heads.py` pins what they are for: exact invariance to an
+angular roll, *and* separation of two profiles with identical magnitude spectra that
+differ only in relative phase (a head that only passes the first is a costlier
+`AngularRFFTMag`).
 
 ## Why a modulus gives *stable* invariance
 

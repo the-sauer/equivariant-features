@@ -32,15 +32,18 @@ declare -A CONFIG=(
   [logpolar]=track_descriptor_logpolar
   [logpolar_circ]=track_descriptor_logpolar
   [logpolar_fft]=track_descriptor_logpolar
+  [logpolar_relphase]=track_descriptor_logpolar
+  [logpolar_bispectrum]=track_descriptor_logpolar
   [logpolar_fftmask]=track_descriptor_logpolar_fftmask
   [efficient8]=track_descriptor_efficient
   [efficient4]=track_descriptor_efficient
 )
 # Submission order (slowest last); must cover every CONFIG key.
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_fftmask steerable)
-# What a bare (no network arg) invocation submits: the log-polar ablation trio
-# (max-pool/circ -> fft -> fft+mask), matching launch_training_matrix.sh's default.
-DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_fftmask)
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask steerable)
+# What a bare (no network arg) invocation submits: the log-polar angular-head ladder
+# (max-pool/circ -> fft -> relphase/bispectrum -> fft+mask), matching
+# launch_training_matrix.sh's default.
+DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask)
 
 # per-network scale values (must match the synthetic runs you warm-start from, since the
 # model's scale knob has to agree with the checkpoint).
@@ -49,6 +52,8 @@ declare -A SCALES=(
   [logpolar]="96"
   [logpolar_circ]="96"
   [logpolar_fft]="96"
+  [logpolar_relphase]="96"
+  [logpolar_bispectrum]="96"
   [logpolar_fftmask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
@@ -69,6 +74,11 @@ declare -A NET_EXTRA=(
   [efficient4]="model.params.n_rotations=4"
   [logpolar_circ]="model.name=HardNetLogPolar"
   [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=4"
+  # Magnitude + an invariant phase feature (docs/fft_theory.md). Warm-start these from
+  # the SAME head's synthetic run: the phase rows widen the final conv, whose weights
+  # therefore do not transfer between heads (the load drops that tensor and reports it).
+  [logpolar_relphase]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=4"
+  [logpolar_bispectrum]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=4"
   [logpolar_fftmask]="++model.params.n_harmonics=4"
 )
 

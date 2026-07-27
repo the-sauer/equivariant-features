@@ -154,6 +154,45 @@ drift is ≈1e-7, on par with the max-pool. The theory (Fourier–Mellin, the sh
 Wiener–Khinchin, the bispectral upgrade) and references are collected in
 [fft_theory.md](fft_theory.md).
 
+### `head="relphase"` and `head="bispectrum"` — keep the phase relations too
+
+`|X_k|` is invariant *because* it throws the phase away — and with it where each ripple
+sits relative to the others, which is genuine shape: a 1-cycle and a 2-cycle bump have
+identical magnitude spectra whether they are aligned or offset by 90°, so two
+structurally different angular profiles still collide. Both heads append an invariant
+*phase* feature to the same magnitudes, so they are exactly as rotation-invariant as the
+max-pool and the fft head (a function of invariants is invariant):
+
+| head | invariant added | rows for `F` harmonics (`F = 5`) | trade-off |
+|------|-----------------|----------------------------------|-----------|
+| `fft` | — | `F` (5) | phase-blind |
+| `relphase` | `c_k = X_k (conj(X_1)/\|X_1\|)^k` | `F + 2(F−2)` (11) | cheap; the `X_1` reference is noise where `\|X_1\| ≈ 0` |
+| `bispectrum` | `B(k1,k2) = X_{k1} X_{k2} conj(X_{k1+k2})` | `F + 2·#pairs` (13) | no reference, complete (Kakarala 2012); a triple product, so noisier |
+
+`relphase` cancels the unknown rotation by referencing every harmonic to the first
+(`Δ_k = φ_k − k·φ_1`); `bispectrum` cancels it with triple products whose indices sum to
+zero, needing no reference at all. `bispectrum_normalize=True` (default) divides each
+triple by `|X_{k1}||X_{k2}||X_{k1+k2}|` so only the phase coupling survives — the
+magnitudes are already in the leading rows, and the raw product is cubic in scale.
+Derivation and references: [fft_theory.md → keeping phase](fft_theory.md#keeping-phase-while-staying-rotation-invariant).
+
+Both are drop-in replacements for the angular reduction, so they compose with
+`learned_mask` and inherit the fft head's junk-fragility (the DFT is global over angle —
+watch the junk-sensitivity probe, not only FPR95). The extra rows widen the head's final
+conv, so **a checkpoint does not transfer that layer across heads**: warm-start each head
+from its own synthetic run (the loader drops the mismatched tensor and says so). Run the
+comparison with
+
+```sh
+./launch_training_matrix.sh -n lpphase logpolar_fft logpolar_relphase logpolar_bispectrum
+```
+
+(both launchers carry `logpolar_relphase` / `logpolar_bispectrum`, and both are in the
+default sweep). What is verified so far is invariance and discriminative *capacity*
+(`tests/unit/test_angular_phase_heads.py`: exact roll-invariance, and separation of two
+profiles the magnitude head cannot tell apart) — **not** FPR95, which is the open
+measurement.
+
 ### `learned_mask=True` — mask-aware pooling without a target mask
 
 Part of every patch is off-board junk. The two views are treated **asymmetrically**:
@@ -205,9 +244,11 @@ pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
   python src/run_training.py --config-name blob_descriptor_logpolar_fftmask
 ```
 
-The launcher exposes both as first-class variants — `logpolar_fft` (fft head only,
-shares the plain `logpolar` dataset) and `logpolar_fftmask` (fft head + learned mask, its
-own `precompute_masks` dataset). To run the head/mask ablation against the max-pool
+The launcher exposes each as a first-class variant — `logpolar_fft` (fft head only),
+`logpolar_relphase` / `logpolar_bispectrum` (the phase-keeping heads above) and
+`logpolar_fftmask` (fft head + learned mask). All four sit in the same `logpolar_mask`
+dataset group, so one prebuilt mask-carrying dataset serves them and the mask-less ones
+simply ignore the extra channel. To run the head/mask ablation against the max-pool
 baseline in one warm-cache matrix:
 
 ```sh
@@ -254,16 +295,10 @@ The individual fixes can be carried through to FPR95 the same way, e.g.
 Ranked by value-for-effort, tied to the failure modes above. "(arch)" is a model change;
 "(data)" is a pipeline change that tends to matter more than most model tweaks.
 
-1. **Put some phase back in the head (arch).** The single biggest discriminative lever
-   after `head="fft"`. Magnitude-only discards the *relative* phase between ripples,
-   which is real shape (structurally different blobs can then collide). Two tiers, both
-   computed from the same `rfft` and concatenated with `|X_k|` before the final linear
-   layer, both still rotation-invariant: **relative-phase features** (`Δ_k = φ_k − k·φ_1`,
-   cheap, first-harmonic reference) and the **low-order bispectrum** (triple products
-   `X_{k1}X_{k2}\overline{X_{k1+k2}}`, no reference, complete). Full derivation and code
-   in [fft_theory.md → keeping phase](fft_theory.md#keeping-phase-while-staying-rotation-invariant).
-   Note: depth-after-DFT cannot substitute — the discarded phase is an information loss,
-   not a capacity limit.
+1. ~~**Put some phase back in the head (arch).**~~ **Implemented** as `head="relphase"`
+   and `head="bispectrum"` — see [the phase-keeping heads](#headrelphase-and-headbispectrum--keep-the-phase-relations-too)
+   below. Still the biggest discriminative lever to *measure* after `head="fft"`; only the
+   FPR95 comparison is outstanding.
 2. **Union the peak with the spectrum (arch, ~free).** Max-pool keeps a nonlinear
    order-statistic (the peak) the power spectrum does not determine; the spectrum keeps
    the autocorrelation the peak does not. Concatenate both angular reductions
@@ -291,6 +326,6 @@ Ranked by value-for-effort, tied to the failure modes above. "(arch)" is a model
    or scale `outer_factor` to the blob, rather than one fixed band. Likely beats any head
    tweak for the large-blob regime the scale-budget doc quantifies.
 
-First two to run: **#1 (relative-phase/bispectrum)** for discriminativeness and
-**#7 (adaptive `outer_factor`)** for the large-blob regime — both target *measured*
-failures.
+First two to run: **#1 (relative-phase/bispectrum — now a launcher entry, so this is a
+measurement, not an implementation)** for discriminativeness and **#7 (adaptive
+`outer_factor`)** for the large-blob regime — both target *measured* failures.

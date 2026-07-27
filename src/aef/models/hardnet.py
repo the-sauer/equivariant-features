@@ -195,6 +195,122 @@ class AngularRFFTMag(nn.Module):
         return mag
 
 
+class AngularRelPhase(nn.Module):
+    """Magnitude **plus relative phase** — invariant, but not phase-blind.
+
+    ``AngularRFFTMag`` keeps ``|X_k|`` and throws the phase away, which also throws away
+    where each ripple sits *relative to* the others: a 1-cycle and a 2-cycle bump have the
+    same magnitudes whether they are aligned or offset by 90 deg, so structurally
+    different blobs collide. Referencing every phase to the first harmonic cancels the
+    unknown rotation ``theta`` while keeping that relation (under a roll,
+    ``phi_k -> phi_k - k*theta``)::
+
+        Delta_k = phi_k - k*phi_1                       (invariant)
+        c_k     = X_k * (conj(X_1) / |X_1|)**k          (|c_k| = |X_k|, angle(c_k) = Delta_k)
+
+    Output rows are ``[ |X_0..F-1| ; Re(c_2..F-1) ; Im(c_2..F-1) ]`` — ``c_0`` and ``c_1``
+    are real by construction (``c_0 = X_0``, ``c_1 = |X_1|``), so they carry nothing the
+    magnitude rows do not. Costs one extra complex multiply over the fft head.
+
+    **Weakness** (the reason :class:`AngularBispectrum` exists): everything is referenced
+    to ripple 1, so where ``|X_1| ~ 0`` the reference is noise. ``eps`` only keeps that
+    finite, it cannot make it informative.
+
+    See ``docs/fft_theory.md`` -> "Keeping phase while staying rotation-invariant".
+    """
+
+    def __init__(self, n_harmonics=None, eps=1e-6):
+        super().__init__()
+        self.n_harmonics = n_harmonics
+        self.eps = eps
+
+    @staticmethod
+    def n_rows(n_harmonics):
+        """Rows this head emits for ``n_harmonics`` kept frequencies."""
+        return n_harmonics + 2 * max(0, n_harmonics - 2)
+
+    def forward(self, x):                            # (B, C, A, R)
+        spec = torch.fft.rfft(x, dim=-2)             # (B, C, A // 2 + 1, R), complex
+        if self.n_harmonics is not None:
+            spec = spec[:, :, : self.n_harmonics, :]
+        mag = spec.abs()
+        if spec.shape[-2] < 3:                       # no k >= 2 to reference
+            return mag
+        ref = spec[:, :, 1:2, :]                     # X_1, the phase reference
+        ref = ref.conj() / (ref.abs() + self.eps)    # unit modulus (eps: |X_1| ~ 0)
+        k = torch.arange(2, spec.shape[-2], device=x.device).view(1, 1, -1, 1)
+        c = spec[:, :, 2:, :] * ref.pow(k)           # rotation cancels in the phase
+        return torch.cat([mag, c.real, c.imag], dim=-2)
+
+
+class AngularBispectrum(nn.Module):
+    """Magnitude **plus the low-order bispectrum** — invariant phase, no reference.
+
+    The bispectrum keeps phase relations without singling out a reference harmonic::
+
+        B(k1, k2) = X_k1 * X_k2 * conj(X_{k1+k2})
+
+    Under a roll the shift terms are ``-k1*theta - k2*theta + (k1+k2)*theta = 0``: they
+    cancel *because the indices sum to zero*, which is why a triple product is the
+    smallest phase-keeping invariant (a pair only cancels when ``k1 == k2``, leaving mere
+    magnitude). Unlike :class:`AngularRelPhase` it has no fragile ``|X_1|`` reference and
+    is complete (recovers the signal up to rotation, Kakarala 2012), at the price of being
+    a product of three coefficients — hence noisier and cubic in scale.
+
+    Only the *low-order* triples are kept: ``1 <= k1 <= k2`` with ``k1 + k2 <= F - 1``,
+    where the coarse shape and the rotation-relevant phase coupling live. Output rows are
+    ``[ |X_0..F-1| ; Re(B_p) ; Im(B_p) ]`` over those pairs.
+
+    Keep ``n_harmonics`` small: the pair count grows ~``F**2 / 4``, and every pair costs
+    two rows of the final conv's kernel (``F = 5`` -> 13 rows; the default
+    ``F = patch_size // 8 + 1`` at ``patch_size=128`` -> 145 rows, i.e. a ~76M-parameter
+    layer). The launchers pin 4-5.
+
+    ``normalize=True`` (default) divides by ``|X_k1||X_k2||X_k1+k2|``, leaving the pure
+    phase coupling on the unit circle: the magnitudes are already in the first rows, and
+    the raw triple product's cubic dynamic range is what makes this head hard to train.
+    Set it False to let the amplitude coupling through.
+
+    See ``docs/fft_theory.md`` -> "Low-order bispectrum".
+    """
+
+    def __init__(self, n_harmonics=None, normalize=True, eps=1e-6):
+        super().__init__()
+        self.n_harmonics = n_harmonics
+        self.normalize = normalize
+        self.eps = eps
+
+    @staticmethod
+    def pairs(n_harmonics):
+        """The ``(k1, k2)`` triples kept for ``n_harmonics``: ``k1 <= k2, k1 + k2 <= F-1``."""
+        return [(k1, k2)
+                for k1 in range(1, n_harmonics)
+                for k2 in range(k1, n_harmonics)
+                if k1 + k2 <= n_harmonics - 1]
+
+    @classmethod
+    def n_rows(cls, n_harmonics):
+        """Rows this head emits for ``n_harmonics`` kept frequencies."""
+        return n_harmonics + 2 * len(cls.pairs(n_harmonics))
+
+    def forward(self, x):                            # (B, C, A, R)
+        spec = torch.fft.rfft(x, dim=-2)             # (B, C, A // 2 + 1, R), complex
+        if self.n_harmonics is not None:
+            spec = spec[:, :, : self.n_harmonics, :]
+        mag = spec.abs()
+        pairs = self.pairs(spec.shape[-2])
+        if not pairs:
+            return mag
+        k1 = torch.tensor([p[0] for p in pairs], device=x.device)
+        k2 = torch.tensor([p[1] for p in pairs], device=x.device)
+        x1, x2 = spec.index_select(-2, k1), spec.index_select(-2, k2)
+        x12 = spec.index_select(-2, k1 + k2)
+        bisp = x1 * x2 * x12.conj()
+        if self.normalize:
+            bisp = bisp / (x1.abs() * x2.abs() * x12.abs() + self.eps)
+        return torch.cat([mag, bisp.real, bisp.imag], dim=-2)
+
+
 class HardNetLogPolar(nn.Module):
     """HardNet variant that respects log-polar geometry.
 
@@ -219,7 +335,11 @@ class HardNetLogPolar(nn.Module):
 
     - ``head="fft"`` replaces the angular max-pool with :class:`AngularRFFTMag` — same
       rotation invariance, but it keeps the full angular spectrum (``n_harmonics`` low
-      bins) instead of a single peak per (channel, radius).
+      bins) instead of a single peak per (channel, radius). ``head="relphase"``
+      (:class:`AngularRelPhase`) and ``head="bispectrum"`` (:class:`AngularBispectrum`)
+      go one step further and append an invariant *phase* feature to those magnitudes —
+      the relation between ripples that ``|X_k|`` alone discards. All three are exactly
+      as rotation-invariant as the max-pool; they differ in how much shape survives.
     - ``learned_mask=True`` makes the head *mask-aware*. The pre-head feature map is
       downweighted by the **GT mask on anchors** (identity view, where the off-board
       region is given) and by a **predicted** ``m_pred`` on targets (warped view, where
@@ -235,7 +355,8 @@ class HardNetLogPolar(nn.Module):
 
     def __init__(self, in_channels=1, patch_size=64, slim=False,
                  circular_pad=True, antialias=True,
-                 head="maxpool", n_harmonics=None, learned_mask=False, **_):
+                 head="maxpool", n_harmonics=None, bispectrum_normalize=True,
+                 learned_mask=False, **_):
         super().__init__()
         if patch_size == 32:
             kernel_size, padding = 3, 1
@@ -277,16 +398,27 @@ class HardNetLogPolar(nn.Module):
             nn.Dropout(0.1),
         ]
 
-        # Angular reduction head: max-pool (one peak) or DFT-magnitude (full spectrum).
+        # Angular reduction head: max-pool (one peak), DFT-magnitude (full spectrum), or
+        # magnitude + a phase invariant (relative phase / low-order bispectrum).
+        n_harm = n_harmonics if n_harmonics is not None else (pool // 2 + 1)
         if head == "maxpool":
             angular_reduce = nn.MaxPool2d(kernel_size=(pool, 1))  # max over angular
             final_angular = 1
         elif head == "fft":
-            n_harm = n_harmonics if n_harmonics is not None else (pool // 2 + 1)
             angular_reduce = AngularRFFTMag(n_harmonics=n_harm)
             final_angular = n_harm
+        elif head == "relphase":
+            angular_reduce = AngularRelPhase(n_harmonics=n_harm)
+            final_angular = AngularRelPhase.n_rows(n_harm)
+        elif head == "bispectrum":
+            angular_reduce = AngularBispectrum(n_harmonics=n_harm,
+                                               normalize=bispectrum_normalize)
+            final_angular = AngularBispectrum.n_rows(n_harm)
         else:
-            raise ValueError(f"Unsupported head {head!r} (expected 'maxpool' or 'fft')")
+            raise ValueError(
+                f"Unsupported head {head!r} (expected 'maxpool', 'fft', 'relphase' "
+                "or 'bispectrum')"
+            )
         head_layers = [
             angular_reduce,
             nn.Conv2d(depths[2], 128, (final_angular, pool), bias=False),  # dense over radial
