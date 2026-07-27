@@ -80,6 +80,19 @@ def _install_fake_modules():
         tqdm_module.__spec__ = ModuleSpec("tqdm", loader=None)
         sys.modules["tqdm"] = tqdm_module
 
+    if "h5py" not in sys.modules:
+        # aef.data.track imports h5py at module level, but the pure-logic tests drive
+        # `_load_all_sequences` with an in-memory stand-in for an HDF5 file (dicts of
+        # numpy arrays, which already support the `[:]` / fancy-index reads it does).
+        h5py_module = types.ModuleType("h5py")
+
+        class _File:
+            def __init__(self, *args, **kwargs):
+                raise NotImplementedError("h5py is stubbed out in the unit tests")
+
+        h5py_module.File = _File
+        sys.modules["h5py"] = h5py_module
+
     if "torchvision" not in sys.modules:
         torchvision = types.ModuleType("torchvision")
         transforms = types.ModuleType("torchvision.transforms")

@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import collections
+import math
 import random
 import re
 
@@ -95,13 +96,79 @@ def _select_sequences(seqs, sequences):
     return [s for s in seqs.keys() if _uid_of(s) in sequences]
 
 
+def _view_angle_bounds(view_angle_range):
+    """Validate a ``[lo, hi]`` viewing-angle band in DEGREES -> bounds in radians.
+
+    ``None`` (no band) passes through as ``None``. Degrees in the config, radians in
+    the file: `.tracks` stores `view_angles` in radians, but a band is something you
+    reason about in degrees, so that is the config unit.
+    """
+    if view_angle_range is None:
+        return None
+    try:
+        lo, hi = (float(v) for v in view_angle_range)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"view_angle_range must be a [lo_deg, hi_deg] pair, got {view_angle_range!r}"
+        ) from e
+    if not lo < hi:
+        raise ValueError(f"view_angle_range must satisfy lo < hi, got [{lo}, {hi}]")
+    return math.radians(lo), math.radians(hi)
+
+
+def _read_rows(ds, sel):
+    """Read all rows of an HDF5 dataset, or just ``sel`` (an increasing index array)."""
+    return ds[:] if sel is None else ds[sel]
+
+
+def _observation_view_angles(g, name):
+    """Per-observation viewing angle (radians) for a tracked sequence.
+
+    `.tracks` stores the detection geometry **per frame, not per blob**:
+    ``view_angles`` and ``homography_frame_ids`` have one entry per frame the board
+    was detected in, while ``frame_id`` gives each observation's source frame. This
+    joins the two, returning ``(angles, matched)`` — both per observation, with
+    ``matched`` False wherever an observation's frame is absent from the pose table
+    (should not happen; such observations are dropped rather than mis-binned).
+    """
+    missing = [k for k in ("frame_id", "homography_frame_ids", "view_angles") if k not in g]
+    if missing:
+        raise ValueError(
+            f"sequence {name!r} has no {', '.join(missing)} — it predates the viewing-angle "
+            "export in BlobBoards' build_tracks_for_sequences. Rebuild the `.tracks` file "
+            "or drop `view_angle_range`."
+        )
+    fids = np.asarray(g["frame_id"][:]).astype(np.int64)
+    hfids = np.asarray(g["homography_frame_ids"][:]).astype(np.int64)
+    angles = np.asarray(g["view_angles"][:]).astype(np.float64)
+    if hfids.size == 0:
+        return np.zeros(fids.shape, dtype=np.float64), np.zeros(fids.shape, dtype=bool)
+    # Join frame_id -> pose table without assuming the table is sorted.
+    order = np.argsort(hfids)
+    pos = np.clip(np.searchsorted(hfids[order], fids), 0, hfids.size - 1)
+    idx = order[pos]
+    matched = hfids[idx] == fids
+    return angles[idx], matched
+
+
 def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
-                        unique_track_ids=True):
+                        unique_track_ids=True, view_angle_range=None,
+                        view_angle_keep_anchors=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
     Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor).
     `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
     `is_anchor` is a per-patch uint8 array (broadcast from the per-sequence flag).
+    `track_lengths` is the sequence's stored (PRE-filter) histogram and is not
+    recomputed when a viewing-angle band drops observations; nothing downstream uses
+    it (group structure is rebuilt from the labels in ``_grouped_indices``).
+
+    ``view_angle_range`` — ``[lo_deg, hi_deg]``, keeps only observations whose frame
+    was viewed at an obliquity in ``[lo, hi)`` (0 = fronto-parallel, 90 = edge-on).
+    Anchor sequences carry no pose (they are rendered off the board image, i.e.
+    fronto-parallel by construction) and are kept whole unless
+    ``view_angle_keep_anchors`` is False — keeping them is what preserves the
+    anchor<->tracked positive pairs that make a narrow band evaluable at all.
 
     ``unique_track_ids`` (default True) remaps track ids to be COLLISION-FREE across
     boards. The stored ids are ``board_hash + blob_index`` packed into one ~16-bit
@@ -144,6 +211,8 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
             )
         return (np.int64(board_index[u]) << _BLOB_BITS) | blob_index
 
+    bounds = _view_angle_bounds(view_angle_range)
+
     all_patches, all_masks = [], []
     all_track_ids, all_track_lengths = [], []
     all_affine_shapes, all_is_anchor = [], []
@@ -151,16 +220,34 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     for name in seq_names:
         sg = seqs[name]
         g = sg["tracks"]
-        patches = g["patches"][:]
+        is_anchor = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
+
+        # Viewing-angle band: decide WHICH observations to read before reading them,
+        # so a narrow band does not pull a whole (large) sequence through memory.
+        sel = None
+        if bounds is not None:
+            if is_anchor:
+                if not view_angle_keep_anchors:
+                    continue
+            else:
+                angles, matched = _observation_view_angles(g, name)
+                lo, hi = bounds
+                sel = np.flatnonzero(matched & (angles >= lo) & (angles < hi))
+                if sel.size == 0:
+                    continue
+                if sel.size == g["patches"].shape[0]:
+                    sel = None            # whole sequence: plain slice reads faster
+
+        patches = _read_rows(g["patches"], sel)
         n = patches.shape[0]
         all_patches.append(patches)
-        all_track_ids.append(remap(name, g["track_id"][:]))
+        all_track_ids.append(remap(name, _read_rows(g["track_id"], sel)))
         all_track_lengths.append(g["track_lengths"][:])
         if with_mask:
-            all_masks.append(g["masks"][:] if "masks" in g else np.ones_like(patches))
+            all_masks.append(_read_rows(g["masks"], sel) if "masks" in g
+                             else np.ones_like(patches))
         if with_affine:
-            all_affine_shapes.append(g["affine_shapes"][:])
-        is_anchor = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
+            all_affine_shapes.append(_read_rows(g["affine_shapes"], sel))
         all_is_anchor.append(np.full(n, is_anchor, dtype=np.uint8))
 
     def cat(parts, empty):
@@ -208,6 +295,15 @@ class BlobTrackData(torch.utils.data.Dataset):
 
     Only tracks with >= `min_track_length` observations are included.
     Loads all sequences by default; pass `sequence="name"` for one.
+
+    `view_angle_range=[lo_deg, hi_deg]` restricts the tracked observations to a band of
+    viewing obliquity (0 = fronto-parallel, 90 = edge-on), which is what the per-band
+    validation splits in `conf/track_angle_validation.yaml` use to report FPR95 as a
+    function of viewpoint. The band applies to tracked observations only: anchors have
+    no pose and are kept (they supply the positive partner), and confusers carry no
+    frame id at all, so they stay a plain negative pool — capped, as always, at
+    `max_untracked_to_tracked_ratio x` the *surviving* patch count, which keeps the
+    positive/negative balance (and hence FPR95) comparable across bands.
     """
 
     def __init__(
@@ -222,6 +318,8 @@ class BlobTrackData(torch.utils.data.Dataset):
         patch_type="cartesian",   # informational: one file = one patch type
         with_mask=False,
         unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
+        view_angle_range=None,   # [lo_deg, hi_deg): keep only observations viewed at this obliquity
+        view_angle_keep_anchors=True,   # anchors have no pose; keep them so bands still have positives
         log_stats=False,   # print a per-sequence / positive-structure breakdown on load
         **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
@@ -229,6 +327,9 @@ class BlobTrackData(torch.utils.data.Dataset):
             raise ValueError("h5_path must be provided")
 
         self.with_mask = with_mask
+        # Validate the band up front so a bad config fails before the (slow) load.
+        self.view_angle_range = list(view_angle_range) if view_angle_range is not None else None
+        _view_angle_bounds(view_angle_range)
         if not load_into_memory:
             raise NotImplementedError("BlobTrackData only supports load_into_memory=True")
 
@@ -244,7 +345,9 @@ class BlobTrackData(torch.utils.data.Dataset):
 
             (all_patches, all_masks, track_ids, _track_lengths,
              affine_shapes, is_anchor) = _load_all_sequences(
-                f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids)
+                f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids,
+                view_angle_range=view_angle_range,
+                view_angle_keep_anchors=view_angle_keep_anchors)
 
             self.patches = all_patches
             # int64: remapped ids (board_id << 16 | blob_index) and the confuser band
@@ -283,7 +386,24 @@ class BlobTrackData(torch.utils.data.Dataset):
             ])
             self.is_anchor = np.concatenate([self.is_anchor, np.zeros(n_ut, dtype=np.uint8)])
 
-        print(f"BlobTrackDataset: {len(self.labels)} patches (with_mask={with_mask})")
+        band = ""
+        if self.view_angle_range is not None:
+            lo, hi = self.view_angle_range
+            band = f", view_angle=[{lo:g}, {hi:g}) deg"
+        print(f"BlobTrackDataset: {len(self.labels)} patches (with_mask={with_mask}{band})")
+
+        if self.view_angle_range is not None:
+            # A band drops tracked observations, so it can silently starve the batch of
+            # positive pairs (FPR95 is NaN without one). Report what survived — this is
+            # the number to watch when deciding whether the bands need widening.
+            pos_groups, confusers = self._grouped_indices()
+            n_tracked = int(len(self.patches))
+            print(f"  band [{lo:g}, {hi:g}) deg: {n_tracked} in-band patches "
+                  f"(+{len(self.labels) - n_tracked} confusers), "
+                  f"{len(pos_groups)} matchable tracks, {len(confusers)} singletons")
+            if len(pos_groups) < 50:
+                print(f"  !! WARNING: only {len(pos_groups)} matchable tracks in this band — "
+                      "FPR95 will be noisy or NaN; widen the band.")
 
     def __len__(self):
         return len(self.labels)
@@ -339,11 +459,19 @@ class BlobTrackData(torch.utils.data.Dataset):
         track_in_anchor = collections.defaultdict(bool)
         raw_boards = collections.defaultdict(set)  # raw id -> set of board uids
         per_seq = []   # (name, uid, is_anchor, n_patches, unique_keys:set, n_untracked)
+        obs_angles = []   # per-observation viewing angle (radians), tracked sequences only
+        n_no_angle = 0
         for name in names:
             sg = seqs[name]
             u = _uid_of(name)
             isa = int(sg.attrs.get("is_anchor", 0))
             tid = sg["tracks"]["track_id"][:]
+            if not isa:
+                try:
+                    ang, matched = _observation_view_angles(sg["tracks"], name)
+                    obs_angles.append(ang[matched])
+                except ValueError:
+                    n_no_angle += 1
             n_ut = sg["untracked/patches"].shape[0] if "untracked" in sg else 0
             keys = {key(u, int(t)) for t in tid.tolist()}
             per_seq.append((name, u, isa, len(tid), keys, n_ut))
@@ -389,6 +517,23 @@ class BlobTrackData(torch.utils.data.Dataset):
         print(f"  raw ids shared across >1 board (cross-board collisions): {collisions}"
               f"{'  (de-collided by remap)' if unique_track_ids else '  !! NOT de-collided'}")
         print(f"  track multiplicity histogram (patches per track): {histstr}")
+
+        # Viewing-angle distribution over tracked observations, in the 10-degree bands
+        # the validation splits use — this is how you see whether a band is populated
+        # enough to be worth evaluating (see `view_angle_range`).
+        if obs_angles:
+            deg = np.degrees(np.concatenate(obs_angles)) if len(obs_angles) > 1 \
+                else np.degrees(obs_angles[0])
+            edges = np.arange(0.0, 100.0, 10.0)
+            counts, _ = np.histogram(deg, bins=edges)
+            bandstr = "  ".join(f"{int(e)}-{int(e)+10}:{c}" for e, c in zip(edges[:-1], counts))
+            print(f"  view angle (deg) over {deg.size} tracked obs: "
+                  f"min {deg.min():.1f} median {np.median(deg):.1f} max {deg.max():.1f}")
+            print(f"  view-angle 10deg bands: {bandstr}")
+        if n_no_angle:
+            print(f"  note: {n_no_angle} tracked sequences carry no view_angles "
+                  "(pre-dating the BlobBoards viewing-angle export) — view_angle_range "
+                  "would reject them")
         if len(matchable) == 0:
             print("  !! WARNING: NO matchable tracks — every batch is positive-free; "
                   "check that track_ids are shared across a board's sequences.")
