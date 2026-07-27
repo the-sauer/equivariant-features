@@ -34,7 +34,7 @@ training:
   m_per_class: 4          # SupCon/FPR95 need >=1 positive pair per batch -> class-balanced sampler
   num_workers: 8
   num_epochs: 50
-  batch_size: 7800
+  batch_size: 4096
   dataset:
     name: BlobTrackData
     params:
@@ -98,16 +98,16 @@ training:
       weight_decay: 1e-4
     scheduler:
       - name: LinearLR
-      - name: CosineAnnealingLR
+      # - name: CosineAnnealingLR
   loss:
     - name: SupCon
     # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
     # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
     # patches that even have a positive present.
-    - name: Recall1
-      weight: 0
-    - name: PosCoverage
-      weight: 0
+    # - name: Recall1
+    #   weight: 0
+    # - name: PosCoverage
+      # weight: 0
 
 validation:
   batch_size: 1024
@@ -128,10 +128,10 @@ validation:
         - "f80"
   loss:
     - name: FPR95
-    - name: Recall1
-      weight: 0
-    - name: PosCoverage
-      weight: 0
+    # - name: Recall1
+    #   weight: 0
+    # - name: PosCoverage
+    #   weight: 0
 
 logging:
   dir: /raid/data/hsa/logs

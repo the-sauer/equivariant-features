@@ -57,6 +57,10 @@ declare -A SCALES=(
 # it is not a track-training parameter (track patches are precomputed).
 SRC_SS="${SRC_SS:-3}"
 
+declare -A NET_MEM=(
+  [logpolar_fftmask]=64GB
+)
+
 # extra hydra overrides per network — the model switches that distinguish the log-polar
 # ablation variants and the C8/C4 efficient nets. Mirrors launch_training_matrix.sh's
 # NET_EXTRA, minus the dataset precompute_masks bits (track patches carry their own).
@@ -64,7 +68,8 @@ declare -A NET_EXTRA=(
   [efficient8]="model.params.n_rotations=8"
   [efficient4]="model.params.n_rotations=4"
   [logpolar_circ]="model.name=HardNetLogPolar"
-  [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=5"
+  [logpolar_fft]="model.name=HardNetLogPolar ++model.params.head=fft ++model.params.n_harmonics=4"
+  [logpolar_fftmask]="++model.params.n_harmonics=4"
 )
 
 # ---- Slurm resources --------------------------------------------------------
@@ -112,9 +117,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$FROM_DIR" ]] && { echo "!! --from-dir is required (directory of runs to warm-start from)" >&2; exit 1; }
+# [[ -z "$FROM_DIR" ]] && { echo "!! --from-dir is required (directory of runs to warm-start from)" >&2; exit 1; }
 [[ -z "$TRACK_PATH" ]] && { echo "!! --track is required (path to the .tracks file)" >&2; exit 1; }
-[[ ! -d "$FROM_DIR" ]] && { echo "!! --from-dir '$FROM_DIR' is not a directory" >&2; exit 1; }
+# [[ ! -d "$FROM_DIR" ]] && { echo "!! --from-dir '$FROM_DIR' is not a directory" >&2; exit 1; }
 [[ ! -f "$TRACK_PATH" && "$DRY_RUN" != "1" ]] && { echo "!! --track '$TRACK_PATH' not found" >&2; exit 1; }
 case "$CKPT" in best|latest) ;; *) echo "!! --ckpt must be 'best' or 'latest'" >&2; exit 1 ;; esac
 
@@ -152,12 +157,12 @@ submit() {
     return 1
   fi
 
-  local ckpt_path
-  ckpt_path="$(find_checkpoint "$net" "$scale")"
-  if [[ -z "$ckpt_path" ]]; then
-    echo "!! no ${CKPT}.pth for ${net}_s${scale}_ss${SRC_SS} under ${FROM_DIR} — skipping" >&2
-    return 0
-  fi
+  # local ckpt_path
+  # ckpt_path="$(find_checkpoint "$net" "$scale")"
+  # if [[ -z "$ckpt_path" ]]; then
+  #   echo "!! no ${CKPT}.pth for ${net}_s${scale}_ss${SRC_SS} under ${FROM_DIR} — skipping" >&2
+  #   return 0
+  # fi
 
   local name="track_${net}_s${scale}"
   local extra="${NET_EXTRA[$net]:-}"
@@ -169,7 +174,7 @@ submit() {
 #SBATCH --job-name=${name}
 #SBATCH --chdir=${REPO_ROOT}
 #SBATCH --gres=${GRES}
-#SBATCH --mem=${MEM}
+#SBATCH --mem=${NET_MEM[$net]:-$MEM}
 #SBATCH -c${CPUS}
 #SBATCH --time=${TIME}
 #SBATCH --output=${LOG_OUTDIR}/%x-%j.out
@@ -178,16 +183,15 @@ cd deps/BlobBoards.jl
 pixi run python ../../src/run_training.py \\
   --config-name ${cfg} scale=${scale} \\
   "track_path=${TRACK_PATH}" \\
-  "+training.init_from_checkpoint=${ckpt_path}" \\
   +experiment_name=${exp} ${extra}
 EOF
 )
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "===== would submit: ${name} (warm-start <- ${ckpt_path}) ====="
+    echo "===== would submit: ${name} (warm-start) ====="
     echo "$job"
     echo
   else
-    echo "warm-start ${name} <- ${ckpt_path}"
+    
     echo "$job" | sbatch
   fi
 }

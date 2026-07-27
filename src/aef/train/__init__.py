@@ -345,14 +345,14 @@ def train_func(process_batch):
             if scale_desc is None:
                 _p = cfg.training.dataset.params
                 scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
-            plot_title = f"{model_name} (scale={scale_desc})"
+            plot_title = f"{model_name} {"FFT" if model.head_type == "fft" else "MaxPool"} {"& Mask " if model.learned_mask else ""} (scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)
             ax.set_title(plot_title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
-            ax.set_xlim(0, min(100, cfg.training.num_epochs))
+            ax.set_xlim(0, cfg.training.num_epochs)
             ax.set_ylim(bottom=0)
             ax.legend()
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
