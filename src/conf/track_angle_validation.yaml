@@ -49,42 +49,66 @@ validation:
         view_angle_range: null
       loss:
         - name: FPR95
-
     - name: deg00_10
       params:
         view_angle_range: [0, 10]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0
     - name: deg10_20
       params:
         view_angle_range: [10, 20]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0
     - name: deg20_30
       params:
         view_angle_range: [20, 30]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0
     - name: deg30_40
       params:
         view_angle_range: [30, 40]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0
     - name: deg40_50
       params:
         view_angle_range: [40, 50]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0
-    # Catch-all tail: past ~50 deg the board foreshortens hard and observations get
-    # sparse, so everything above goes in one band rather than three empty ones.
-    - name: deg50_90
+    - name: deg50_60
       params:
-        view_angle_range: [50, 90]
+        view_angle_range: [50, 60]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg60_70
+      params:
+        view_angle_range: [60, 70]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg70_80
+      params:
+        view_angle_range: [70, 80]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg80_90
+      params:
+        view_angle_range: [80, 90]
+        max_keypoints: 6000
       loss:
         - name: FPR95
           weight: 0

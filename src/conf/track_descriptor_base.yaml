@@ -47,11 +47,11 @@ training:
       # tracked media added later). Disjoint from the val boards below.
       sequences:
         - "028"
-        - "08d"
         - "102"
         - "14b"
         - "187"
         - "232"
+        - "25d"
         - "291"
         - "2f7"
         - "2fe"
@@ -121,7 +121,7 @@ validation:
       include_untracked: true
       # 5 tracked-media boards (~2.3k real anchor<->tracked positives). Disjoint from train.
       sequences:
-        - "25d"
+        - "08d"
         - "5b6"
         - "cf2"
         - "f75"

@@ -5,6 +5,7 @@
 defaults:
   - track_descriptor_base
   - _self_
+  - track_angle_validation
 
 scale: 16.0
 

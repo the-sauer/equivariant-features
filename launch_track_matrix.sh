@@ -35,11 +35,13 @@ declare -A CONFIG=(
   [logpolar_relphase]=track_descriptor_logpolar
   [logpolar_bispectrum]=track_descriptor_logpolar
   [logpolar_fftmask]=track_descriptor_logpolar_fftmask
+  [logpolar_relphase_mask]=track_descriptor_logpolar_fftmask
+  [logpolar_bispectrum_mask]=track_descriptor_logpolar_fftmask
   [efficient8]=track_descriptor_efficient
   [efficient4]=track_descriptor_efficient
 )
 # Submission order (slowest last); must cover every CONFIG key.
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask steerable)
+NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask steerable)
 # What a bare (no network arg) invocation submits: the log-polar angular-head ladder
 # (max-pool/circ -> fft -> relphase/bispectrum -> fft+mask), matching
 # launch_training_matrix.sh's default.
@@ -55,6 +57,8 @@ declare -A SCALES=(
   [logpolar_relphase]="96"
   [logpolar_bispectrum]="96"
   [logpolar_fftmask]="96"
+  [logpolar_relphase_mask]="96"
+  [logpolar_bispectrum_mask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
 )
@@ -79,6 +83,8 @@ declare -A NET_EXTRA=(
   # therefore do not transfer between heads (the load drops that tensor and reports it).
   [logpolar_relphase]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=4"
   [logpolar_bispectrum]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=4"
+  [logpolar_relphase_mask]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=4"
+  [logpolar_bispectrum_mask]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=4"
   [logpolar_fftmask]="++model.params.n_harmonics=4"
 )
 
