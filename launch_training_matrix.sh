@@ -36,6 +36,11 @@ declare -A CONFIG=(
   [logpolar_fftmask]=blob_descriptor_logpolar_fftmask
   [efficient8]=blob_descriptor_efficient
   [efficient4]=blob_descriptor_efficient
+  # Steerable counterparts of `logpolar_fftmask`: learned board-validity masking on the
+  # cartesian (escnn) descriptors. Same GT-on-anchor / predicted-on-target contract.
+  [efficient8_mask]=blob_descriptor_efficient_mask
+  [efficient4_mask]=blob_descriptor_efficient_mask
+  [steerable_mask]=blob_descriptor_steerable_mask
 )
 # Default submission order — SLOWEST LAST, and the only thing that defers the slow nets
 # on this cluster. PriorityType is multifactor but every PriorityWeight* is 0 (TRES
@@ -51,7 +56,7 @@ declare -A CONFIG=(
 # Bash associative arrays are UNORDERED, so the previous `${!CONFIG[@]}` was hash order —
 # steerable landed last by accident, and renaming or adding a network reshuffles it
 # silently. Must cover every CONFIG key (checked below).
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_circ_nomask steerable)
+NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_circ_nomask steerable steerable_mask)
 
 # What a bare (no-arg) invocation submits. NET_ORDER above stays the full registry (it
 # must list every CONFIG key, and fixes the slowest-last schedule); DEFAULT_SWEEP just
@@ -73,6 +78,9 @@ declare -A SCALES=(
   [logpolar_fftmask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
+  [efficient8_mask]="8 16 32 64 96 128"
+  [efficient4_mask]="8 16 32 64 96 128"
+  [steerable_mask]="8 16 32 64 96 128"
 )
 # Patch anti-aliasing: sub-taps per output pixel per axis, area-averaged. This is a
 # *dataset* param, so each value is its own dataset (and its own cache entry) — the
@@ -85,6 +93,10 @@ SUPERSAMPLES=(3)
 declare -A NET_EXTRA=(
   [efficient8]="model.params.n_rotations=8"
   [efficient4]="model.params.n_rotations=4"
+  # Same C8/C4 switch; the mask itself comes from the `*_mask` config (model
+  # `learned_mask` + dataset `precompute_masks`), not from an override here.
+  [efficient8_mask]="model.params.n_rotations=8"
+  [efficient4_mask]="model.params.n_rotations=4"
   # log-polar-aware HardNet (circular angular padding + antialiased stride) vs the
   # plain one. `precompute_masks=true` here is NOT used by the model (learned_mask is
   # off) — it only makes the dataset cache key match `logpolar_fftmask`, so all three
@@ -117,6 +129,14 @@ declare -A NET_DATASET_GROUP=(
   [steerable]=cartesian
   [efficient8]=cartesian
   [efficient4]=cartesian
+  # The mask nets need the GT validity mask co-extracted, which changes the dataset
+  # cache key — hence their own group rather than the plain `cartesian` one. (The
+  # log-polar variants instead all share ONE mask-carrying dataset, via `precompute_masks`
+  # overrides on the mask-less nets; do the same here if you want a single cartesian
+  # build, at the cost of invalidating the existing mask-less cartesian caches.)
+  [steerable_mask]=cartesian_mask
+  [efficient8_mask]=cartesian_mask
+  [efficient4_mask]=cartesian_mask
   [logpolar]=logpolar
   [logpolar_circ_nomask]=logpolar
   # circ/fft/fftmask all share ONE mask-carrying dataset: the mask channel is a superset
@@ -131,11 +151,15 @@ declare -A NET_DATASET_GROUP=(
 )
 declare -A GROUP_CONFIG=(
   [cartesian]=blob_descriptor_steerable
+  [cartesian_mask]=blob_descriptor_steerable_mask
   [logpolar]=blob_descriptor_logpolar
   [logpolar_mask]=blob_descriptor_logpolar_fftmask
 )
-# Validation split names from `validation.datasets` — one prebuild task each.
-VAL_SPLITS=(overall far medium near)
+# Validation split names from `validation.datasets` — one prebuild task each. MUST match
+# `conf/homography_validation.yaml`: prebuild_datasets.py raises on an unknown split, and
+# the training jobs hang on `--dependency=afterok`, so a stale name here silently blocks
+# the whole matrix. (Was `overall far medium near` — those splits are long gone.)
+VAL_SPLITS=(default affine strong extreme)
 
 # ---- Slurm resources --------------------------------------------------------
 GRES="${GRES:-gpu:1}"
@@ -153,16 +177,12 @@ PREBUILD_MEM="${PREBUILD_MEM:-64GB}"
 PREBUILD_CPUS="${PREBUILD_CPUS:-4}"
 PREBUILD_TIME="${PREBUILD_TIME:-4:00:00}"
 
-# Per-network memory override (falls back to $MEM). The light nets need less.
+# Per-network memory override (falls back to $MEM = 64GB for every net). The light nets
+# used to be pinned to 32GB; that is no longer worth the OOM risk — in-memory patch
+# caches (plus the mask channel for the *_mask nets) dominate host RAM, so everything
+# gets the same 64GB. Add an entry here only for a net that genuinely needs MORE.
 declare -A NET_MEM=(
-  [logpolar]=32GB
-  [logpolar_circ]=32GB
-  [logpolar_fft]=32GB
-  [logpolar_relphase]=32GB
-  [logpolar_bispectrum]=32GB
-  [logpolar_fftmask]=32GB
-  [efficient8]=32GB
-  [efficient4]=32GB
+  [__none__]=""   # placeholder: an empty assoc array + `set -u` is an error on bash < 4.4
 )
 # Per-network core count (falls back to $CPUS). Sized to each config's
 # `num_workers` + ~2 (main process + Julia board generation): steerable uses 6
@@ -170,6 +190,9 @@ declare -A NET_MEM=(
 # data-bound and use the base 8.
 declare -A NET_CPUS=(
   [steerable]=8
+  [steerable_mask]=8
+  [efficient8_mask]=10
+  [efficient4_mask]=10
   [logpolar]=10
   [logpolar_circ]=10
   [logpolar_circ_nomask]=10

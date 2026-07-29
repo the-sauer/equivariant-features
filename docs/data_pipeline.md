@@ -160,6 +160,29 @@ depends on it.
 Note the flag no longer selects how *images* are loaded: `HomographyData` takes an
 in-memory tensor only (the on-disk image path went away with `KaggleHomographyData`).
 
+## Board-validity masks (`precompute_masks`)
+
+With `precompute_masks: true` the extractors co-sample a per-patch validity mask
+(1 = on the board) on the *same* warp as the patch, cached alongside it and delivered
+as `"masks"` + `"is_anchor"` in the batch. It is the GT for the learned-mask descriptor
+heads (`model.params.learned_mask`, see
+[log-polar](logpolar_descriptor.md#learned_masktrue--mask-aware-pooling-without-a-target-mask)
+and [steerable](steerable_descriptors.md#learned-board-validity-masking-learned_mask)).
+
+Both patch types support it. For the identity/anchor view the source is a full-frame
+ones image (the clean board fills the frame, so validity == in-frame); for warped views
+it is the composited board mask, warped by the same homography — a warped view's
+off-board region is real background *inside* the frame, so `oob` alone would be wrong.
+
+**Cartesian masks are single-channel**, and each `patch_scale_factors` entry samples a
+different physical extent onto the same pixel grid, so one mask cannot describe several:
+`precompute_masks` with `patch_type: cartesian` requires exactly one scale factor and
+raises otherwise. (All the steerable configs use a single `["${scale}"]` entry.)
+
+Enabling it changes the dataset cache key, so masked and mask-less runs of the same
+network do not share a prepared dataset — which is why the launcher gives the `*_mask`
+nets their own `cartesian_mask` dataset group.
+
 ## Background compositing
 
 Boards can be placed onto real background scenes so warped views look like a board

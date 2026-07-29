@@ -174,7 +174,9 @@ max-pool and the fft head (a function of invariants is invariant):
 zero, needing no reference at all. `bispectrum_normalize=True` (default) divides each
 triple by `|X_{k1}||X_{k2}||X_{k1+k2}|` so only the phase coupling survives — the
 magnitudes are already in the leading rows, and the raw product is cubic in scale.
-Derivation and references: [fft_theory.md → keeping phase](fft_theory.md#keeping-phase-while-staying-rotation-invariant).
+Derivation and references: [fft_theory.md → keeping phase](fft_theory.md#keeping-phase-while-staying-rotation-invariant);
+figures: `docs/figures/logpolar_fft_head.tex` (the head in detail) and
+`docs/figures/relative_phase_information_loss.tex` (what magnitude-only discards).
 
 Both are drop-in replacements for the angular reduction, so they compose with
 `learned_mask` and inherit the fft head's junk-fragility (the DFT is global over angle —
@@ -219,6 +221,15 @@ from `_board_masks` on the same log-polar lattice when `precompute_masks=true` �
 This is the standard train-supervise / test-predict pattern: the true target mask exists
 in synthetic training but not at test, so the predictor learns to supply it. No relative
 orientation is ever needed, because the mask co-rotates with the patch.
+
+The **steerable** descriptors (`BlobDescriptorEfficient`, `BlobDescriptorNoStride`)
+implement the same contract — same `learned_mask` flag, same `(descriptor, m_pred)`
+return, same BCE — on cartesian patches, which `precompute_masks` now covers too. See
+[steerable_masking.md](steerable_masking.md) (why weighting by a scalar field keeps the
+escnn models equivariant, and where each architecture applies it).
+Only a mask-aware model is ever *called* with the mask kwargs (`process_batch_blobs`
+checks `learned_mask`); `training.ignore_mask=true` disables the whole path — inputs and
+supervision — for the ablation.
 
 Two honest caveats, both to **measure**, not assume:
 

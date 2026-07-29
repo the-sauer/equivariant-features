@@ -42,6 +42,9 @@ from ..transforms.homography import sample_homography
 #      the source point. Both change the patch footprint of every warped view.
 #   5: optional per-patch log-polar validity mask (`precompute_masks`) added to the
 #      cached state; bumped so pre-v5 caches (which lack the tensor) are rebuilt.
+# `precompute_masks` also covers CARTESIAN patches now (for the steerable learned-mask
+# heads). No bump: it was silently forced off for cartesian before, so every affected
+# cache key is new — existing caches stay valid.
 CACHE_VERSION = 5
 
 # Params that don't change a dataset's *contents* (so they must not split the cache).
@@ -303,8 +306,20 @@ def blob_normalizations(homographies, coords, device):
 
 def extract_multiscale_patches(
     imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0],
-    supersample=1,
+    supersample=1, return_mask=False, mask_imgs=None,
 ):
+    """Extract cartesian patches, one channel per entry in ``scale_factors``.
+
+    ``return_mask`` additionally samples a per-patch board-validity mask (1 = on the
+    board) on the SAME warp, for the learned-mask descriptor heads — the cartesian
+    counterpart of :func:`extract_logpolar_patches`'s. ``mask_imgs`` is a board-coverage
+    image in the same frame as ``imgs``; without one, validity is "inside the frame"
+    (correct for the identity/anchor view, whose board raster fills the frame).
+
+    The mask is single-channel and therefore only defined for a SINGLE scale factor:
+    with several, each channel samples a different physical extent onto the same pixel
+    grid, so one mask cannot describe them all.
+    """
     device = imgs.device
     blob_normalizations_ = blob_normalizations(homographies, coords, device)
 
@@ -315,7 +330,14 @@ def extract_multiscale_patches(
     ss = max(1, int(supersample))
     P = patch_size * ss
 
+    if return_mask and len(scale_factors) != 1:
+        raise ValueError(
+            "cartesian validity masks are single-channel and need exactly one "
+            f"scale factor, got {list(scale_factors)}"
+        )
+
     multiscale_patches = []
+    valid = None
 
     # Wir nehmen an, dass der kleinste Scale-Faktor die "schärfste" Basis ist
     base_scale = min(scale_factors)
@@ -361,14 +383,32 @@ def extract_multiscale_patches(
             :, :1
         ]  # Zurück auf 1 Kanal pro Skala
 
+        # Board validity on the very same warp: 0 outside the frame (the `fill_value`),
+        # and — with a coverage image — 0 on the background *inside* the frame too.
+        if return_mask:
+            msrc = (mask_imgs if mask_imgs is not None
+                    else torch.ones_like(imgs[:, :1]))
+            valid = kornia.geometry.transform.warp_perspective(
+                msrc.expand(-1, 3, -1, -1),
+                M,
+                dsize=(P, P),
+                padding_mode="fill",
+                fill_value=torch.tensor([0.0, 0.0, 0.0], device=device),
+            )[:, :1]
+
         # Area-average each output pixel's supersampled footprint.
         if ss > 1:
             patches = torch.nn.functional.avg_pool2d(patches, kernel_size=ss, stride=ss)
+            if valid is not None:
+                valid = torch.nn.functional.avg_pool2d(valid, kernel_size=ss, stride=ss)
 
         multiscale_patches.append(patches)
 
     # Stapeln entlang der Kanal-Dimension -> Shape: [Batch, len(scale_factors), patch_size, patch_size]
-    return torch.cat(multiscale_patches, dim=1)
+    patches = torch.cat(multiscale_patches, dim=1)
+    if return_mask:
+        return patches, valid
+    return patches
 
 
 def extract_logpolar_patches(
@@ -545,7 +585,15 @@ class HomographyData(torch.utils.data.Dataset):
         self.logpolar_inner_factor = logpolar_inner_factor
         self.logpolar_outer_factor = logpolar_outer_factor
         self.supersample = supersample
-        self.precompute_masks = bool(precompute_masks) and patch_type == "logpolar"
+        # Board-validity masks are available for both patch types now (the cartesian
+        # extractor samples them on the same warp). Cartesian masks are single-channel,
+        # so they need a single patch scale factor — see extract_multiscale_patches.
+        self.precompute_masks = bool(precompute_masks)
+        if self.precompute_masks and patch_type == "cartesian" and len(patch_scale_factors) != 1:
+            raise ValueError(
+                "precompute_masks with patch_type='cartesian' needs exactly one "
+                f"patch_scale_factor, got {list(patch_scale_factors)}"
+            )
         self.precomputed_masks = None  # (N, 1, patch_size, patch_size) validity, if enabled
         self.keypoint_jitter = float(keypoint_jitter)
         self.scale_jitter = float(scale_jitter)
@@ -1050,7 +1098,12 @@ class HomographyData(torch.utils.data.Dataset):
                             patch_size=self.patch_size,
                             scale_factors=self.patch_scale_factors,
                             supersample=self.supersample,
+                            return_mask=self.precompute_masks,
+                            mask_imgs=mask_tensor,
                         )
+                        if self.precompute_masks:
+                            patches, valid = patches
+                            self.precomputed_masks[idx : idx + valid.size(0)] = valid.cpu()
 
                     self.precomputed_patches[idx : idx + patches.size(0)] = (
                         patches.cpu()

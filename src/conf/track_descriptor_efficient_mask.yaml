@@ -1,0 +1,33 @@
+# Efficient steerable descriptor with learned board-validity masking, on track data.
+# Model block mirrors blob_descriptor_efficient_mask so a run warm-started from that
+# checkpoint matches. `with_mask: true` feeds the per-patch board-in-frame masks stored
+# in the `.tracks` file — the same GT the synthetic pretraining supervised against.
+defaults:
+  - track_descriptor_base
+  - _self_
+  - track_angle_validation
+
+scale: 64.0
+
+model:
+  name: BlobDescriptorEfficient
+  params:
+    n_rotations: 8
+    head: attention
+    scale_factors: ["${scale}"]
+    in_channels: 1
+    learned_mask: true
+
+training:
+  batch_size: 2048
+  ignore_mask: false
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      patch_type: cartesian
+      with_mask: true
+validation:
+  dataset:
+    params:
+      patch_type: cartesian
+      with_mask: true

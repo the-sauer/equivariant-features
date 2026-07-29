@@ -44,6 +44,9 @@ and a whole matrix of runs (one Slurm job per network × scale) is submitted wit
 - [Steerable blob descriptors](docs/steerable_descriptors.md) — the `escnn` model
   variants, why `NoStride` is heavy, and `BlobDescriptorEfficient` (design, benchmarks,
   the equivariance trade-off).
+- [Steerable board-validity masking](docs/steerable_masking.md) — `learned_mask` on the
+  `escnn` descriptors: why weighting by a scalar field stays equivariant, the
+  anchor-given / target-predicted split, and how the predictor is supervised.
 - [Log-polar descriptor](docs/logpolar_descriptor.md) — the log-polar geometry, why
   `HardNet` is not rotation-invariant on it, and `HardNetLogPolar` (circular angular
   padding + antialiased stride, with an ablation).

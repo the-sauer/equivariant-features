@@ -39,9 +39,15 @@ declare -A CONFIG=(
   [logpolar_bispectrum_mask]=track_descriptor_logpolar_fftmask
   [efficient8]=track_descriptor_efficient
   [efficient4]=track_descriptor_efficient
+  # Learned board-validity masking on the steerable (escnn) descriptors — the cartesian
+  # counterpart of the logpolar_*_mask entries. The `.tracks` file already carries the
+  # per-patch masks, so these only need `with_mask: true` (set by the configs).
+  [efficient8_mask]=track_descriptor_efficient_mask
+  [efficient4_mask]=track_descriptor_efficient_mask
+  [steerable_mask]=track_descriptor_steerable_mask
 )
 # Submission order (slowest last); must cover every CONFIG key.
-NET_ORDER=(efficient8 efficient4 logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask steerable)
+NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask steerable steerable_mask)
 # What a bare (no network arg) invocation submits: the log-polar angular-head ladder
 # (max-pool/circ -> fft -> relphase/bispectrum -> fft+mask), matching
 # launch_training_matrix.sh's default.
@@ -61,13 +67,19 @@ declare -A SCALES=(
   [logpolar_bispectrum_mask]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
+  [efficient8_mask]="8 16 32 64 96 128"
+  [efficient4_mask]="8 16 32 64 96 128"
+  [steerable_mask]="8 16 32 64 96 128"
 )
 # Supersample tag used ONLY to locate the source run (its name is <net>_s<scale>_ss<ss>);
 # it is not a track-training parameter (track patches are precomputed).
 SRC_SS="${SRC_SS:-3}"
 
+# Per-network memory override (falls back to $MEM, now 64GB for every net — the track
+# patches are all held in memory, so no net is meaningfully lighter). Add an entry only
+# for a net that needs MORE than the default.
 declare -A NET_MEM=(
-  [logpolar_fftmask]=64GB
+  [__none__]=""   # placeholder: an empty assoc array + `set -u` is an error on bash < 4.4
 )
 
 # extra hydra overrides per network — the model switches that distinguish the log-polar
@@ -86,11 +98,15 @@ declare -A NET_EXTRA=(
   [logpolar_relphase_mask]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=4"
   [logpolar_bispectrum_mask]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=4"
   [logpolar_fftmask]="++model.params.n_harmonics=4"
+  # C8/C4 switch; the masking itself is in the *_mask configs (model `learned_mask` +
+  # dataset `with_mask`), not overridden here.
+  [efficient8_mask]="model.params.n_rotations=8"
+  [efficient4_mask]="model.params.n_rotations=4"
 )
 
 # ---- Slurm resources --------------------------------------------------------
 GRES="${GRES:-gpu:1}"
-MEM="${MEM:-32GB}"
+MEM="${MEM:-64GB}"
 CPUS="${CPUS:-10}"
 TIME="${TIME:-24:00:00}"
 LOGDIR="${LOGDIR:-logs}"

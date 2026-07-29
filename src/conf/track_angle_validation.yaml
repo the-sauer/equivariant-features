@@ -27,6 +27,19 @@
 # `BlobTrackData` prints the matchable-track count per band on load and warns below 50.
 # `dataset.params.log_stats=true` prints the full 10-deg histogram of the file, which is
 # what to size the bands from. A pre-widened 20 deg alternative is at the bottom.
+#
+# `max_keypoints` is the other half of that comparability: the same fronto-parallel bias
+# makes the low bands an order of magnitude larger than the high ones, and FPR95 is not
+# invariant to how many negatives a split holds. Every band therefore caps to the same
+# size. `BlobTrackData` spends the cap PER KIND, after the angle filter: at most
+# `max_keypoints` patches from positive track groups (whole groups, never split — a group
+# trimmed to one member would quietly become a confuser) and at most `max_keypoints`
+# confusers (tracked singletons + untracked patches share that budget, still bounded by
+# `max_untracked_to_tracked_ratio`). The subsample is seeded (`subsample_seed`), so a
+# band's members are stable across runs. Set it at or below the smallest band's
+# population — a band with less than the cap just stays smaller (it prints a note).
+# The unfiltered `all` reference is deliberately left uncapped: it is not compared
+# against the bands, it only selects `best.pth`.
 
 validation:
   batch_size: 1024

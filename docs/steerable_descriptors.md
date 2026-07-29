@@ -67,6 +67,34 @@ is why the attention head (which globally pools and tolerates it) is the default
 is small and the model trains on rotated views, but whether it costs any FPR95 is an
 empirical question — run the sweep.
 
+## Learned board-validity masking (`learned_mask`)
+
+Both steerable descriptors take `learned_mask=True`: part of every patch is off-board
+junk, and it is not shared between an anchor and its target, so it is pure noise for the
+metric loss. The mask that would remove it exists for the **anchor** (given) but not for
+the **target** at test time — so a 1×1 steerable conv predicts one (`m_pred ∈ [0, 1]`)
+from the backbone features, `forward` returns `(descriptor, m_pred)`, and a BCE trains
+that prediction on the targets against their true coverage.
+
+Where the weight is applied differs by architecture, always at the point where the
+spatial map collapses:
+
+| model | weighting point |
+| --- | --- |
+| `BlobDescriptorEfficient` (`head="attention"`) | multiplied into the saliency, so it divides the normalizer too — the descriptor is the average over the *valid* region, not a downscaled average over everything |
+| `BlobDescriptorEfficient` (`head="dense"`) | the feature field, before the readout conv |
+| `BlobDescriptorNoStride` | the 24×24 feature field, before the dense readout conv |
+
+Equivariance is untouched — the mask, GT or predicted, is a *scalar field*, and a
+pointwise product with one commutes with the group action (measured rot90 drift is the
+same with and without the mask path). `mask_head.*` is the only added `state_dict` key,
+so a masked run still warm-starts from a plain checkpoint.
+
+**→ [steerable_masking.md](steerable_masking.md)** for the derivation, the input gate,
+the supervision rules, the measured cost, and the config/launcher surface. Same contract
+as the log-polar [`learned_mask`](logpolar_descriptor.md#learned_masktrue--mask-aware-pooling-without-a-target-mask),
+so the two families are configured and compared identically.
+
 ## Using / comparing
 
 Config: `src/conf/blob_descriptor_efficient.yaml` (mirrors `blob_descriptor_steerable`,
@@ -77,7 +105,8 @@ swapping only the model). Head-to-head FPR95 vs `NoStride`:
 ```
 
 submits `NoStride` vs `Efficient` (C8) vs `Efficient` (C4) across the scale sweep, all
-under one dated folder, with comparable titled loss curves.
+under one dated folder, with comparable titled loss curves. Add `steerable_mask
+efficient8_mask` to the same command to put the masked variants beside them.
 
 ### Further ideas (not yet done)
 

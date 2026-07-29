@@ -35,7 +35,14 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
     mask = data["masks"].to(device) if ("masks" in data and not validation) else None
     is_anchor = data["is_anchor"].to(device) if ("is_anchor" in data and not validation) else None
 
-    if mask is not None or is_anchor is not None or cfg.training.ignore_mask:
+    # Only a mask-aware model takes the mask kwargs (it advertises itself with
+    # ``learned_mask``); every other descriptor has a plain ``forward(patches)`` and
+    # would raise on them. ``training.ignore_mask`` force-disables the mask path even
+    # for a mask-aware model (ablation), which is also what makes a mask-aware model
+    # runnable on a dataset that carries no masks.
+    mask_aware = bool(getattr(model, "learned_mask", False))
+    use_mask = mask_aware and not getattr(cfg.training, "ignore_mask", False)
+    if use_mask:
         out = model(patches, mask=mask, is_anchor=is_anchor)
     else:
         out = model(patches)
@@ -58,8 +65,10 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
     # their true board coverage. The anchor's mask is *given* (used directly, not
     # predicted), so it is excluded here; the predictor exists to supply, at test time,
     # the target mask we no longer have. Restricted to in-bound targets — out-of-frame
-    # patches are meaningless white fill.
-    if m_pred is not None and mask is not None and is_anchor is not None:
+    # patches are meaningless white fill. Gated on `use_mask` as well, so
+    # `ignore_mask` switches the whole mask path off — supervision included; a model
+    # that never receives the mask must not be scored against it either.
+    if use_mask and m_pred is not None and mask is not None and is_anchor is not None:
         target = (~is_anchor.view(-1).bool()) & in_bound_mask
         if target.any():
             _, _, a_dim, r_dim = m_pred.shape

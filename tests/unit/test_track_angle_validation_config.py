@@ -23,30 +23,56 @@ CONF_DIR = os.path.abspath(
 TRACK_PATH = "/tmp/does-not-need-to-exist.tracks"
 
 
-@pytest.fixture(name="specs")
-def _specs(monkeypatch):
-    """(label, dataset_cfg, loss) per band — datasets are not actually constructed."""
-    monkeypatch.setattr(aef_data, "get_dataset", lambda dataset_cfg: dataset_cfg)
+@pytest.fixture(name="composed")
+def _composed():
     with initialize_config_dir(version_base=None, config_dir=CONF_DIR):
-        cfg = compose(
+        return compose(
             config_name="track_descriptor_logpolar_angles",
             overrides=[f"track_path={TRACK_PATH}"],
         )
-    return get_validation_specs(cfg)
 
 
-def test_one_spec_per_band(specs):
-    assert [label for label, _cfg, _loss in specs] == [
-        "all", "deg00_10", "deg10_20", "deg20_30", "deg30_40", "deg40_50", "deg50_90",
-    ]
+@pytest.fixture(name="specs")
+def _specs(monkeypatch, composed):
+    """(label, dataset_cfg, loss) per band — datasets are not actually constructed."""
+    monkeypatch.setattr(aef_data, "get_dataset", lambda dataset_cfg: dataset_cfg)
+    return get_validation_specs(composed)
 
 
-def test_bands_are_contiguous_ten_degree_windows(specs):
-    bands = [cfg.params.view_angle_range for label, cfg, _loss in specs if label != "all"]
-    bands = [list(b) for b in bands]
-    assert bands == [[0, 10], [10, 20], [20, 30], [30, 40], [40, 50], [50, 90]]
+def _bands(specs):
+    """(label, [lo, hi]) for the angle-filtered bands, in config order."""
+    return [(label, list(cfg.params.view_angle_range))
+            for label, cfg, _loss in specs if label != "all"]
+
+
+def test_the_unfiltered_reference_comes_first(specs):
+    assert specs[0][0] == "all"
+    assert len(specs) > 1
+
+
+def test_band_labels_match_their_window(specs):
+    # The label is what shows up as `FPR95@<label>`; a mislabelled band would report
+    # the wrong viewpoint. Derived from the range, so widening the bands stays green.
+    for label, (lo, hi) in _bands(specs):
+        assert label == f"deg{int(lo):02d}_{int(hi):02d}", (label, lo, hi)
+
+
+def test_bands_tile_the_whole_angle_range(specs):
+    bands = [b for _label, b in _bands(specs)]
+    assert bands[0][0] == 0 and bands[-1][1] == 90
     # Half-open windows: each band starts where the previous one ended, no gaps.
     assert all(prev[1] == nxt[0] for prev, nxt in zip(bands, bands[1:]))
+
+
+def test_every_band_shares_one_keypoint_cap(specs):
+    # Bands differ by an order of magnitude in population (footage is fronto-parallel-
+    # biased), so a per-band cap is what makes their FPR95 comparable — it only works
+    # if it is the SAME cap everywhere (BlobTrackData spends it per kind: positives
+    # and confusers each get `max_keypoints`).
+    caps = {label: cfg.params.get("max_keypoints")
+            for label, cfg, _loss in specs if label != "all"}
+    assert all(c is not None for c in caps.values()), caps
+    assert len(set(caps.values())) == 1, caps
 
 
 def test_unfiltered_reference_band_has_no_filter(specs):
@@ -55,14 +81,16 @@ def test_unfiltered_reference_band_has_no_filter(specs):
     assert cfg.params.view_angle_range is None
 
 
-def test_bands_inherit_the_leafs_dataset_settings(specs):
+def test_bands_inherit_the_leafs_dataset_settings(specs, composed):
+    boards = list(composed.validation.dataset.params.sequences)
+    assert boards, "the leaf pins a board list; the bands must inherit it"
     for label, cfg, _loss in specs:
         assert cfg.name == "BlobTrackData", label
         # Resolved, not a dangling ${track_path}.
         assert cfg.params.h5_path == TRACK_PATH, label
         # patch_type comes from the log-polar leaf, the boards from the base config.
         assert cfg.params.patch_type == "logpolar", label
-        assert "25d" in list(cfg.params.sequences), label
+        assert list(cfg.params.sequences) == boards, label
         assert cfg.params.include_untracked is True, label
 
 

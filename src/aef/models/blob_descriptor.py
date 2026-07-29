@@ -34,6 +34,61 @@ class AbstractBlobDescriptor(torch.nn.Module, abc.ABC):
         self.field_type = escnn.nn.FieldType(self.s, 1 * [self.s.trivial_repr])
 
 
+# --- Learned board-validity masking (shared by the steerable descriptors) ---------
+#
+# Same contract as ``HardNetLogPolar(learned_mask=True)`` (see models/hardnet.py), so
+# both families are configured and supervised identically:
+#
+#   * on the ANCHOR view the board-coverage mask is GT (the identity view's off-board
+#     region is known), so it is used directly;
+#   * on the TARGET (warped) views it is unavailable at test time, so a small predictor
+#     head emits ``m_pred`` in [0, 1] from the backbone features and that is used instead;
+#   * ``forward`` returns ``(descriptor, m_pred)`` so ``process_batch_blobs`` can add the
+#     BCE that trains the predictor against the targets' true coverage.
+#
+# Everything stays exactly rotation-equivariant: the mask (GT or predicted) is a SCALAR
+# field — the predictor maps the regular-representation features to a single trivial
+# representation — and a pointwise product with a scalar field commutes with the group
+# action, exactly like the existing radial ``inner_mask``/``MaskModule`` weighting.
+
+
+def _mask_predictor(field_type, gspace):
+    """1x1 steerable conv reading a per-cell validity scalar off the feature field."""
+    return escnn.nn.R2Conv(
+        field_type, escnn.nn.FieldType(gspace, 1 * [gspace.trivial_repr]), 1
+    )
+
+
+def _fill_invalid_with_mean(x, mask):
+    """Replace invalid pixels by the patch's valid mean (a neutral, edge-free fill).
+
+    The extractors fill off-board/out-of-frame area with white, which is a strong
+    (and fake) structure. Zeroing it instead would just trade it for a fake black
+    edge; substituting the mean of the valid pixels removes the contrast entirely.
+    This is the un-normalized analogue of ``hardnet.input_norm(x, mask)``, which
+    sets invalid pixels to the normalized mean (i.e. 0).
+    """
+    m = mask.expand_as(x)
+    n = m.sum(dim=(1, 2, 3), keepdim=True).clamp(min=1.0)
+    mean = (x * m).sum(dim=(1, 2, 3), keepdim=True) / n
+    return x * m + mean * (1.0 - m)
+
+
+def _gate_input(x, mask, is_anchor):
+    """Neutralize the known off-board region — on ANCHORS only (elsewhere unknown)."""
+    a = is_anchor.view(-1, 1, 1, 1).to(x.dtype)
+    return _fill_invalid_with_mean(x, a * mask + (1.0 - a) * torch.ones_like(mask))
+
+
+def _validity_weight(size, mask, m_pred, is_anchor):
+    """Per-cell validity at feature resolution: GT on anchors, ``m_pred`` elsewhere."""
+    if mask is None or is_anchor is None:
+        return m_pred                       # no GT routing available (e.g. validation)
+    gt = F.adaptive_avg_pool2d(mask, size)   # (B, 1, H, W) board coverage
+    a = is_anchor.view(-1, 1, 1, 1).to(m_pred.dtype)
+    return a * gt + (1.0 - a) * m_pred
+
+
 class BlobDescriptorHardNet(AbstractBlobDescriptor):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -111,7 +166,21 @@ class BlobDescriptorDeep(AbstractBlobDescriptor):
 
 
 class BlobDescriptorNoStride(AbstractBlobDescriptor):
-    def __init__(self, **kwargs):
+    """Valid-conv steerable descriptor (64x64 -> 24x24 -> dense readout).
+
+    ``learned_mask=True`` makes it board-validity aware, with the same contract as
+    ``HardNetLogPolar`` and ``BlobDescriptorEfficient`` (see the module-level notes):
+    the 24x24 feature field is weighted by the GT mask on anchors and by a predicted
+    ``m_pred`` elsewhere, right before the dense readout conv, and ``forward`` returns
+    ``(descriptor, m_pred)``.
+
+    The weighting is spliced INTO ``self.net`` rather than splitting it into
+    trunk/readout submodules: the layer names — and hence the ``state_dict`` keys —
+    must stay identical to the unmasked model, or the ``init_from_checkpoint``
+    warm-start from a synthetic run would silently transfer nothing.
+    """
+
+    def __init__(self, learned_mask=False, **kwargs):
         super().__init__(**kwargs)
 
         c_in = escnn.nn.FieldType(self.s, 1 * [self.s.trivial_repr])
@@ -121,7 +190,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
         # Keep the final features in the regular representation!
         c_out = escnn.nn.FieldType(self.s, 128 * [self.s.regular_repr])
 
-        self.net = escnn.nn.SequentialModule(
+        layers = [
             # Apply a mask to zero-out the corners of the square grid
             escnn.nn.MaskModule(c_in, 64, margin=1),
             escnn.nn.R2Conv(c_in, c_hid1, 3),  # 64x64 => 62x62
@@ -158,24 +227,36 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
             escnn.nn.FieldDropout(c_hid3, p=0.1),
             escnn.nn.R2Conv(c_hid3, c_out, 24, bias=False),
             escnn.nn.GroupPooling(c_out),
-        )
+        ]
+        self.net = escnn.nn.SequentialModule(*layers)
 
-    def forward(self, x):
+        # The readout is the last two layers (dense 24x24 conv + group pooling); the
+        # validity weighting goes in front of them, on the 24x24 feature field.
+        self.learned_mask = learned_mask
+        self._readout_from = len(layers) - 2
+        if learned_mask:
+            self.mask_head = _mask_predictor(c_hid3, self.s)
+
+    def forward(self, x, mask=None, is_anchor=None):
+        if not self.learned_mask:
+            x = escnn.nn.GeometricTensor(x, self.field_type)
+            return self.net(x).tensor
+
+        if mask is not None and is_anchor is not None:
+            x = _gate_input(x, mask, is_anchor)
         x = escnn.nn.GeometricTensor(x, self.field_type)
-        x = self.net(x)
-        x = x.tensor
-        return x
 
-        # 3. Spatial collapse (24x24 => 1x1)
-        x = F.adaptive_avg_pool2d(x, (1, 1))
+        layers = list(self.net.children())
+        for layer in layers[: self._readout_from]:
+            x = layer(x)
 
-        # 4. Flatten to 1D vector (Batch, 128)
-        x = x.view(x.size(0), -1)
+        m_pred = torch.sigmoid(self.mask_head(x).tensor)          # (B, 1, 24, 24)
+        w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_anchor)
+        x = escnn.nn.GeometricTensor(x.tensor * w, x.type)
 
-        # 5. Normalize
-        x = F.normalize(x, p=2, dim=1)
-
-        return x
+        for layer in layers[self._readout_from:]:
+            x = layer(x)
+        return x.tensor, m_pred
 
 
 class BlobDescriptorEfficient(AbstractBlobDescriptor):
@@ -197,6 +278,14 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
     normalized structure for every keypoint, so it carries no discriminative signal.
     A radially symmetric mask commutes with the rotation group, so zeroing it keeps
     equivariance intact and forces the descriptor onto the informative surround.
+
+    **Board-validity masking** (``learned_mask``, default off): the *data-dependent*
+    counterpart of the fixed centre mask — it removes the off-board part of the patch,
+    which is real background rather than a fixed geometric region. GT mask on anchors,
+    predicted ``m_pred`` on targets, ``(descriptor, m_pred)`` returned; see the
+    module-level notes. Both heads consume the weight where it matters: ``attention``
+    multiplies it into the saliency it pools with, ``dense`` weights the field before
+    the readout conv.
     """
 
     def __init__(
@@ -212,6 +301,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         sigma_cutoff=2.0,
         scale_factors=(64.0,),     # the patch scale factor(s); sets the centre-mask radius
         patch_size=64,
+        learned_mask=False,        # board-validity aware pooling + mask predictor
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -290,25 +380,43 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         else:
             raise ValueError(f"head must be 'dense' or 'attention', got {head!r}")
         self.l2_normalize = l2_normalize
+        self.learned_mask = learned_mask
+        if learned_mask:
+            self.mask_head = _mask_predictor(c3, s)
 
-    def forward(self, x):
+    def forward(self, x, mask=None, is_anchor=None):
+        if self.learned_mask and mask is not None and is_anchor is not None:
+            x = _gate_input(x, mask, is_anchor)
         if self.inner_mask is not None:
             x = x * self.inner_mask
         x = escnn.nn.GeometricTensor(x, self.field_type)
         x = self.net(x)
 
+        m_pred = w = None
+        if self.learned_mask:
+            m_pred = torch.sigmoid(self.mask_head(x).tensor)   # [B, 1, H, W] validity
+            w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_anchor)
+
         if self.head_type == "dense":
+            if w is not None:
+                x = escnn.nn.GeometricTensor(x.tensor * w, x.type)
             x = self.readout(x)                 # whole grid -> 1x1
             x = self.group_pool(x).tensor       # [B, out_dim, 1, 1]
             x = x.view(x.size(0), -1)
         else:  # attention
             a = torch.sigmoid(self.att(x).tensor)          # [B, 1, H, W] saliency
+            if w is not None:
+                # Fold validity into the pooling weights: an off-board cell can no
+                # longer win the attention, and — because the SAME weight divides the
+                # normalizer — the descriptor is the average over the valid region
+                # rather than a downscaled average over everything.
+                a = a * w
             f = self.group_pool(x).tensor                  # [B, out_dim, H, W] invariant
             x = (f * a).sum(dim=(2, 3)) / (a.sum(dim=(2, 3)) + 1e-6)
 
         if self.l2_normalize:
             x = F.normalize(x, p=2, dim=1)
-        return x
+        return (x, m_pred) if self.learned_mask else x
 
 
 class BlobDescriptorRobust(torch.nn.Module):

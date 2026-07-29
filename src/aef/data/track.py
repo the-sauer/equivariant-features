@@ -286,6 +286,69 @@ def load_untracked_patches(f, sequences=None, with_mask=False):
     return patches, masks
 
 
+_Cap = collections.namedtuple(
+    "_Cap", "keep n_pos n_singletons n_pos_available n_singletons_available")
+
+
+def _cap_tracked(labels, max_keypoints, seed=0):
+    """Deterministic cap on the loaded tracked block -> indices to keep.
+
+    ``max_keypoints`` is a budget PER KIND, applied to the two things a batch is
+    packed from (see ``_pack_balanced``):
+
+      * **positives** — patches of a ``track_id`` seen >= 2 times, kept as WHOLE
+        groups. Never split a group: taking a subset of size 1 would silently
+        demote a positive track to a confuser, changing the class balance the cap
+        exists to equalize.
+      * **confusers** — singleton ``track_id``s. The untracked block shares this
+        same budget (see ``_untracked_budget``), so ``max_keypoints`` bounds the
+        total negative-only pool, not just its tracked half.
+
+    Groups are shuffled with a seeded RNG and taken until the next one would
+    overflow, so a split's members are stable across runs; the returned indices are
+    sorted, leaving the on-disk ordering (and hence patch/label alignment) intact.
+
+    Returns a ``_Cap``: the sorted index array, how much of each budget it spends,
+    and how much of each kind was on offer (so the caller can tell a split that hit
+    the cap from one the file was simply too small to fill).
+    """
+    groups = collections.defaultdict(list)
+    for i, lab in enumerate(labels):
+        groups[int(lab)].append(i)
+    pos_groups = [inds for inds in groups.values() if len(inds) >= 2]
+    singletons = [inds[0] for inds in groups.values() if len(inds) == 1]
+    n_pos_available = sum(len(g) for g in pos_groups)
+
+    rng = random.Random(seed)
+    rng.shuffle(pos_groups)
+    rng.shuffle(singletons)
+
+    keep, n_pos = [], 0
+    for grp in pos_groups:
+        if n_pos + len(grp) > max_keypoints:
+            break
+        keep.extend(grp)
+        n_pos += len(grp)
+    kept_singletons = singletons[:max_keypoints]
+    keep.extend(kept_singletons)
+    keep.sort()
+    return _Cap(np.asarray(keep, dtype=np.int64), n_pos, len(kept_singletons),
+                n_pos_available, len(singletons))
+
+
+def _untracked_budget(n_tracked, ratio, n_singletons, max_keypoints):
+    """How many untracked (confuser) patches to keep.
+
+    Always ``ratio x`` the surviving tracked count. With a cap, the untracked block
+    additionally shares the confuser budget with the tracked singletons — both are
+    negative-only, so ``max_keypoints`` bounds their sum.
+    """
+    keep = int(n_tracked * ratio)
+    if max_keypoints is not None:
+        keep = min(keep, max(0, max_keypoints - n_singletons))
+    return keep
+
+
 class BlobTrackData(torch.utils.data.Dataset):
     """Dataset of canonicalized blob patches labeled by track identity.
 
@@ -304,6 +367,14 @@ class BlobTrackData(torch.utils.data.Dataset):
     frame id at all, so they stay a plain negative pool — capped, as always, at
     `max_untracked_to_tracked_ratio x` the *surviving* patch count, which keeps the
     positive/negative balance (and hence FPR95) comparable across bands.
+
+    `max_keypoints` caps the split's SIZE the same way it does for `HomographyData`,
+    so bands that differ by an order of magnitude in population (real footage is
+    heavily fronto-parallel-biased) still evaluate the same number of patches and
+    their FPR95 stays comparable. It is a budget per kind, applied after the band
+    filter: at most `max_keypoints` positive-track patches (whole track groups, never
+    split) and at most `max_keypoints` confusers (tracked singletons + untracked,
+    which share the budget). `subsample_seed` fixes which ones survive.
     """
 
     def __init__(
@@ -320,6 +391,8 @@ class BlobTrackData(torch.utils.data.Dataset):
         unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
         view_angle_range=None,   # [lo_deg, hi_deg): keep only observations viewed at this obliquity
         view_angle_keep_anchors=True,   # anchors have no pose; keep them so bands still have positives
+        max_keypoints=None,   # cap per kind: <= this many positive-track patches AND confusers (see _cap_tracked)
+        subsample_seed=0,   # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable
         log_stats=False,   # print a per-sequence / positive-structure breakdown on load
         **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
@@ -330,6 +403,10 @@ class BlobTrackData(torch.utils.data.Dataset):
         # Validate the band up front so a bad config fails before the (slow) load.
         self.view_angle_range = list(view_angle_range) if view_angle_range is not None else None
         _view_angle_bounds(view_angle_range)
+        if max_keypoints is not None:
+            max_keypoints = int(max_keypoints)
+            if max_keypoints < 1:
+                raise ValueError(f"max_keypoints must be >= 1 or None, got {max_keypoints}")
         if not load_into_memory:
             raise NotImplementedError("BlobTrackData only supports load_into_memory=True")
 
@@ -357,10 +434,18 @@ class BlobTrackData(torch.utils.data.Dataset):
             self.masks = all_masks
             self.is_anchor = is_anchor
 
+            # Cap the split's size AFTER the band filter, so the budget counts only
+            # what the band kept (an uncapped band is as big as the file allows,
+            # which is what makes bands incomparable in the first place).
+            n_singletons = 0
+            if max_keypoints is not None:
+                n_singletons = self._apply_keypoint_cap(max_keypoints, subsample_seed)
+
             if include_untracked:
                 ut = load_untracked_patches(f, sequences, with_mask=with_mask)
                 ut_patches, ut_masks = ut if with_mask else (ut, None)
-                keep = int(len(self.patches) * max_untracked_to_tracked_ratio)
+                keep = _untracked_budget(len(self.patches), max_untracked_to_tracked_ratio,
+                                         n_singletons, max_keypoints)
                 self.untracked_patches = ut_patches[:keep]
                 self.untracked_masks = ut_masks[:keep] if with_mask else None
             else:
@@ -404,6 +489,32 @@ class BlobTrackData(torch.utils.data.Dataset):
             if len(pos_groups) < 50:
                 print(f"  !! WARNING: only {len(pos_groups)} matchable tracks in this band — "
                       "FPR95 will be noisy or NaN; widen the band.")
+
+    def _apply_keypoint_cap(self, max_keypoints, subsample_seed):
+        """Subsample the tracked block in place to the `max_keypoints` budget.
+
+        Runs before the untracked block is appended, so `self.labels` still holds
+        track ids only. Returns how many singleton (confuser) patches survived —
+        the untracked block gets the rest of the confuser budget.
+        """
+        n_before = len(self.labels)
+        cap = _cap_tracked(self.labels, max_keypoints, subsample_seed)
+        keep = cap.keep
+        self.patches = self.patches[keep]
+        self.labels = self.labels[keep]
+        self.is_anchor = self.is_anchor[keep]
+        if self.affine_shapes is not None:
+            self.affine_shapes = self.affine_shapes[keep]
+        if self.masks is not None:
+            self.masks = self.masks[keep]
+        print(f"Keypoint cap: kept {len(keep)}/{n_before} tracked patches "
+              f"({cap.n_pos}/{cap.n_pos_available} in positive groups, "
+              f"{cap.n_singletons}/{cap.n_singletons_available} singleton confusers; "
+              f"max_keypoints={max_keypoints}, seed={subsample_seed})")
+        if cap.n_pos_available < max_keypoints:
+            print(f"  note: only {cap.n_pos_available} positive-track patches available "
+                  f"(< max_keypoints={max_keypoints}); this split is smaller than the cap")
+        return cap.n_singletons
 
     def __len__(self):
         return len(self.labels)
