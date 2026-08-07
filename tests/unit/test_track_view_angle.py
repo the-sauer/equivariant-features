@@ -91,7 +91,7 @@ def _values(patches):
 
 
 def test_no_band_loads_everything(tracks_file):
-    patches, _masks, ids, _lengths, _affine, is_anchor = _load_all_sequences(
+    patches, _masks, ids, _lengths, _affine, is_anchor, _ang = _load_all_sequences(
         tracks_file, with_mask=True)
     assert _values(patches) == [1, 2, 3, 10, 20, 30, 40]
     assert len(ids) == 7
@@ -100,7 +100,7 @@ def test_no_band_loads_everything(tracks_file):
 
 def test_band_keeps_only_in_band_observations_plus_anchors(tracks_file):
     # [0, 10) deg -> frame 7 only: observations 10 and 40; all 3 anchors ride along.
-    patches, _masks, _ids, _lengths, _affine, is_anchor = _load_all_sequences(
+    patches, _masks, _ids, _lengths, _affine, is_anchor, _ang = _load_all_sequences(
         tracks_file, view_angle_range=[0, 10])
     assert _values(patches) == [1, 2, 3, 10, 40]
     assert is_anchor.sum() == 3
@@ -109,7 +109,7 @@ def test_band_keeps_only_in_band_observations_plus_anchors(tracks_file):
 def test_band_boundaries_are_half_open(tracks_file):
     # 25 deg belongs to [20, 30) and not to [10, 20) or [30, 40).
     def tracked_values(band):
-        patches, _m, _i, _l, _a, is_anchor = _load_all_sequences(
+        patches, _m, _i, _l, _a, is_anchor, _ang = _load_all_sequences(
             tracks_file, view_angle_range=band)
         return sorted(int(p[0, 0]) for p, a in zip(patches, is_anchor) if not a)
 
@@ -120,7 +120,7 @@ def test_band_boundaries_are_half_open(tracks_file):
 
 
 def test_band_keeps_ids_masks_and_affine_aligned(tracks_file):
-    patches, masks, ids, _lengths, affine, is_anchor = _load_all_sequences(
+    patches, masks, ids, _lengths, affine, is_anchor, _ang = _load_all_sequences(
         tracks_file, with_mask=True, view_angle_range=[0, 10], unique_track_ids=False)
     tracked = ~is_anchor.astype(bool)
     values = patches[tracked][:, 0, 0]
@@ -133,14 +133,14 @@ def test_band_keeps_ids_masks_and_affine_aligned(tracks_file):
 
 
 def test_dropping_anchors_leaves_only_the_band(tracks_file):
-    patches, _m, _ids, _l, _a, is_anchor = _load_all_sequences(
+    patches, _m, _ids, _l, _a, is_anchor, _ang = _load_all_sequences(
         tracks_file, view_angle_range=[0, 10], view_angle_keep_anchors=False)
     assert _values(patches) == [10, 40]
     assert is_anchor.sum() == 0
 
 
 def test_empty_band_yields_an_empty_dataset(tracks_file):
-    patches, _m, ids, _l, _a, _is_anchor = _load_all_sequences(
+    patches, _m, ids, _l, _a, _is_anchor, _ang = _load_all_sequences(
         tracks_file, view_angle_range=[60, 70], view_angle_keep_anchors=False)
     assert patches.shape[0] == 0
     assert ids.shape[0] == 0
@@ -151,10 +151,37 @@ def test_observation_without_a_pose_entry_is_dropped(tracks_file):
     # dropped, never silently bucketed into a neighbouring frame's angle.
     tracks_file["sequences"]["media_a1"]["tracks"]["frame_id"] = np.asarray(
         [7, 3, 5, 99], dtype=np.int32)
-    patches, _m, _i, _l, _a, is_anchor = _load_all_sequences(
+    patches, _m, _i, _l, _a, is_anchor, _ang = _load_all_sequences(
         tracks_file, view_angle_range=[0, 10], view_angle_keep_anchors=False)
     del is_anchor
     assert _values(patches) == [10]
+
+
+def test_view_angles_ride_along_with_the_patches(tracks_file):
+    # The per-patch angle is what the band balancer bins, so it has to follow the same
+    # frame join as the filter: anchors NaN, tracked observations their frame's angle.
+    patches, _m, _i, _l, _a, is_anchor, angles = _load_all_sequences(tracks_file)
+    by_value = dict(zip((int(p[0, 0]) for p in patches), np.degrees(angles)))
+    assert by_value[10] == pytest.approx(5.0)    # frame 7
+    assert by_value[20] == pytest.approx(25.0)   # frame 3
+    assert by_value[30] == pytest.approx(55.0)   # frame 5
+    assert by_value[40] == pytest.approx(5.0)    # frame 7 again
+    assert np.isnan(angles[is_anchor.astype(bool)]).all()
+
+
+def test_view_angles_are_nan_without_a_pose_entry(tracks_file):
+    tracks_file["sequences"]["media_a1"]["tracks"]["frame_id"] = np.asarray(
+        [7, 3, 5, 99], dtype=np.int32)
+    patches, _m, _i, _l, _a, _anchor, angles = _load_all_sequences(tracks_file)
+    unmatched = [a for p, a in zip(patches, angles) if int(p[0, 0]) == 40]
+    assert np.isnan(unmatched).all()
+
+
+def test_view_angles_are_nan_for_files_without_the_export(tracks_file):
+    # No band filter -> an old file still loads, it just has no angles to balance on.
+    del tracks_file["sequences"]["media_a1"]["tracks"]["view_angles"]
+    _p, _m, _i, _l, _a, _anchor, angles = _load_all_sequences(tracks_file)
+    assert np.isnan(angles).all()
 
 
 def test_missing_view_angles_raises(tracks_file):
@@ -165,7 +192,7 @@ def test_missing_view_angles_raises(tracks_file):
 
 def test_missing_view_angles_is_fine_without_a_band(tracks_file):
     del tracks_file["sequences"]["media_a1"]["tracks"]["view_angles"]
-    patches, _m, _i, _l, _a, _anchor = _load_all_sequences(tracks_file)
+    patches, _m, _i, _l, _a, _anchor, _ang = _load_all_sequences(tracks_file)
     assert patches.shape[0] == 7
 
 

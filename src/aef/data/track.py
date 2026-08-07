@@ -121,7 +121,7 @@ def _read_rows(ds, sel):
     return ds[:] if sel is None else ds[sel]
 
 
-def _observation_view_angles(g, name):
+def _observation_view_angles(g, name, required=True):
     """Per-observation viewing angle (radians) for a tracked sequence.
 
     `.tracks` stores the detection geometry **per frame, not per blob**:
@@ -130,9 +130,15 @@ def _observation_view_angles(g, name):
     joins the two, returning ``(angles, matched)`` — both per observation, with
     ``matched`` False wherever an observation's frame is absent from the pose table
     (should not happen; such observations are dropped rather than mis-binned).
+
+    ``required=False`` returns ``(None, None)`` instead of raising when the sequence
+    predates the viewing-angle export — used when the angles are merely recorded
+    alongside the patches (for band balancing) rather than used to filter them.
     """
     missing = [k for k in ("frame_id", "homography_frame_ids", "view_angles") if k not in g]
     if missing:
+        if not required:
+            return None, None
         raise ValueError(
             f"sequence {name!r} has no {', '.join(missing)} — it predates the viewing-angle "
             "export in BlobBoards' build_tracks_for_sequences. Rebuild the `.tracks` file "
@@ -156,9 +162,15 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
                         view_angle_keep_anchors=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
-    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor).
+    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor,
+    view_angles).
     `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
     `is_anchor` is a per-patch uint8 array (broadcast from the per-sequence flag).
+    `view_angles` is a per-patch float64 array of viewing obliquity in RADIANS, NaN
+    wherever the patch has no pose: anchors (rendered fronto-parallel off the board
+    image), observations whose frame is missing from the pose table, and every patch
+    of a file predating the viewing-angle export. It is what
+    ``BlobTrackData(balance_view_angles=True)`` bins into bands.
     `track_lengths` is the sequence's stored (PRE-filter) histogram and is not
     recomputed when a viewing-angle band drops observations; nothing downstream uses
     it (group structure is rebuilt from the labels in ``_grouped_indices``).
@@ -215,12 +227,19 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
 
     all_patches, all_masks = [], []
     all_track_ids, all_track_lengths = [], []
-    all_affine_shapes, all_is_anchor = [], []
+    all_affine_shapes, all_is_anchor, all_view_angles = [], [], []
 
     for name in seq_names:
         sg = seqs[name]
         g = sg["tracks"]
         is_anchor = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
+
+        # Join the per-frame pose table to the observations up front, so the angles can
+        # be sliced by the same `sel` as the patches. Only a band filter *requires* them
+        # (an older file without the export is loadable, its angles just stay NaN).
+        angles = matched = None
+        if not is_anchor:
+            angles, matched = _observation_view_angles(g, name, required=bounds is not None)
 
         # Viewing-angle band: decide WHICH observations to read before reading them,
         # so a narrow band does not pull a whole (large) sequence through memory.
@@ -230,7 +249,6 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
                 if not view_angle_keep_anchors:
                     continue
             else:
-                angles, matched = _observation_view_angles(g, name)
                 lo, hi = bounds
                 sel = np.flatnonzero(matched & (angles >= lo) & (angles < hi))
                 if sel.size == 0:
@@ -241,6 +259,12 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
         patches = _read_rows(g["patches"], sel)
         n = patches.shape[0]
         all_patches.append(patches)
+        if angles is None:
+            all_view_angles.append(np.full(n, np.nan))
+        else:
+            # Unmatched observations have no pose -> NaN (unbanded), never a stale angle.
+            seq_angles = np.where(matched, angles, np.nan)
+            all_view_angles.append(seq_angles if sel is None else seq_angles[sel])
         all_track_ids.append(remap(name, _read_rows(g["track_id"], sel)))
         all_track_lengths.append(g["track_lengths"][:])
         if with_mask:
@@ -259,8 +283,9 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     masks = cat(all_masks, np.zeros((0, 64, 64), dtype=np.float32)) if with_mask else None
     affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
     is_anchor = cat(all_is_anchor, np.zeros(0, dtype=np.uint8))
+    view_angles = cat(all_view_angles, np.zeros(0, dtype=np.float64))
 
-    return patches, masks, track_ids, track_lengths, affine_shapes, is_anchor
+    return patches, masks, track_ids, track_lengths, affine_shapes, is_anchor, view_angles
 
 
 def load_untracked_patches(f, sequences=None, with_mask=False):
@@ -284,6 +309,108 @@ def load_untracked_patches(f, sequences=None, with_mask=False):
         return patches
     masks = np.concatenate(mask_parts) if mask_parts else np.empty((0, 64, 64), dtype=np.float32)
     return patches, masks
+
+
+# Default viewing-obliquity bands for training balance: 0-90 deg in 10 deg steps, the
+# same grid `conf/track_angle_validation.yaml` reports FPR95 over, so "balanced in
+# training" and "measured per band" mean the same partition of viewpoint space.
+_DEFAULT_BAND_EDGES = tuple(float(d) for d in range(0, 100, 10))
+
+
+def _band_edges(spec):
+    """Validate viewing-angle band edges (DEGREES, strictly increasing) -> ndarray.
+
+    ``None`` -> `_DEFAULT_BAND_EDGES`. ``n`` edges define ``n - 1`` half-open bands
+    ``[e[i], e[i+1])``; angles outside ``[e[0], e[-1])`` are unbanded, exactly like
+    the half-open `view_angle_range` bands.
+    """
+    if spec is None:
+        spec = _DEFAULT_BAND_EDGES
+    try:
+        edges = np.asarray([float(v) for v in spec], dtype=np.float64)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"view_angle_band_edges must be a list of degrees, got {spec!r}") from e
+    if edges.size < 2 or np.any(np.diff(edges) <= 0):
+        raise ValueError(
+            "view_angle_band_edges must be >= 2 strictly increasing degrees, "
+            f"got {list(spec)!r}"
+        )
+    return edges
+
+
+def _bands_of(angles_rad, edges_deg):
+    """Bin per-patch viewing angles (radians) into band indices.
+
+    Returns an int64 array; ``-1`` marks a patch with no band — an unknown angle
+    (NaN: anchors and files predating the pose export) or one outside the edges.
+    Those are never *drawn* by the balancer; they only ride along as partners.
+    """
+    deg = np.degrees(np.asarray(angles_rad, dtype=np.float64))
+    with np.errstate(invalid="ignore"):
+        bands = np.digitize(deg, edges_deg) - 1
+        outside = ~np.isfinite(deg) | (deg < edges_deg[0]) | (deg >= edges_deg[-1])
+    bands = bands.astype(np.int64)
+    bands[outside] = -1
+    return bands
+
+
+def _band_target(pool_sizes, spec):
+    """How many in-band patches one band should be drawn for per EPOCH.
+
+    ``spec`` is ``"min" | "median" | "mean" | "max"`` over the populated bands' pool
+    sizes, or an explicit integer. This only sets the epoch LENGTH (batches per epoch
+    = target / per-batch quota); the per-batch balance is unaffected. ``"min"``
+    makes an epoch one pass over the rarest band (shortest, least repetition),
+    ``"max"`` one pass over the most crowded one (longest, heaviest repetition of the
+    rare bands); ``"median"`` sits in between and is the default.
+    """
+    sizes = [int(s) for s in pool_sizes if s > 0]
+    if not sizes:
+        return 0
+    if isinstance(spec, bool):
+        raise ValueError(f"view_angle_band_target must be a name or an int, got {spec!r}")
+    if isinstance(spec, str):
+        stat = {"min": min, "max": max,
+                "mean": lambda v: round(sum(v) / len(v)),
+                "median": lambda v: round(float(np.median(v)))}.get(spec)
+        if stat is None:
+            raise ValueError(
+                "view_angle_band_target must be 'min', 'median', 'mean', 'max' or an "
+                f"int, got {spec!r}"
+            )
+        return max(1, int(stat(sizes)))
+    target = int(spec)
+    if target < 1:
+        raise ValueError(f"view_angle_band_target must be >= 1, got {spec}")
+    return target
+
+
+class _BandCursor:
+    """Cycles a band's pool in shuffled order, reshuffling on every wrap.
+
+    A cursor persisting across an epoch's batches (rather than an independent draw per
+    batch) is what makes a crowded band's patches get *covered* instead of resampled:
+    batch ``k + 1`` continues where batch ``k`` stopped. It is rebuilt per epoch, so
+    which slice of an over-large band an epoch sees varies with the epoch's seed.
+    """
+
+    def __init__(self, pool, rng):
+        self._pool = list(pool)
+        self._order = list(range(len(self._pool)))
+        rng.shuffle(self._order)
+        self._i = 0
+
+    def __len__(self):
+        return len(self._pool)
+
+    def next(self, rng):
+        if self._i >= len(self._order):
+            rng.shuffle(self._order)
+            self._i = 0
+        item = self._pool[self._order[self._i]]
+        self._i += 1
+        return item
 
 
 _Cap = collections.namedtuple(
@@ -349,6 +476,129 @@ def _untracked_budget(n_tracked, ratio, n_singletons, max_keypoints):
     return keep
 
 
+def _band_pools(pos_groups, bands):
+    """Index positive track groups by the viewing-angle band of their observations.
+
+    Returns ``(pools, groups)``. ``pools[band]`` lists every draw that band can offer
+    as ``(group, observation)`` — one entry per in-band observation, so a track seen
+    ten times at 5 deg is ten draws in that band and none in any other.
+    ``groups[i] = (members, unbanded)`` carries group ``i``'s patch indices and the
+    pose-less subset of them (in practice its GT anchor), which is the preferred
+    positive partner: matching an oblique observation against the fronto-parallel
+    render is the task the descriptor is trained for.
+    """
+    pools = collections.defaultdict(list)
+    groups = []
+    for gi, members in enumerate(pos_groups):
+        members = list(members)
+        groups.append((members, [i for i in members if bands[i] < 0]))
+        for i in members:
+            band = int(bands[i])
+            if band >= 0:
+                pools[band].append((gi, i))
+    return dict(pools), groups
+
+
+def _instance(groups, gi, seed, used, rng):
+    """One positive instance: the drawn observation plus a partner from its own track.
+
+    The partner is a pose-less member (the GT anchor) when the track has an unused
+    one, else another of its observations — matching against the fronto-parallel
+    render is the deployment task, but an oblique<->oblique pair is a valid positive
+    too and is what lets a sparsely observed band still fill its quota.
+
+    ``used`` is the set of patch indices already in the batch; neither end of the
+    instance may come from it, so a track may contribute SEVERAL pairs to one batch
+    as long as they are disjoint. Returns None when no such pair is left.
+    """
+    members, unbanded = groups[gi]
+    if seed in used:
+        return None
+    pool = [i for i in unbanded if i not in used]
+    if not pool:
+        pool = [i for i in members if i != seed and i not in used]
+    if not pool:
+        return None
+    return [seed, pool[rng.randrange(len(pool))]]
+
+
+def _band_capacity(pool, groups):
+    """Ceiling on the in-band patches one band can put into a SINGLE batch.
+
+    A batch takes disjoint pairs only, so a track with ``m`` in-band observations
+    contributes at most ``1 + 2*floor((m-1)/2)`` of them when it has an anchor to
+    spend on the first pair, and ``2*floor(m/2)`` when it does not. Bands sharing a
+    track compete for that anchor, so the real number can be lower — this is what the
+    band could reach at best, which is the honest thing to compare a quota against.
+    """
+    total = 0
+    for gi, m in collections.Counter(gi for gi, _ in pool).items():
+        total += (1 + 2 * ((m - 1) // 2)) if groups[gi][1] else 2 * (m // 2)
+    return total
+
+
+def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
+                        n_batches, rng):
+    """Pack batches that draw EQUALLY from every populated viewing-angle band.
+
+    Balance is enforced per BATCH, which is the granularity that matters: SupCon sees
+    exactly the positives and negatives that share a batch, so an epoch-level quota
+    that still let the fronto-parallel band dominate each individual batch would not
+    change the loss. Every batch therefore asks each band for the same ``quota`` of
+    in-band patches, drawn as positive pairs (see ``_instance``), and then tops up
+    with distinct confusers, the same negatives ``_pack_balanced`` uses. A band can
+    land one patch over its quota (the pair that fills it may put two in-band patches
+    in), so batch sizes vary slightly — as they already do under ``_pack_balanced``.
+
+    Two invariants carry over from ``_pack_balanced``: no index appears twice in a
+    batch — a duplicate is a distance-0 fake positive — and every batch holds at least
+    one positive pair by construction. A band whose observations run out before its
+    quota is filled contributes all the disjoint pairs it can rather than being padded
+    with duplicates; ``BlobTrackData.get_sampler`` reports that shortfall instead of
+    hiding it.
+    """
+    bands = sorted(pools)
+    if not bands:
+        return []
+    n_conf = max(0, round(batch_size * confuser_fraction))
+    # The quota counts IN-BAND patches, not instances: an anchor-paired instance
+    # contributes one, an oblique<->oblique pair two, so counting instances would let
+    # the sparse bands (the ones that run out of anchors) overshoot the crowded ones.
+    # Each in-band patch drags in at most one partner, so a batch stays within
+    # 2 * quota * n_bands positive slots.
+    quota = max(1, (batch_size - n_conf) // (2 * len(bands)))
+    cursors = {b: _BandCursor(pools[b], rng) for b in bands}
+    band_of = {i: b for b, pool in pools.items() for _gi, i in pool}
+    confusers = list(confusers)
+    rng.shuffle(confusers)
+
+    batches, cursor = [], 0
+    for _ in range(n_batches):
+        used, picks = set(), []
+        order = list(bands)
+        rng.shuffle(order)   # no band is systematically first to claim a shared track
+        for band in order:
+            cur = cursors[band]
+            taken, attempts, budget = 0, 0, len(cur) + quota
+            while taken < quota and attempts < budget:
+                gi, seed = cur.next(rng)
+                attempts += 1
+                inst = _instance(groups, gi, seed, used, rng)
+                if inst is None:
+                    continue      # nothing of this track left that is not in the batch
+                used.update(inst)
+                picks.extend(inst)
+                taken += sum(1 for i in inst if band_of.get(i) == band)
+        if not picks:
+            continue
+        if n_conf and confusers:
+            k = min(n_conf, len(confusers))
+            picks.extend(confusers[(cursor + j) % len(confusers)] for j in range(k))
+            cursor = (cursor + k) % len(confusers)
+        batches.append(picks)
+    return batches
+
+
 class BlobTrackData(torch.utils.data.Dataset):
     """Dataset of canonicalized blob patches labeled by track identity.
 
@@ -367,6 +617,15 @@ class BlobTrackData(torch.utils.data.Dataset):
     frame id at all, so they stay a plain negative pool — capped, as always, at
     `max_untracked_to_tracked_ratio x` the *surviving* patch count, which keeps the
     positive/negative balance (and hence FPR95) comparable across bands.
+
+    `balance_view_angles=True` makes the TRAINING sampler draw equally from every
+    viewing-angle band instead of following the file's own (heavily fronto-parallel)
+    distribution — see `get_sampler`. `view_angle_band_edges` (degrees, default 0-90 in
+    10 deg steps, the grid `conf/track_angle_validation.yaml` measures on) sets the
+    partition and `view_angle_band_target` the epoch length. It is orthogonal to
+    `view_angle_range`: that one restricts which observations exist at all (used to
+    build the per-band validation splits), this one only reweights how the surviving
+    ones are batched.
 
     `max_keypoints` caps the split's SIZE the same way it does for `HomographyData`,
     so bands that differ by an order of magnitude in population (real footage is
@@ -391,6 +650,9 @@ class BlobTrackData(torch.utils.data.Dataset):
         unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
         view_angle_range=None,   # [lo_deg, hi_deg): keep only observations viewed at this obliquity
         view_angle_keep_anchors=True,   # anchors have no pose; keep them so bands still have positives
+        balance_view_angles=False,   # TRAINING: draw each obliquity band equally (see get_sampler)
+        view_angle_band_edges=None,   # band edges in degrees; None -> 0..90 in 10 deg steps
+        view_angle_band_target="median",   # in-band patches per band per epoch: min|median|mean|max or an int
         max_keypoints=None,   # cap per kind: <= this many positive-track patches AND confusers (see _cap_tracked)
         subsample_seed=0,   # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable
         log_stats=False,   # print a per-sequence / positive-structure breakdown on load
@@ -403,6 +665,10 @@ class BlobTrackData(torch.utils.data.Dataset):
         # Validate the band up front so a bad config fails before the (slow) load.
         self.view_angle_range = list(view_angle_range) if view_angle_range is not None else None
         _view_angle_bounds(view_angle_range)
+        self.balance_view_angles = bool(balance_view_angles)
+        self.view_angle_band_edges = _band_edges(view_angle_band_edges)
+        self.view_angle_band_target = view_angle_band_target
+        _band_target([1], view_angle_band_target)   # same: fail on a bad spec, not at epoch 0
         if max_keypoints is not None:
             max_keypoints = int(max_keypoints)
             if max_keypoints < 1:
@@ -421,12 +687,14 @@ class BlobTrackData(torch.utils.data.Dataset):
                                          unique_track_ids=unique_track_ids)
 
             (all_patches, all_masks, track_ids, _track_lengths,
-             affine_shapes, is_anchor) = _load_all_sequences(
+             affine_shapes, is_anchor, view_angles) = _load_all_sequences(
                 f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids,
                 view_angle_range=view_angle_range,
                 view_angle_keep_anchors=view_angle_keep_anchors)
 
             self.patches = all_patches
+            # Per-patch obliquity in radians, NaN where there is no pose (anchors).
+            self.view_angles = view_angles
             # int64: remapped ids (board_id << 16 | blob_index) and the confuser band
             # below can exceed uint32's comfortable range once boards accumulate.
             self.labels = track_ids.astype(np.int64)
@@ -470,6 +738,8 @@ class BlobTrackData(torch.utils.data.Dataset):
                 np.arange(start, start + n_ut, dtype=np.int64),
             ])
             self.is_anchor = np.concatenate([self.is_anchor, np.zeros(n_ut, dtype=np.uint8)])
+            # Confusers carry no frame id, hence no angle: unbanded, negatives only.
+            self.view_angles = np.concatenate([self.view_angles, np.full(n_ut, np.nan)])
 
         band = ""
         if self.view_angle_range is not None:
@@ -503,6 +773,7 @@ class BlobTrackData(torch.utils.data.Dataset):
         self.patches = self.patches[keep]
         self.labels = self.labels[keep]
         self.is_anchor = self.is_anchor[keep]
+        self.view_angles = self.view_angles[keep]
         if self.affine_shapes is not None:
             self.affine_shapes = self.affine_shapes[keep]
         if self.masks is not None:
@@ -740,14 +1011,68 @@ class BlobTrackData(torch.utils.data.Dataset):
         confusers as negatives, exactly like the eval sampler but reshuffled each
         epoch. ``m`` is accepted for the loop's ``m_per_class`` hook but unused —
         whole groups already provide multiple views per track.
+
+        With ``balance_view_angles`` the positive half of every batch is instead drawn
+        EQUALLY from each viewing-obliquity band (``_pack_band_balanced``). Real
+        footage is heavily fronto-parallel-biased — the 10 deg histogram
+        ``log_stats=True`` prints typically falls off by orders of magnitude — so the
+        default packing feeds the loss that same bias: near-frontal pairs dominate
+        every batch and the oblique tail, which is exactly what an affine-equivariant
+        descriptor has to get right, contributes a handful of pairs per epoch. A band
+        too sparse to fill its quota out of disjoint pairs stops at what it has —
+        padding it with duplicates would create distance-0 fake positives — and its
+        ceiling (``_band_capacity``) is printed alongside the quota below.
         """
         pos_groups, confusers = self._grouped_indices()
         n_conf = max(0, round(batch_size * confuser_fraction))
-        print(f"BlobTrackData train sampler: {len(pos_groups)} matchable tracks + "
-              f"{len(confusers)} confusers (~{batch_size - n_conf} pos / {n_conf} conf "
-              f"per batch, reshuffled each epoch)")
+        if not self.balance_view_angles:
+            print(f"BlobTrackData train sampler: {len(pos_groups)} matchable tracks + "
+                  f"{len(confusers)} confusers (~{batch_size - n_conf} pos / {n_conf} conf "
+                  f"per batch, reshuffled each epoch)")
+            return _ReshufflingBatchSampler(
+                self._pack_balanced, pos_groups, confusers, batch_size, confuser_fraction, seed
+            )
+
+        bands = _bands_of(self.view_angles, self.view_angle_band_edges)
+        pools, groups = _band_pools(pos_groups, bands)
+        if not pools:
+            raise ValueError(
+                "balance_view_angles=True but no observation of a matchable track "
+                "carries a viewing angle inside "
+                f"[{self.view_angle_band_edges[0]:g}, {self.view_angle_band_edges[-1]:g}) deg "
+                "— either the `.tracks` file predates the viewing-angle export (rebuild "
+                "it) or view_angle_band_edges does not cover the data."
+            )
+
+        target = _band_target([len(p) for p in pools.values()], self.view_angle_band_target)
+        quota = max(1, (batch_size - n_conf) // (2 * len(pools)))
+        n_batches = max(1, -(-target // quota))
+        edges = self.view_angle_band_edges
+        print(f"BlobTrackData train sampler (view-angle balanced): {len(pools)}/"
+              f"{len(edges) - 1} populated bands x {quota} in-band patches per batch "
+              f"+ {n_conf} confusers, {n_batches} batches/epoch "
+              f"(target={self.view_angle_band_target!r} -> {target} draws/band/epoch)")
+        # `draws` is what every band is asked for per epoch; against its pool size that
+        # is the resampling factor — >1 means the band repeats within an epoch (the
+        # rare, oblique end), <1 means only that fraction of it is seen per epoch (the
+        # crowded near-frontal end; each epoch reshuffles, so the rest comes up later).
+        draws = quota * n_batches
+        for band in sorted(pools):
+            n_obs = len(pools[band])
+            n_tracks = len({gi for gi, _ in pools[band]})
+            capacity = _band_capacity(pools[band], groups)
+            short = (f"  !! caps at {capacity} < quota {quota}: too few disjoint pairs, "
+                     "widen this band") if capacity < quota else ""
+            print(f"  band [{edges[band]:g}, {edges[band + 1]:g}) deg: {n_obs} obs, "
+                  f"{n_tracks} tracks, {draws / n_obs:.2f} draws/obs per epoch{short}")
+
+        def pack(_pos_groups, conf, bs, conf_frac, rng):
+            # `pos_groups` is already folded into `pools`/`groups`; the confusers and
+            # the per-epoch RNG are what the sampler still supplies.
+            return _pack_band_balanced(pools, groups, conf, bs, conf_frac, n_batches, rng)
+
         return _ReshufflingBatchSampler(
-            self._pack_balanced, pos_groups, confusers, batch_size, confuser_fraction, seed
+            pack, pos_groups, confusers, batch_size, confuser_fraction, seed
         )
 
     def get_collate_func(self):

@@ -43,6 +43,28 @@ training:
       load_into_memory: true
       include_untracked: true          # confusers as extra negatives
       max_untracked_to_tracked_ratio: 1.0
+      # Viewing-obliquity balance. Real footage is heavily fronto-parallel-biased (see
+      # the 10 deg histogram `log_stats: true` prints), so the default packing lets the
+      # near-frontal band own every batch and the oblique tail — the regime an affine-
+      # equivariant descriptor exists for — contributes a handful of pairs per epoch.
+      # With this on, each batch asks EVERY populated band for the same number of
+      # in-band patches, drawn as positive pairs (an observation + its GT anchor, or
+      # two in-band observations once the anchor is spent). A band without enough
+      # disjoint pairs contributes all it has rather than repeating a patch (a
+      # duplicate inside a batch is a distance-0 fake positive); the sampler prints
+      # the per-band quota, ceiling and resampling factor on startup.
+      # Set false to fall back to the old whole-track-group packing.
+      balance_view_angles: true
+      # Bands in degrees. Default (null) = 0..90 in 10 deg steps, the same grid
+      # `track_angle_validation.yaml` reports FPR95 over. Widen if the sampler warns
+      # that the high bands cap out below their quota.
+      view_angle_band_edges: null
+      # Epoch LENGTH only (batches/epoch = target / per-band quota); the per-batch
+      # balance is unaffected. "min"/"median"/"mean"/"max" over the populated
+      # bands' observation counts, or an explicit int. "min" = one pass over the rarest
+      # band (shortest epoch, least repetition), "max" = one pass over the most crowded
+      # one (longest, heaviest repetition of the rare bands).
+      view_angle_band_target: median
       # 45 boards = 13 tracked-media (real positives) + 32 anchor-only (negatives now,
       # tracked media added later). Disjoint from the val boards below.
       sequences:
