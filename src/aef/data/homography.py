@@ -31,6 +31,11 @@ from torchvision.transforms import v2
 from tqdm import tqdm
 
 from ..geometry import homogenize, linearize_homography
+from ..transforms.distortion import (
+    RadialDistortion,
+    render_view,
+    sample_radial_distortion,
+)
 from ..transforms.homography import sample_homography
 
 
@@ -54,6 +59,16 @@ CACHE_VERSION = 5
 # scale factors, compositing/garbage settings, augmentation, ...) is covered.
 _CACHE_KEY_EXCLUDE = {
     "data_dir", "cache_dir", "cache_path", "extraction_batch_size", "sift_batch_size",
+}
+
+# Params dropped from the key while they hold their "feature off" value. `effective_params`
+# hashes defaults too, so a *newly added* optional param would otherwise change every
+# existing key — forcing a full rebuild of caches whose contents it provably cannot have
+# changed (the feature was not there when they were written, and is off now). Listing the
+# disabled values explicitly keeps the escape hatch from being applied by accident: a param
+# only qualifies if "unset" is bit-for-bit the old behaviour.
+_CACHE_KEY_OPTIONAL = {
+    "distortion_params": (None, {}),
 }
 
 
@@ -91,9 +106,13 @@ def dataset_cache_key(params: dict) -> str:
         return v
 
     payload = {"__cache_version__": CACHE_VERSION}
-    payload.update(
-        {k: _norm(v) for k, v in params.items() if k not in _CACHE_KEY_EXCLUDE}
-    )
+    for k, v in params.items():
+        if k in _CACHE_KEY_EXCLUDE:
+            continue
+        v = _norm(v)
+        if k in _CACHE_KEY_OPTIONAL and any(v == off for off in _CACHE_KEY_OPTIONAL[k]):
+            continue
+        payload[k] = v
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
@@ -252,11 +271,11 @@ def composite_board(board, background, A, size, lighting=True, shading_strength=
     return composite, mask
 
 
-def blob_normalizations(homographies, coords, device):
+def blob_normalizations(homographies, coords, device, distortion=None):
     """Affine *shape* normalization for each keypoint.
 
-    Whitens the local Jacobian of ``homographies`` (dropping the rotational part
-    via SVD) so that the elliptical blob maps to an isotropic one. Shared by the
+    Whitens the local Jacobian of the view map (dropping the rotational part via
+    SVD) so that the elliptical blob maps to an isotropic one. Shared by the
     cartesian and log-polar patch extractors.
 
     ``coords`` are the keypoint's coordinates in the *warped* frame — the codomain
@@ -267,18 +286,38 @@ def blob_normalizations(homographies, coords, device):
     hence linearizing ``inv(homographies)`` here. These coincide only for a purely
     affine warp.
 
+    With a lens (``distortion``, a :class:`~aef.transforms.distortion.RadialDistortion`)
+    the view map is ``D ∘ H``, so the Jacobian to whiten is ``J_D(u)·J_H(p)`` and its
+    inverse — what is built here — is ``J_H(p)⁻¹·J_U(q)``. Two consequences: ``coords``
+    are the *observed* (distorted) point ``q``, so the homography must be linearized at
+    the undistorted ``u = U(q)`` instead, and the lens' own Jacobian is right-multiplied
+    on. Passing the distorted coords straight to the homography would be the same class
+    of bug as linearizing at the warped point.
+
     The factor is normalized to ``det == 1``: shape and orientation only, never
     size. ``scales`` already carries the warp's ``sqrt(det J)`` and the extractors
     divide by it, so a factor that also removed the size would remove it twice and
     leave the same blob at a view-dependent size in its patch.
     """
+    lens = None
+    linearization_coords = coords
+    if distortion is not None and not distortion.is_identity:
+        distortion = distortion.to(device)
+        linearization_coords = distortion.undistort(coords)
+        lens = distortion.jacobian_undistort(coords)
+
     normalizations = linearize_homography(
         torch.linalg.inv(homographies),
         coords=torch.cat(
-            [coords, torch.ones((1, 1)).expand(coords.size(0), 1).to(device)],
+            [
+                linearization_coords,
+                torch.ones((1, 1)).expand(coords.size(0), 1).to(device),
+            ],
             dim=-1,
         ),
     )
+    if lens is not None:
+        normalizations = normalizations @ lens
     _, S, Vh = torch.linalg.svd(normalizations)
     # Force a proper (det>0) factor. torch's SVD may return a reflection pair
     # (det(U)=det(Vh)=-1) — the factorization is only unique up to that sign, and for an
@@ -306,7 +345,7 @@ def blob_normalizations(homographies, coords, device):
 
 def extract_multiscale_patches(
     imgs, homographies, coords, scales, patch_size=64, scale_factors=[16.0, 64.0, 128.0],
-    supersample=1, return_mask=False, mask_imgs=None,
+    supersample=1, return_mask=False, mask_imgs=None, distortion=None,
 ):
     """Extract cartesian patches, one channel per entry in ``scale_factors``.
 
@@ -319,9 +358,13 @@ def extract_multiscale_patches(
     The mask is single-channel and therefore only defined for a SINGLE scale factor:
     with several, each channel samples a different physical extent onto the same pixel
     grid, so one mask cannot describe them all.
+
+    ``distortion`` is the view's lens, if any: the crop stays a local *linear*
+    approximation of the view map around the keypoint (as it already was for a
+    homography), it is only the Jacobian that map is built from that the lens changes.
     """
     device = imgs.device
-    blob_normalizations_ = blob_normalizations(homographies, coords, device)
+    blob_normalizations_ = blob_normalizations(homographies, coords, device, distortion)
 
     # Warp at `supersample` taps per output pixel along each axis and
     # area-average back down (in addition to the per-scale pre-blur below), so
@@ -422,6 +465,7 @@ def extract_logpolar_patches(
     supersample=3,
     return_mask=False,
     mask_imgs=None,
+    distortion=None,
 ):
     """Extract a log-polar patch around each keypoint.
 
@@ -447,7 +491,7 @@ def extract_logpolar_patches(
     N = coords.size(0)
     H, W = imgs.shape[-2:]
 
-    normalizations = blob_normalizations(homographies, coords, device)
+    normalizations = blob_normalizations(homographies, coords, device, distortion)
     # Linear map from the shape-normalized frame back into image pixels.
     inv_normalizations = torch.linalg.inv(normalizations)
 
@@ -534,6 +578,7 @@ class HomographyData(torch.utils.data.Dataset):
         transform_params=None,
         transforms_per_image=1,
         homography_seed=None,  # seed the per-view warp draw; None = numpy's global RNG, i.e. a different draw every build
+        distortion_params=None,  # radial lens per warped view: {"lambda1": v|[lo,hi], "lambda2": ...}; None = pinhole
 
         augmentation=None,
         sift_batch_size=1000,
@@ -656,6 +701,37 @@ class HomographyData(torch.utils.data.Dataset):
             ]
         )
         self.transforms_inv = torch.linalg.inv(self.transforms)
+
+        # --- Per-view radial lens distortion ---
+        # Post-composed onto the homography, so a warped view is `D ∘ H` and not a
+        # 3x3 map any more (see aef.transforms.distortion). Drawn from its OWN
+        # generator: sharing `homography_rng` would consume from the same stream, so
+        # switching a lens on would silently re-draw every warp of a `homography_seed`
+        # -pinned split — exactly the confound that seed exists to prevent.
+        self.distortion_params = (
+            omegaconf.OmegaConf.to_container(distortion_params, resolve=True)
+            if isinstance(distortion_params, omegaconf.DictConfig)
+            else distortion_params
+        )
+        distortion_rng = (
+            None if homography_seed is None
+            else np.random.default_rng(int(homography_seed) + 977)
+        )
+        self.distortions = torch.stack(
+            [
+                torch.stack(
+                    [
+                        sample_radial_distortion(self.distortion_params, distortion_rng)
+                        for _ in range(transforms_per_image)
+                    ]
+                )
+                for _ in range(len(self.images))
+            ]
+        )  # (images, transforms_per_image, 2); the identity view never gets a lens
+        if self.distortions.any():
+            # Fail here rather than per batch: a fold makes the view map non-injective,
+            # so the drawn range is unusable and no amount of downstream filtering saves it.
+            RadialDistortion(self.distortions.view(-1, 2), size=self.size)
 
         # --- Background compositing (blob-board / GT-keypoint path only) ---
         # Place each board as a shrunk sub-rectangle onto a real background scene so
@@ -969,7 +1045,7 @@ class HomographyData(torch.utils.data.Dataset):
     # pipeline. `_board_masks` is deliberately omitted (only used while generating
     # garbage) and `augmentation` is rebuilt from the constructor params.
     _CACHE_TENSORS = (
-        "transforms", "transforms_inv",
+        "transforms", "transforms_inv", "distortions",
         "keypoints", "keypoint_coords", "keypoint_scales",
         "keypoint_coords_clean", "keypoint_scales_clean", "keypoint_is_garbage",
         "images", "images_clean", "precomputed_patches", "precomputed_masks",
@@ -977,7 +1053,8 @@ class HomographyData(torch.utils.data.Dataset):
     _CACHE_META = (
         "size", "c", "in_memory", "patch_type", "patch_size", "patch_scale_factors",
         "logpolar_inner_factor", "logpolar_outer_factor", "supersample", "precompute_masks",
-        "transform_params", "patches_available", "extraction_batch_size",
+        "transform_params", "distortion_params", "patches_available",
+        "extraction_batch_size",
         # __getitem__ reads these on every access, including after a cache load
         # (which returns from __init__ before they would otherwise be set).
         "keypoint_jitter", "scale_jitter", "jitter_seed",
@@ -1013,6 +1090,10 @@ class HomographyData(torch.utils.data.Dataset):
         for k, v in state["tensors"].items():
             setattr(self, k, v)
         self._board_masks = None
+        if getattr(self, "distortions", None) is None:
+            # Written before lens distortion existed: no lens, hence no entry at all.
+            self.distortion_params = None
+            self.distortions = torch.zeros((*self.transforms.shape[:2], 2))
         n_g = int(self.keypoint_is_garbage.sum()) if self.keypoint_is_garbage is not None else 0
         print(
             f"Loaded cached dataset from {path} "
@@ -1073,6 +1154,14 @@ class HomographyData(torch.utils.data.Dataset):
                             [mask_images[img_id] for img_id in img_ids], dim=0
                         ).cuda()
 
+                    # Per-view lens for the shape normalization (None when nothing in
+                    # this batch is distorted, which keeps the pinhole path untouched).
+                    lambdas = batch["distortions"]
+                    distortion = (
+                        RadialDistortion(lambdas.cuda(), size=self.size, validate=False)
+                        if lambdas.any() else None
+                    )
+
                     if self.patch_type == "logpolar":
                         patches = extract_logpolar_patches(
                             imgs_tensor,
@@ -1080,6 +1169,7 @@ class HomographyData(torch.utils.data.Dataset):
                             batch["keypoint_coords"].cuda(),
                             batch["scales"].cuda(),
                             patch_size=self.patch_size,
+                            distortion=distortion,
                             inner_factor=self.logpolar_inner_factor,
                             outer_factor=self.logpolar_outer_factor,
                             supersample=self.supersample,
@@ -1096,6 +1186,7 @@ class HomographyData(torch.utils.data.Dataset):
                             batch["keypoint_coords"].cuda(),
                             batch["scales"].cuda(),
                             patch_size=self.patch_size,
+                            distortion=distortion,
                             scale_factors=self.patch_scale_factors,
                             supersample=self.supersample,
                             return_mask=self.precompute_masks,
@@ -1112,6 +1203,21 @@ class HomographyData(torch.utils.data.Dataset):
             self.patches_available = True
 
 
+    def view_lambdas(self, image_i, view_j):
+        """The ``(λ₁, λ₂)`` of one view, zeros for the lens-free identity view."""
+        distortions = getattr(self, "distortions", None)
+        if distortions is None or view_j >= distortions.size(1):
+            return torch.zeros(2)
+        return distortions[image_i, view_j]
+
+    def view_distortion(self, image_i, view_j):
+        """That view's lens as a :class:`RadialDistortion`, or ``None`` if pinhole."""
+        lambdas = self.view_lambdas(image_i, view_j)
+        if not bool(lambdas.any()):
+            return None
+        # Already validated over every drawn view in __init__.
+        return RadialDistortion(lambdas.view(1, 2), size=self.size, validate=False)
+
     def __getitem__(self, index):
         keypoint_i = index // (self.transforms.size(1) + 1)
         homography_j = index % (self.transforms.size(1) + 1)
@@ -1123,6 +1229,7 @@ class HomographyData(torch.utils.data.Dataset):
             keypoint_coords = self.keypoint_coords_clean[keypoint_i]
             base_scale = self.keypoint_scales_clean[keypoint_i]
             scale_factor = torch.tensor(1.0)
+            lambdas = torch.zeros(2)
         else:
             transform = self.transforms[homography_i, homography_j]
             source_coords = torch.cat(
@@ -1142,6 +1249,18 @@ class HomographyData(torch.utils.data.Dataset):
             )
             keypoint_coords = (keypoint_coords[:2] / keypoint_coords[2:]).squeeze(-1)
             base_scale = self.keypoint_scales[keypoint_i]
+
+            # Push the pinhole point through the lens, if this view has one. The
+            # blob's size picks up the lens' own |det J| on top of the homography's:
+            # J_view = J_D(u)·J_H(p), and det J_D = 1 / det J_U at the observed point.
+            lambdas = self.view_lambdas(homography_i, homography_j)
+            distortion = self.view_distortion(homography_i, homography_j)
+            if distortion is not None:
+                observed = distortion.distort(keypoint_coords.view(1, 2))
+                scale_factor = scale_factor / (
+                    distortion.det_jacobian_undistort(observed).abs().sqrt().view(())
+                )
+                keypoint_coords = observed.view(2)
 
         scale = base_scale * scale_factor
         # Simulated detector error, on the warped views only — the identity view is
@@ -1187,6 +1306,9 @@ class HomographyData(torch.utils.data.Dataset):
             ),
             "keypoint_coords": keypoint_coords,
             "scales": scale,
+            # The view map is `D ∘ H`: the 3x3 alone no longer describes it, so the
+            # lens' parameters ride along for the extractors' shape normalization.
+            "distortions": lambdas,
             "homographies": (
                 self.transforms[homography_i, homography_j]
                 if homography_j < self.transforms.size(1)
@@ -1240,6 +1362,7 @@ class HomographyData(torch.utils.data.Dataset):
                     [item["keypoint_coords"] for item in batch]
                 ),
                 "scales": torch.stack([item["scales"] for item in batch]),
+                "distortions": torch.stack([item["distortions"] for item in batch]),
                 "homographies": torch.stack([item["homographies"] for item in batch]),
                 # Frame size (H, W) so downstream can bound warped coords correctly.
                 "image_size": torch.tensor(self.size, dtype=torch.float32),
@@ -1272,27 +1395,44 @@ class HomographyData(torch.utils.data.Dataset):
                             msrc = torch.ones((1, *self.size), device=img.device)
                         else:
                             msrc = self._board_masks[board].to(img.device)
-                    if img_id % (self.transforms.size(1) + 1) < self.transforms.size(1):
-                        transform = self.transforms[
-                            img_id // (self.transforms.size(1) + 1),
-                            img_id % (self.transforms.size(1) + 1) - 1,
-                        ].unsqueeze(0)
-                        img = kornia.geometry.transform.warp_perspective(
-                            img.unsqueeze(0).expand(-1, 3, -1, -1),
-                            transform,
-                            self.size,
-                            padding_mode="fill",
-                            fill_value=torch.tensor([1.0, 1.0, 1.0], device=img.device),
-                        ).squeeze(0)[:1]
-                        if self.precompute_masks:
-                            # Off-board (outside the warped board) -> 0 = invalid.
-                            msrc = kornia.geometry.transform.warp_perspective(
-                                msrc.unsqueeze(0).expand(-1, 3, -1, -1),
+                    if not is_identity:
+                        # `img_id % views` IS the view index (see __getitem__, which
+                        # builds the id as board * views + homography_j) — the historical
+                        # `- 1` here silently read the wrong warp for every view but the
+                        # second whenever transforms_per_image > 1.
+                        view_j = img_id % views
+                        transform = self.transforms[board, view_j].unsqueeze(0)
+                        distortion = self.view_distortion(board, view_j)
+                        if distortion is None:
+                            img = kornia.geometry.transform.warp_perspective(
+                                img.unsqueeze(0).expand(-1, 3, -1, -1),
                                 transform,
                                 self.size,
                                 padding_mode="fill",
-                                fill_value=torch.tensor([0.0, 0.0, 0.0], device=img.device),
+                                fill_value=torch.tensor([1.0, 1.0, 1.0], device=img.device),
                             ).squeeze(0)[:1]
+                        else:
+                            # A lens makes the view-pixel -> source map non-projective,
+                            # so warp_perspective cannot express it.
+                            img = render_view(
+                                img.unsqueeze(0), transform, distortion.to(img.device),
+                                self.size, fill=1.0,
+                            ).squeeze(0)
+                        if self.precompute_masks:
+                            # Off-board (outside the warped board) -> 0 = invalid.
+                            if distortion is None:
+                                msrc = kornia.geometry.transform.warp_perspective(
+                                    msrc.unsqueeze(0).expand(-1, 3, -1, -1),
+                                    transform,
+                                    self.size,
+                                    padding_mode="fill",
+                                    fill_value=torch.tensor([0.0, 0.0, 0.0], device=img.device),
+                                ).squeeze(0)[:1]
+                            else:
+                                msrc = render_view(
+                                    msrc.unsqueeze(0), transform,
+                                    distortion.to(msrc.device), self.size, fill=0.0,
+                                ).squeeze(0)
                     assert img.size(0) == 1
                     imgs[img_id] = img
                     if self.precompute_masks:

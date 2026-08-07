@@ -214,6 +214,66 @@ the canvas: source photos **below** the frame resolution get upsampled, making t
 negatives artificially easy. At 300 dpi (1772 px canvas) a ≥2000 px source downsamples
 cleanly; this is one more reason not to raise the camera dpi.
 
+## Lens distortion (`distortion_params`)
+
+A warped view is no longer `H` alone but **`D ∘ H`**: the plane-to-image homography
+followed by a radial lens. `src/aef/transforms/distortion.py` holds the model;
+`distortion_params` (`None` → pinhole, i.e. every pre-lens run is unchanged) turns it
+on per dataset:
+
+```yaml
+training:
+  dataset:
+    params:
+      distortion_params:
+        lambda1: [0.05, 0.25]   # fixed number, or [lo, hi) drawn uniformly per view
+        lambda2: 0.02
+```
+
+The **undistortion** — observed view pixel `q` back to the pinhole point it would have
+had — is the closed form
+
+```
+U(q) = c + (q − c)·(1 + λ₁ρ + λ₂ρ²),   ρ = |q − c| / R
+```
+
+with `c` the frame centre and `R` half the frame diagonal, so `ρ = 1` at the corners and
+the λ are dimensionless (portable across resolutions: λ₁ = 0.1 moves the corner by ~10%
+of the half-diagonal). **λ ≥ 0 is barrel/fisheye** — undistortion expands the periphery,
+so the lens compressed it. Negative λ gives pincushion, and is checked at construction:
+a radial map that stops increasing folds the image onto itself, which makes the view map
+non-injective and `distort` root-free, so the draw is rejected rather than silently used.
+
+**Why the closed form sits in the undistortion direction.** Rendering a view fills each
+output pixel `q` from the source point `H⁻¹(U(q))` — millions of evaluations per frame,
+so that direction has to be closed-form. The forward map `D = U⁻¹` is only ever needed
+for keypoints (a few hundred per board) and is Newton on the radius. That also means
+`warp_perspective` cannot render a lensed view at all (the view-pixel → source map is
+not projective); `render_view` builds the grid explicitly instead. It agrees with
+`warp_perspective` to ~1e-5 when the lens is off, and the pinhole path still takes the
+kornia call, so nothing about a lens-free dataset changes.
+
+**What the lens does to the shape normalization** is the part that is easy to get
+wrong — and it fails the same way the [three earlier bugs](#shape-normalization--and-three-bugs)
+did, with patches that look fine but stop matching their anchor. The Jacobian to whiten
+is `J_D(u)·J_H(p)`, so `blob_normalizations` builds its inverse as `J_H(p)⁻¹·J_U(q)`.
+Two things follow: `coords` are now the **observed** point `q`, so the homography must be
+linearized at the **undistorted** `u = U(q)` and not at `q` (exactly the "Jacobian at the
+wrong point" trap again), and the lens' own `|det J|` has to reach `scales` — `__getitem__`
+divides the warp's `sqrt(det J_H)` by `sqrt(det J_U(q))`. A blob whose patch lattice is not
+divided by the *composed* size sits at a view-dependent scale in its own patch.
+
+The extractors themselves are unchanged: a patch has always been a local *linear*
+approximation of the view map around the keypoint (that is what `blob_normalizations`
+produces), and a lens only changes which linear map that is.
+
+Two deliberate scoping choices: the **identity view never gets a lens** (it is the clean
+reference — see below), and the λ are drawn from their own generator seeded off
+`homography_seed`, so switching a lens on does **not** shift the warp stream of a pinned
+split. `process_batch_canonicalize` still reads `data["homographies"][..., :2, :2]` as its
+target shape and therefore ignores the lens; canonicalization on lensed data would need
+that to consume the composed Jacobian instead.
+
 ## The identity (reference) view stays clean
 
 The un-warped identity view is the canonical *reference* patch: it gets **no
@@ -314,9 +374,11 @@ Preparing a dataset is slow: board rendering (Julia), compositing, SIFT, garbage
 detection and patch pre-extraction. Setting `cache_dir` writes the **fully prepared**
 dataset to disk and reuses it on the next run.
 
-- **What's stored**: transforms, all keypoint arrays (incl. `*_clean` and
-  `keypoint_is_garbage`), images/composites, and `precomputed_patches` — everything
-  needed to reconstruct the dataset without re-running the pipeline.
+- **What's stored**: transforms, the per-view lens parameters (`distortions`), all
+  keypoint arrays (incl. `*_clean` and `keypoint_is_garbage`), images/composites, and
+  `precomputed_patches` — everything needed to reconstruct the dataset without
+  re-running the pipeline. A cache written before lens distortion existed has no
+  `distortions` entry; `_load_cache` fills in zeros (it can only have been pinhole).
 - **Key**: a short hash (`dataset_cache_key`) of every param that determines the
   contents, plus `CACHE_VERSION`. It hashes the **effective** params — `effective_params`
   overlays what the caller passed onto the constructor *defaults* of
@@ -328,8 +390,16 @@ dataset to disk and reuses it on the next run.
   `data_dir`, `cache_dir`, `extraction_batch_size` and `sift_batch_size` are excluded —
   they don't change the data.
   The *algorithm* is not hashed: if you change the compositing/garbage code itself,
-  bump `CACHE_VERSION` (in `homography.py`) by hand. Currently **4** (3 → 4: the scale
-  normalization fixes, which change the patch footprint of every warped view).
+  bump `CACHE_VERSION` (in `homography.py`) by hand. Currently **5** (3 → 4: the scale
+  normalization fixes, which change the patch footprint of every warped view; 4 → 5:
+  the optional per-patch validity mask joined the cached state).
+- **`_CACHE_KEY_OPTIONAL` is the escape hatch for a *newly added* optional param.**
+  Because defaults are hashed, adding one would otherwise change every existing key and
+  force a full rebuild of caches whose contents it provably cannot have changed — the
+  feature did not exist when they were written and is off now. A param listed there is
+  dropped from the key while it holds its stated "off" value (`distortion_params`:
+  `None` or `{}`). It only qualifies if unset is bit-for-bit the old behaviour; anything
+  that changes the data even when nominally disabled must not be listed.
 - **A new named param must be added to the key by hand.** `effective_params` sees the
   constructor defaults, but `BlobBoardHomographyData` builds its key dict from an
   explicit list plus `**kwargs` — so a param declared in its *signature* is not in
