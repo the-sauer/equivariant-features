@@ -353,7 +353,7 @@ def extract_multiscale_patches(
     board) on the SAME warp, for the learned-mask descriptor heads — the cartesian
     counterpart of :func:`extract_logpolar_patches`'s. ``mask_imgs`` is a board-coverage
     image in the same frame as ``imgs``; without one, validity is "inside the frame"
-    (correct for the identity/anchor view, whose board raster fills the frame).
+    (correct for the identity/reference view, whose board raster fills the frame).
 
     The mask is single-channel and therefore only defined for a SINGLE scale factor:
     with several, each channel samples a different physical extent onto the same pixel
@@ -542,7 +542,7 @@ def extract_logpolar_patches(
     # image is given (``mask_imgs``, same frame as ``imgs``) it is sampled on the *same*
     # lattice — this is the true validity for a warped/composited view, where off-board
     # is real background *inside* the frame. Without one, fall back to ``~oob`` (correct
-    # for the identity/anchor view, whose board raster fills the frame).
+    # for the identity/reference view, whose board raster fills the frame).
     valid = None
     if return_mask:
         if mask_imgs is not None:
@@ -594,7 +594,7 @@ class HomographyData(torch.utils.data.Dataset):
         logpolar_inner_factor=2.0,
         logpolar_outer_factor=32.0,
         supersample=3,  # sub-taps per output pixel per axis, area-averaged (both patch types)
-        precompute_masks=False,  # logpolar only: also cache a per-patch board-validity mask (GT for the anchor view, for the learned-mask descriptor head)
+        precompute_masks=False,  # logpolar only: also cache a per-patch board-validity mask (GT for the reference view, for the learned-mask descriptor head)
         scale_quantile_range=None,  # (lo, hi) in [0, 1]: keep keypoints whose intrinsic blob scale falls in this quantile band
         scale_range=None,  # (lo, hi) absolute blob-scale bounds; alternative to scale_quantile_range
         max_keypoints=None,  # cap the kept keypoints to a fixed count (deterministic subsample) so different splits are exactly the same size
@@ -1319,14 +1319,17 @@ class HomographyData(torch.utils.data.Dataset):
         # NEU: Falls fertig berechnet, geben wir den Patch direkt hier mit raus
         if self.patches_available:
             res["patch"] = self.precomputed_patches[index]
+            # The identity view (homography_j == last) is the un-warped board
+            # rendering, i.e. this dataset's `is_pdf` patch. Emitted regardless of the
+            # mask path: it is also a LOSS-side label (`ProxyAnchoredSupCon` contrasts PDF
+            # patches against image patches only).
+            res["is_pdf"] = torch.tensor(
+                homography_j == self.transforms.size(1), dtype=torch.bool
+            )
             if getattr(self, "precomputed_masks", None) is not None:
-                # GT board-validity mask + anchor flag for the learned-mask head. The
-                # identity view (homography_j == last) is the anchor whose mask is GT;
-                # warped views carry a mask too but the head predicts theirs instead.
+                # GT board-validity mask for the learned-mask head: the identity view's
+                # mask is GT; warped views carry a mask too but the head predicts theirs.
                 res["mask"] = self.precomputed_masks[index]
-                res["is_anchor"] = torch.tensor(
-                    homography_j == self.transforms.size(1), dtype=torch.bool
-                )
 
         return res
 
@@ -1338,7 +1341,7 @@ class HomographyData(torch.utils.data.Dataset):
 
         Contrastive losses (SupCon/FPR95) need multiple views of the same
         physical keypoint in a batch to form positive pairs; plain shuffling
-        scatters the ``transforms_per_image + 1`` views so most anchors end up
+        scatters the ``transforms_per_image + 1`` views so most patches end up
         with no positive. The per-index label is the keypoint's feature id,
         which repeats across its views (see ``__getitem__``/``__len__``).
         """
@@ -1371,9 +1374,10 @@ class HomographyData(torch.utils.data.Dataset):
             if not needs_images:
                 # Patches sind da, packe sie in den Batch
                 res["patches"] = torch.stack([item["patch"] for item in batch])
+                if "is_pdf" in batch[0]:
+                    res["is_pdf"] = torch.stack([item["is_pdf"] for item in batch])
                 if "mask" in batch[0]:
                     res["masks"] = torch.stack([item["mask"] for item in batch])
-                    res["is_anchor"] = torch.stack([item["is_anchor"] for item in batch])
             else:
                 # Fallback Logik für dynamische Extraktion (in_memory=False)
                 img_ids = {item["keypoint"][0].item() for item in batch}

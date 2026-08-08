@@ -61,8 +61,8 @@ def test_learned_mask_returns_descriptor_and_mask():
     m = HardNetLogPolar(patch_size=64, head="fft", learned_mask=True).eval()
     patches = torch.rand(4, 1, 64, 64)
     mask = torch.ones(4, 1, 64, 64)
-    is_anchor = torch.tensor([True, False, True, False])
-    d, m_pred = m(patches, mask=mask, is_anchor=is_anchor)
+    is_pdf = torch.tensor([True, False, True, False])
+    d, m_pred = m(patches, mask=mask, is_pdf=is_pdf)
     assert d.shape == (4, 128)
     assert m_pred.shape[0] == 4 and m_pred.shape[1] == 1
     assert (m_pred >= 0).all() and (m_pred <= 1).all()

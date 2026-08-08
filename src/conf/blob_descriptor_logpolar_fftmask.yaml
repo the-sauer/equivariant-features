@@ -8,10 +8,10 @@ defaults:
 # behaviour (angular max-pool, no mask) is unchanged unless a config opts in:
 #   model.params.head=fft             -> AngularRFFTMag replaces the angular max-pool
 #                                        (keeps the full angular spectrum, not one peak)
-#   model.params.learned_mask=true    -> GT board-validity mask on the anchor view,
+#   model.params.learned_mask=true    -> GT board-validity mask on the `is_pdf` view,
 #                                        predicted mask on the (warped) target views
 #   dataset.params.precompute_masks   -> co-extract + cache the GT validity mask
-#   training.mask_loss_weight         -> weight of the anchor mask-supervision BCE
+#   training.mask_loss_weight         -> weight of the mask-supervision BCE
 
 model:
   name: HardNetLogPolar

@@ -12,8 +12,8 @@
 # keeps the in-band ones. See BlobBoards' docs/src/guide/board-tracks.md.
 #
 # Anchors are kept in every band (they have no pose — they are rendered fronto-parallel
-# off the board image). That is deliberate: a band's positives are anchor<->tracked
-# pairs, so dropping anchors would leave narrow bands with almost no matchable track.
+# off the board image). That is deliberate: a band's positives are pdf<->tracked
+# pairs, so dropping them would leave narrow bands with almost no matchable track.
 #
 # Compose it into any track leaf, e.g.
 #     defaults:

@@ -24,16 +24,25 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
 
     patches = data["patches"].to(device)
 
+    # ``is_pdf`` flags the reference patches — the board rendered from its PDF
+    # (`BlobTrackData`) resp. the un-warped identity view (`HomographyData`) — as
+    # opposed to the image patches warped/tracked out of real or synthesised views.
+    # It is a *loss-side* label (see ``ProxyAnchoredSupCon`` / ``ProxyAnchoredFPR95``)
+    # as well as a model input, so it is read on both paths, validation included.
+    is_pdf = data["is_pdf"].to(device) if "is_pdf" in data else None
+
     # Optional learned-mask inputs (only present when the dataset has
     # ``precompute_masks=True``). Absent -> the model is called exactly as before,
     # so plain descriptors (HardNet, cartesian) are untouched.
     #
     # During VALIDATION the GT mask is withheld from the network: at test time the
     # mask is unavailable and the model must predict it, so validation must mirror
-    # that (feed patches only, no mask / no is_anchor). This also skips the anchor
-    # mask-supervision BCE below, which needs the GT mask.
+    # that (feed patches only, no mask / no is_pdf). This also skips the mask
+    # supervision BCE below, which needs the GT mask. The loss-side copy of
+    # ``is_pdf`` is unaffected — withholding it there would silently make the
+    # validation loss a *different* loss from the training one.
     mask = data["masks"].to(device) if ("masks" in data and not validation) else None
-    is_anchor = data["is_anchor"].to(device) if ("is_anchor" in data and not validation) else None
+    model_is_pdf = None if validation else is_pdf
 
     # Only a mask-aware model takes the mask kwargs (it advertises itself with
     # ``learned_mask``); every other descriptor has a plain ``forward(patches)`` and
@@ -43,7 +52,7 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
     mask_aware = bool(getattr(model, "learned_mask", False))
     use_mask = mask_aware and not getattr(cfg.training, "ignore_mask", False)
     if use_mask:
-        out = model(patches, mask=mask, is_anchor=is_anchor)
+        out = model(patches, mask=mask, is_pdf=model_is_pdf)
     else:
         out = model(patches)
     # A mask-aware model returns (descriptor, predicted_mask); everything else a tensor.
@@ -58,18 +67,23 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
     in_bound_mask = torch.all((coords >= 0) & (coords < bound), dim=-1)
     features = features[in_bound_mask]
     keypoints = keypoints[in_bound_mask]
-    losses = {n: (c({"features": features, "indices": keypoints[..., 1]}), w, r)
+    # Same filtering for the loss-side flag, so it stays aligned with `features`;
+    # the model-side copy above stays unfiltered (it is indexed by `in_bound_mask`
+    # together with the mask supervision below).
+    loss_is_pdf = is_pdf[in_bound_mask] if is_pdf is not None else None
+    losses = {n: (c({"features": features, "indices": keypoints[..., 1],
+                     "is_pdf": loss_is_pdf}), w, r)
               for n, (c, w, r) in criterion.items()}
 
     # Standalone mask loss: supervise the predictor on the TARGET (warped) views against
-    # their true board coverage. The anchor's mask is *given* (used directly, not
+    # their true board coverage. The PDF patch's mask is *given* (used directly, not
     # predicted), so it is excluded here; the predictor exists to supply, at test time,
     # the target mask we no longer have. Restricted to in-bound targets — out-of-frame
     # patches are meaningless white fill. Gated on `use_mask` as well, so
     # `ignore_mask` switches the whole mask path off — supervision included; a model
     # that never receives the mask must not be scored against it either.
-    if use_mask and m_pred is not None and mask is not None and is_anchor is not None:
-        target = (~is_anchor.view(-1).bool()) & in_bound_mask
+    if use_mask and m_pred is not None and mask is not None and model_is_pdf is not None:
+        target = (~model_is_pdf.view(-1).bool()) & in_bound_mask
         if target.any():
             _, _, a_dim, r_dim = m_pred.shape
             gt = torch.nn.functional.adaptive_avg_pool2d(mask, (a_dim, r_dim))

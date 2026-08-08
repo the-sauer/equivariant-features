@@ -82,6 +82,59 @@ Note escnn checkpoints are large (~240 MB — the basis buffers live in the
 `state_dict`), so per-epoch snapshots add up fast. Resume with
 `+training.continue_from_checkpoint=<path>`.
 
+## Contrastive losses: `SupCon` vs `ProxyAnchoredSupCon`
+
+`training.loss: [{name: SupCon}]` is the default — `pytorch_metric_learning`'s SupCon over
+every patch in the batch. `ProxyAnchoredSupCon` treats the board's own rendering as the
+**proxy anchor** of its blob (vendored implementation in `train/losses/SupConLoss.py`,
+wrapper in `contrastive.py`):
+
+- the outer sum runs over the `is_pdf` patches only — the rendering (the GT sequence in a
+  `.tracks` file, the identity view in `HomographyData`);
+- `A(i)` and `P(i)` hold image patches only, so `pdf<->pdf` and `image<->image` terms
+  disappear from the numerator **and** from the log-sum-exp denominator.
+
+The motive is that matching happens against the board's rendering, not between two
+observations, so the image<->image terms optimise something the descriptor is never
+deployed on — and on track data they are also where the label noise sits. See
+`docs/figures/proxy_anchored_supcon.tex` for the pair matrix.
+
+The structure is that of **Proxy-Anchor Loss** (Kim et al., CVPR 2020): proxies as
+anchors, each associated with the whole batch. The difference is where the proxy comes
+from — Proxy-Anchor learns one free vector per class, here the proxy is the *embedded
+rendering*, so it moves with the encoder and exists for a blob the model has never seen.
+(Note "anchor" in that name, and in `SupConLoss`'s `anchor_feature` / `anchor_count`,
+means the rows of the logit matrix; it is unrelated to the flag, which is why the flag is
+`is_pdf` and the loss argument `is_proxy`.)
+
+The flag comes from the batch key `"is_pdf"`, which `process_batch_blobs` filters
+alongside the features and passes to every loss; `BlobTrackData` always emits it, and
+`HomographyData` emits it whenever patches are precomputed. `ProxyAnchoredSupCon` raises
+rather than silently degenerating to plain SupCon if it is missing. Unlike the mask, the
+flag is *not* withheld during validation — otherwise the validation number would be a
+different loss from the training one.
+
+A proxy with no in-batch positive is dropped from the mean instead of contributing a
+zero, so the value stays comparable across batches of differing yield. Note this narrows
+the loss to roughly one row per track group: with `m_per_class: 4` a batch that fed
+SupCon ~12 ordered pairs per group now feeds it ~3, so a larger `training.batch_size` (or
+a larger `m_per_class`) buys back the gradient signal.
+
+### The metric follows: `ProxyAnchoredFPR95`
+
+`FPR95` ranks *every* patch pair in the batch, so like plain SupCon it is dominated by
+image<->image pairs — a number about a question test time never asks. `ProxyAnchoredFPR95`
+applies the same restriction to the metric: only pairs with exactly one proxy endpoint
+enter the ranking. The pair set is unordered here (the distance matrix is symmetric and
+there is no per-row normaliser), so the restriction is a cross-set mask rather than a
+rows/columns split; `fpr()` takes it as `is_proxy=`.
+
+Two consequences worth stating in a thesis table: the number is **not comparable** with
+`FPR95` (different pair population — a run that switches starts a fresh series), and a
+batch with no proxy<->image pair reports NaN and is skipped, exactly as a positive-free
+batch already is. Both metrics can be reported side by side: list them as two entries and
+give the one that should drive `best.pth` the weight.
+
 ## Loss curves
 
 `train_losses.svg` / `validation_losses.svg` (under `<logging.dir>/<experiment_name>/`)

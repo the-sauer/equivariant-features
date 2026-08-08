@@ -3,11 +3,11 @@
 Two failure modes this pins, both silent-ish and both expensive:
 
 * a descriptor that is NOT mask-aware has a plain ``forward(patches)`` and raises on
-  ``mask=``/``is_anchor=`` kwargs — so the mask must only be handed to models that
+  ``mask=``/``is_pdf=`` kwargs — so the mask must only be handed to models that
   advertise ``learned_mask`` (HardNetLogPolar, BlobDescriptorEfficient,
   BlobDescriptorNoStride);
-* the mask predictor is supervised on the TARGET views only. The anchor's mask is
-  *given* to the model, so including anchors in the BCE would train the predictor on
+* the mask predictor is supervised on the TARGET views only. The PDF patch's mask is
+  *given* to the model, so including PDF patches in the BCE would train the predictor on
   the one case where it is never used — and validation withholds the GT mask entirely
   (test time has none), so no mask loss may appear there.
 """
@@ -42,8 +42,8 @@ class _MaskAware(torch.nn.Module):
         self.lin = torch.nn.Linear(16, 4)
         self.seen = []
 
-    def forward(self, patches, mask=None, is_anchor=None):
-        self.seen.append((mask is not None, is_anchor is not None))
+    def forward(self, patches, mask=None, is_pdf=None):
+        self.seen.append((mask is not None, is_pdf is not None))
         d = self.lin(patches.reshape(patches.size(0), -1))
         m_pred = torch.full((patches.size(0), 1, 2, 2), 0.5, requires_grad=True)
         return d, m_pred
@@ -59,8 +59,8 @@ def _batch(n=4, with_mask=True):
     }
     if with_mask:
         data["masks"] = torch.rand(n, 1, 4, 4)
-        # Alternating anchor / target, so both branches of the routing are exercised.
-        data["is_anchor"] = torch.tensor([1, 0] * (n // 2))
+        # Alternating PDF patch / target, so both branches of the routing are exercised.
+        data["is_pdf"] = torch.tensor([1, 0] * (n // 2))
     return data
 
 
@@ -117,11 +117,11 @@ def test_validation_withholds_the_gt_mask():
     assert "mask_bce" not in losses
 
 
-def test_mask_bce_ignores_anchors():
-    # All-anchor batch: nothing to supervise, and the loss must stay finite (and
+def test_mask_bce_ignores_pdf_patches():
+    # All-PDF batch: nothing to supervise, and the loss must stay finite (and
     # gradient-connected) rather than reduce over an empty selection -> NaN.
     data = _batch()
-    data["is_anchor"] = torch.ones(4, dtype=torch.long)
+    data["is_pdf"] = torch.ones(4, dtype=torch.long)
     losses = _run(_MaskAware(), data, _cfg(ignore_mask=False))
     bce = losses["mask_bce"][0]
     assert bce == 0.0 and torch.isfinite(bce)

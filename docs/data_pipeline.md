@@ -164,12 +164,13 @@ in-memory tensor only (the on-disk image path went away with `KaggleHomographyDa
 
 With `precompute_masks: true` the extractors co-sample a per-patch validity mask
 (1 = on the board) on the *same* warp as the patch, cached alongside it and delivered
-as `"masks"` + `"is_anchor"` in the batch. It is the GT for the learned-mask descriptor
+as `"masks"` in the batch, next to the `"is_pdf"` flag (which the collate emits
+regardless of this setting — it is also a loss-side label, see `ProxyAnchoredSupCon`). It is the GT for the learned-mask descriptor
 heads (`model.params.learned_mask`, see
 [log-polar](logpolar_descriptor.md#learned_masktrue--mask-aware-pooling-without-a-target-mask)
 and [steerable](steerable_descriptors.md#learned-board-validity-masking-learned_mask)).
 
-Both patch types support it. For the identity/anchor view the source is a full-frame
+Both patch types support it. For the identity view (`is_pdf`) the source is a full-frame
 ones image (the clean board fills the frame, so validity == in-frame); for warped views
 it is the composited board mask, warped by the same homography — a warped view's
 off-board region is real background *inside* the frame, so `oob` alone would be wrong.

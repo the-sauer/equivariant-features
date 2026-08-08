@@ -9,7 +9,7 @@ defaults:
 #
 # Every toggle defaults to OFF in code, so `blob_descriptor_efficient` is unchanged
 # unless a config opts in:
-#   model.params.learned_mask=true    -> GT board-validity mask on the anchor (identity)
+#   model.params.learned_mask=true    -> GT board-validity mask on the `is_pdf` (identity)
 #                                        view, predicted mask on the warped target views;
 #                                        the weight is folded into the attention pooling
 #   dataset.params.precompute_masks   -> co-extract + cache the GT validity mask

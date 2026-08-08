@@ -355,7 +355,12 @@ def train_func(process_batch):
             if scale_desc is None:
                 _p = cfg.training.dataset.params
                 scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
-            plot_title = f"{model_name} {"FFT" if model.head_type == "fft" else "MaxPool"} {"& Mask " if model.learned_mask else ""} (scale={scale_desc})"
+            # getattr with defaults: only the log-polar heads carry `head_type` /
+            # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
+            # crash here *after* a full epoch, at plotting time.
+            head_desc = "FFT" if getattr(model, "head_type", None) == "fft" else "MaxPool"
+            mask_desc = "& Mask " if getattr(model, "learned_mask", False) else ""
+            plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)

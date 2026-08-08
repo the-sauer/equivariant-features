@@ -70,9 +70,9 @@ empirical question — run the sweep.
 ## Learned board-validity masking (`learned_mask`)
 
 Both steerable descriptors take `learned_mask=True`: part of every patch is off-board
-junk, and it is not shared between an anchor and its target, so it is pure noise for the
-metric loss. The mask that would remove it exists for the **anchor** (given) but not for
-the **target** at test time — so a 1×1 steerable conv predicts one (`m_pred ∈ [0, 1]`)
+junk, and it is not shared between a reference patch and its target, so it is pure noise
+for the metric loss. The mask that would remove it exists for the **reference patch**
+(`is_pdf`, given) but not for the **target** at test time — so a 1×1 steerable conv predicts one (`m_pred ∈ [0, 1]`)
 from the backbone features, `forward` returns `(descriptor, m_pred)`, and a BCE trains
 that prediction on the targets against their true coverage.
 

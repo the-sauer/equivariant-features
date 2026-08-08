@@ -22,17 +22,19 @@ makes it interesting and what the rest of this note is about.
 ## The problem: the target's mask does not exist at test time
 
 Part of every patch is off-board junk: background the warp dragged in, or out-of-frame
-fill. It is not shared between an anchor and its target, so it is pure noise for the
+fill. It is not shared between a reference patch and its target, so it is pure noise for the
 metric loss. Removing it needs a per-pixel validity map — and that map is available for
 exactly one of the two views:
 
-- **Anchor** (identity view, clean board): validity is *given*. In the synthetic
-  pipeline it is the un-warped board raster; on `.tracks` data it ships with the patch.
+- **Reference patch** (`is_pdf`: identity view, clean board): validity is *given*. In
+  the synthetic pipeline it is the un-warped board raster; on `.tracks` data it ships
+  with the patch. (In-tree the flag is `is_pdf` — "anchor" is SupCon's word for the rows
+  of its logit matrix; the `.tracks` files still spell the attribute `is_anchor`.)
 - **Target** (warped view, composited on a real background): validity exists in
   training (the warped board mask) but **not at test time**, where you only have the
   image.
 
-So the model is trained with the answer and must learn to produce it: GT on anchors, a
+So the model is trained with the answer and must learn to produce it: GT on `is_pdf`, a
 prediction on targets, and a standalone loss that trains the prediction against the
 target's true coverage. Train-supervise / test-predict.
 
@@ -87,7 +89,7 @@ Routing between the two is a per-sample convex combination and does not touch th
 spatial index at all:
 
 ```
-w = a · pool(m_gt) + (1 - a) · m_pred,    a = is_anchor ∈ {0, 1}
+w = a · pool(m_gt) + (1 - a) · m_pred,    a = is_pdf ∈ {0, 1}
 ```
 
 `pool` is `adaptive_avg_pool2d` from patch resolution to feature resolution; averaging a
@@ -128,7 +130,7 @@ Verified — with the weight forced to 1, the spliced forward reproduces `self.n
 
 ## The input gate
 
-On anchors the known off-board region is also neutralized at the input:
+On `is_pdf` patches the known off-board region is also neutralized at the input:
 
 ```
 x ← x · m + mean_m(x) · (1 - m),    mean_m(x) = Σ m x / Σ m
@@ -152,8 +154,8 @@ L_mask = BCE( m_pred[t] , pool(m_gt)[t] ),   t = targets ∧ in-bounds
 
 weighted by `training.mask_loss_weight`. Three restrictions, each with a reason:
 
-- **targets only** — the anchor's mask is *given* to the model, so training the
-  predictor on anchors would fit it to the one case where it is never used;
+- **targets only** — the reference patch's mask is *given* to the model, so training
+  the predictor on it would fit the predictor to the one case where it is never used;
 - **in-bounds only** — out-of-frame patches are meaningless white fill;
 - **not during validation** — validation withholds the GT mask entirely (test time has
   none), so the metric stays reproducible; `m_pred` alone drives the weighting there.

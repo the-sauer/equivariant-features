@@ -74,8 +74,11 @@ class _ReshufflingBatchSampler:
 # one file holds exactly ONE patch type at ONE scale, so `tracks/patches` is a
 # single (N, P, P) dataset (no per-mode `patches/<type>` group). Each patch has a
 # companion board-in-frame mask under `tracks/masks`, and every sequence carries
-# an `is_anchor` group attribute (1 = GT anchor sequence, 0 = tracked). The single
-# patch type / scale are recorded as attributes on the `tracks` group.
+# an `is_anchor` group attribute (1 = the GT sequence rendered from the board PDF,
+# 0 = tracked in real footage). In-tree that flag is called `is_pdf` — "anchor" is
+# SupCon's word for the rows of its logit matrix and means something else — but the
+# ON-DISK attribute name stays `is_anchor`, so existing `.tracks` files still read.
+# The single patch type / scale are recorded as attributes on the `tracks` group.
 # Blob-index field width for the collision-free remap (see `_load_all_sequences`).
 # Boards observed with up to ~1330 blobs (< 2**16); 16 bits leaves room to grow while
 # keeping the packed id in 32 bits (board_id in the high bits, blob index in the low).
@@ -83,7 +86,7 @@ _BLOB_BITS = 16
 
 
 def _uid_of(name):
-    # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (anchor); return
+    # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (PDF render); return
     # the trailing hex board uid (works for both forms), or None if it doesn't match.
     m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", name)
     return m[1] if m else None
@@ -159,15 +162,15 @@ def _observation_view_angles(g, name, required=True):
 
 def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
                         unique_track_ids=True, view_angle_range=None,
-                        view_angle_keep_anchors=True):
+                        view_angle_keep_pdf=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
-    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_anchor,
+    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_pdf,
     view_angles).
     `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
-    `is_anchor` is a per-patch uint8 array (broadcast from the per-sequence flag).
+    `is_pdf` is a per-patch uint8 array (broadcast from the per-sequence flag).
     `view_angles` is a per-patch float64 array of viewing obliquity in RADIANS, NaN
-    wherever the patch has no pose: anchors (rendered fronto-parallel off the board
+    wherever the patch has no pose: PDF patches (rendered fronto-parallel off the board
     image), observations whose frame is missing from the pose table, and every patch
     of a file predating the viewing-angle export. It is what
     ``BlobTrackData(balance_view_angles=True)`` bins into bands.
@@ -179,8 +182,8 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     was viewed at an obliquity in ``[lo, hi)`` (0 = fronto-parallel, 90 = edge-on).
     Anchor sequences carry no pose (they are rendered off the board image, i.e.
     fronto-parallel by construction) and are kept whole unless
-    ``view_angle_keep_anchors`` is False — keeping them is what preserves the
-    anchor<->tracked positive pairs that make a narrow band evaluable at all.
+    ``view_angle_keep_pdf`` is False — keeping them is what preserves the
+    pdf<->tracked positive pairs that make a narrow band evaluable at all.
 
     ``unique_track_ids`` (default True) remaps track ids to be COLLISION-FREE across
     boards. The stored ids are ``board_hash + blob_index`` packed into one ~16-bit
@@ -188,7 +191,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     — a measured ~34% of ids span >1 board, pairing unrelated blobs as false positives.
     Here each board (identified by its sequence uid) gets a dense index, and the id is
     repacked as ``(board_index << _BLOB_BITS) | (raw_id - board_base)`` — i.e. a clean
-    ``board_id | blob_index``. This preserves within-board matches (a board's anchor and
+    ``board_id | blob_index``. This preserves within-board matches (a board's PDF render and
     tracked media share the same raw ids, hence the same blob_index) while making every
     board's id range disjoint. Assumes distinct uid => distinct board (holds for the
     current files; the durable fix is a full-hash registry at export time).
@@ -200,7 +203,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     if unique_track_ids:
         board_uids = sorted({u for u in map(_uid_of, seq_names) if u is not None})
         board_index = {u: i for i, u in enumerate(board_uids)}
-        # Board base = min raw id over ALL of a board's sequences, so anchor and tracked
+        # Board base = min raw id over ALL of a board's sequences, so PDF and tracked
         # media of the same board map to the same blob_index.
         for name in seq_names:
             u = _uid_of(name)
@@ -227,26 +230,27 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
 
     all_patches, all_masks = [], []
     all_track_ids, all_track_lengths = [], []
-    all_affine_shapes, all_is_anchor, all_view_angles = [], [], []
+    all_affine_shapes, all_is_pdf, all_view_angles = [], [], []
 
     for name in seq_names:
         sg = seqs[name]
         g = sg["tracks"]
-        is_anchor = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
+        # On-disk attribute name (see the layout note above); `is_pdf` in-tree.
+        is_pdf = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
 
         # Join the per-frame pose table to the observations up front, so the angles can
         # be sliced by the same `sel` as the patches. Only a band filter *requires* them
         # (an older file without the export is loadable, its angles just stay NaN).
         angles = matched = None
-        if not is_anchor:
+        if not is_pdf:
             angles, matched = _observation_view_angles(g, name, required=bounds is not None)
 
         # Viewing-angle band: decide WHICH observations to read before reading them,
         # so a narrow band does not pull a whole (large) sequence through memory.
         sel = None
         if bounds is not None:
-            if is_anchor:
-                if not view_angle_keep_anchors:
+            if is_pdf:
+                if not view_angle_keep_pdf:
                     continue
             else:
                 lo, hi = bounds
@@ -272,7 +276,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
                              else np.ones_like(patches))
         if with_affine:
             all_affine_shapes.append(_read_rows(g["affine_shapes"], sel))
-        all_is_anchor.append(np.full(n, is_anchor, dtype=np.uint8))
+        all_is_pdf.append(np.full(n, is_pdf, dtype=np.uint8))
 
     def cat(parts, empty):
         return np.concatenate(parts) if parts else empty
@@ -282,10 +286,10 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     track_lengths = cat(all_track_lengths, np.zeros(0, dtype=np.int32))
     masks = cat(all_masks, np.zeros((0, 64, 64), dtype=np.float32)) if with_mask else None
     affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
-    is_anchor = cat(all_is_anchor, np.zeros(0, dtype=np.uint8))
+    is_pdf = cat(all_is_pdf, np.zeros(0, dtype=np.uint8))
     view_angles = cat(all_view_angles, np.zeros(0, dtype=np.float64))
 
-    return patches, masks, track_ids, track_lengths, affine_shapes, is_anchor, view_angles
+    return patches, masks, track_ids, track_lengths, affine_shapes, is_pdf, view_angles
 
 
 def load_untracked_patches(f, sequences=None, with_mask=False):
@@ -343,7 +347,7 @@ def _bands_of(angles_rad, edges_deg):
     """Bin per-patch viewing angles (radians) into band indices.
 
     Returns an int64 array; ``-1`` marks a patch with no band — an unknown angle
-    (NaN: anchors and files predating the pose export) or one outside the edges.
+    (NaN: PDF patches and files predating the pose export) or one outside the edges.
     Those are never *drawn* by the balancer; they only ride along as partners.
     """
     deg = np.degrees(np.asarray(angles_rad, dtype=np.float64))
@@ -483,7 +487,7 @@ def _band_pools(pos_groups, bands):
     as ``(group, observation)`` — one entry per in-band observation, so a track seen
     ten times at 5 deg is ten draws in that band and none in any other.
     ``groups[i] = (members, unbanded)`` carries group ``i``'s patch indices and the
-    pose-less subset of them (in practice its GT anchor), which is the preferred
+    pose-less subset of them (in practice its PDF render), which is the preferred
     positive partner: matching an oblique observation against the fronto-parallel
     render is the task the descriptor is trained for.
     """
@@ -502,7 +506,7 @@ def _band_pools(pos_groups, bands):
 def _instance(groups, gi, seed, used, rng):
     """One positive instance: the drawn observation plus a partner from its own track.
 
-    The partner is a pose-less member (the GT anchor) when the track has an unused
+    The partner is a pose-less member (the PDF render) when the track has an unused
     one, else another of its observations — matching against the fronto-parallel
     render is the deployment task, but an oblique<->oblique pair is a valid positive
     too and is what lets a sparsely observed band still fill its quota.
@@ -526,9 +530,9 @@ def _band_capacity(pool, groups):
     """Ceiling on the in-band patches one band can put into a SINGLE batch.
 
     A batch takes disjoint pairs only, so a track with ``m`` in-band observations
-    contributes at most ``1 + 2*floor((m-1)/2)`` of them when it has an anchor to
+    contributes at most ``1 + 2*floor((m-1)/2)`` of them when it has a PDF patch to
     spend on the first pair, and ``2*floor(m/2)`` when it does not. Bands sharing a
-    track compete for that anchor, so the real number can be lower — this is what the
+    track compete for that PDF patch, so the real number can be lower — this is what the
     band could reach at best, which is the honest thing to compare a quota against.
     """
     total = 0
@@ -561,9 +565,9 @@ def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
     if not bands:
         return []
     n_conf = max(0, round(batch_size * confuser_fraction))
-    # The quota counts IN-BAND patches, not instances: an anchor-paired instance
+    # The quota counts IN-BAND patches, not instances: a pdf-paired instance
     # contributes one, an oblique<->oblique pair two, so counting instances would let
-    # the sparse bands (the ones that run out of anchors) overshoot the crowded ones.
+    # the sparse bands (the ones that run out of PDF patches) overshoot the crowded ones.
     # Each in-band patch drags in at most one partner, so a batch stays within
     # 2 * quota * n_bands positive slots.
     quota = max(1, (batch_size - n_conf) // (2 * len(bands)))
@@ -612,7 +616,7 @@ class BlobTrackData(torch.utils.data.Dataset):
     `view_angle_range=[lo_deg, hi_deg]` restricts the tracked observations to a band of
     viewing obliquity (0 = fronto-parallel, 90 = edge-on), which is what the per-band
     validation splits in `conf/track_angle_validation.yaml` use to report FPR95 as a
-    function of viewpoint. The band applies to tracked observations only: anchors have
+    function of viewpoint. The band applies to tracked observations only: PDF patches have
     no pose and are kept (they supply the positive partner), and confusers carry no
     frame id at all, so they stay a plain negative pool — capped, as always, at
     `max_untracked_to_tracked_ratio x` the *surviving* patch count, which keeps the
@@ -649,7 +653,7 @@ class BlobTrackData(torch.utils.data.Dataset):
         with_mask=False,
         unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
         view_angle_range=None,   # [lo_deg, hi_deg): keep only observations viewed at this obliquity
-        view_angle_keep_anchors=True,   # anchors have no pose; keep them so bands still have positives
+        view_angle_keep_pdf=True,   # PDF patches have no pose; keep them so bands still have positives
         balance_view_angles=False,   # TRAINING: draw each obliquity band equally (see get_sampler)
         view_angle_band_edges=None,   # band edges in degrees; None -> 0..90 in 10 deg steps
         view_angle_band_target="median",   # in-band patches per band per epoch: min|median|mean|max or an int
@@ -687,20 +691,20 @@ class BlobTrackData(torch.utils.data.Dataset):
                                          unique_track_ids=unique_track_ids)
 
             (all_patches, all_masks, track_ids, _track_lengths,
-             affine_shapes, is_anchor, view_angles) = _load_all_sequences(
+             affine_shapes, is_pdf, view_angles) = _load_all_sequences(
                 f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids,
                 view_angle_range=view_angle_range,
-                view_angle_keep_anchors=view_angle_keep_anchors)
+                view_angle_keep_pdf=view_angle_keep_pdf)
 
             self.patches = all_patches
-            # Per-patch obliquity in radians, NaN where there is no pose (anchors).
+            # Per-patch obliquity in radians, NaN where there is no pose (PDF patches).
             self.view_angles = view_angles
             # int64: remapped ids (board_id << 16 | blob_index) and the confuser band
             # below can exceed uint32's comfortable range once boards accumulate.
             self.labels = track_ids.astype(np.int64)
             self.affine_shapes = affine_shapes
             self.masks = all_masks
-            self.is_anchor = is_anchor
+            self.is_pdf = is_pdf
 
             # Cap the split's size AFTER the band filter, so the budget counts only
             # what the band kept (an uncapped band is as big as the file allows,
@@ -722,7 +726,7 @@ class BlobTrackData(torch.utils.data.Dataset):
 
         if include_untracked and len(self.untracked_patches):
             # Confusers get fresh singleton labels; they are negatives only (their
-            # is_anchor is 0, they carry no board mask). Those labels MUST be disjoint
+            # is_pdf is 0, they carry no board mask). Those labels MUST be disjoint
             # from every real track_id — a confuser sharing an id with a real track
             # tells SupCon to pull an unmatchable background patch toward that track,
             # corrupting the embedding. The old scheme ((labels[0] & 0xFFFF0000) +
@@ -737,7 +741,7 @@ class BlobTrackData(torch.utils.data.Dataset):
                 self.labels,
                 np.arange(start, start + n_ut, dtype=np.int64),
             ])
-            self.is_anchor = np.concatenate([self.is_anchor, np.zeros(n_ut, dtype=np.uint8)])
+            self.is_pdf = np.concatenate([self.is_pdf, np.zeros(n_ut, dtype=np.uint8)])
             # Confusers carry no frame id, hence no angle: unbanded, negatives only.
             self.view_angles = np.concatenate([self.view_angles, np.full(n_ut, np.nan)])
 
@@ -772,7 +776,7 @@ class BlobTrackData(torch.utils.data.Dataset):
         keep = cap.keep
         self.patches = self.patches[keep]
         self.labels = self.labels[keep]
-        self.is_anchor = self.is_anchor[keep]
+        self.is_pdf = self.is_pdf[keep]
         self.view_angles = self.view_angles[keep]
         if self.affine_shapes is not None:
             self.affine_shapes = self.affine_shapes[keep]
@@ -811,9 +815,11 @@ class BlobTrackData(torch.utils.data.Dataset):
         if self.affine_shapes is not None:
             item["affine_shape"] = torch.from_numpy(self.affine_shapes[idx]) if idx < self.patches.shape[0] \
                 else torch.eye(2)
+        # Always emitted, mask path or not: `is_pdf` is also a LOSS-side label
+        # (`ProxyAnchoredSupCon` contrasts PDF patches against image patches only).
+        item["is_pdf"] = int(self.is_pdf[idx])
         if self.with_mask:
             item["mask"] = torch.from_numpy(mask).unsqueeze(0).transpose(1, 2)
-            item["is_anchor"] = int(self.is_anchor[idx])
         return item
 
     @staticmethod
@@ -826,8 +832,9 @@ class BlobTrackData(torch.utils.data.Dataset):
         namespaced by board (``(uid, raw_id)``) so a ``track_id`` shared by two DIFFERENT
         boards is NOT counted as matchable — those are cross-board collisions, reported
         separately. So "matchable" here means a genuine within-board recurrence (a
-        board's anchor + a tracked media, or two media), which is the only kind that is
-        a true positive. If matchable/anchored is tiny, the data is why training stalls.
+        board's PDF render + a tracked media, or two media), which is the only kind that
+        is a true positive. If matchable/pdf-backed is tiny, the data is why training
+        stalls.
         """
         seqs = f["sequences"]
         names = _select_sequences(seqs, sequences)
@@ -838,9 +845,9 @@ class BlobTrackData(torch.utils.data.Dataset):
         def key(u, t):
             return (u, t) if unique_track_ids else t
         track_total = collections.Counter()      # namespaced key -> patches
-        track_in_anchor = collections.defaultdict(bool)
+        track_in_pdf = collections.defaultdict(bool)
         raw_boards = collections.defaultdict(set)  # raw id -> set of board uids
-        per_seq = []   # (name, uid, is_anchor, n_patches, unique_keys:set, n_untracked)
+        per_seq = []   # (name, uid, is_pdf, n_patches, unique_keys:set, n_untracked)
         obs_angles = []   # per-observation viewing angle (radians), tracked sequences only
         n_no_angle = 0
         for name in names:
@@ -861,22 +868,22 @@ class BlobTrackData(torch.utils.data.Dataset):
                 track_total[key(u, int(t))] += c
                 raw_boards[int(t)].add(u)
                 if isa:
-                    track_in_anchor[key(u, int(t))] = True
+                    track_in_pdf[key(u, int(t))] = True
 
         matchable = {k for k, c in track_total.items() if c >= 2}
-        anchored = sum(1 for k in matchable if track_in_anchor[k])
+        pdf_backed = sum(1 for k in matchable if track_in_pdf[k])
         collisions = sum(1 for _t, bs in raw_boards.items() if len(bs) > 1)
 
         tag = f" [{split}]" if split else ""
         print(f"\n===== BlobTrackData sequence stats{tag}: {len(names)} sequences "
               f"(unique_track_ids={unique_track_ids}) =====")
         print(f"{'sequence':<30}{'kind':>8}{'patches':>9}{'tracks':>8}{'matchable':>10}{'confusers':>10}")
-        n_anchor_seq = n_tracked_seq = tot_patch = tot_conf = 0
+        n_pdf_seq = n_tracked_seq = tot_patch = tot_conf = 0
         for name, _u, isa, npat, keys, n_ut in per_seq:
-            kind = "anchor" if isa else "tracked"
+            kind = "pdf" if isa else "tracked"
             n_match = len(keys & matchable)
             print(f"{name[:30]:<30}{kind:>8}{npat:>9}{len(keys):>8}{n_match:>10}{n_ut:>10}")
-            n_anchor_seq += isa
+            n_pdf_seq += isa
             n_tracked_seq += (not isa)
             tot_patch += npat
             tot_conf += n_ut
@@ -890,12 +897,13 @@ class BlobTrackData(torch.utils.data.Dataset):
         histstr = "  ".join(f"{b}:{hist.get(b, 0)}" for b in order)
 
         n_tracks = len(track_total)
-        print(f"----- summary{tag}: {n_anchor_seq} anchor + {n_tracked_seq} tracked seqs, "
+        print(f"----- summary{tag}: {n_pdf_seq} pdf + {n_tracked_seq} tracked seqs, "
               f"{tot_patch} track patches + {tot_conf} confusers -----")
         print(f"  distinct track_ids: {n_tracks}  |  matchable (>=2 patches): {len(matchable)} "
               f"({100*len(matchable)/max(1,n_tracks):.1f}%)  |  singleton: {n_tracks-len(matchable)}")
-        print(f"  of matchable: anchored (anchor<->tracked): {anchored} "
-              f"({100*anchored/max(1,len(matchable)):.1f}%)  |  tracked-only: {len(matchable)-anchored}")
+        print(f"  of matchable: pdf-backed (pdf<->tracked): {pdf_backed} "
+              f"({100*pdf_backed/max(1,len(matchable)):.1f}%)  |  "
+              f"tracked-only: {len(matchable)-pdf_backed}")
         print(f"  raw ids shared across >1 board (cross-board collisions): {collisions}"
               f"{'  (de-collided by remap)' if unique_track_ids else '  !! NOT de-collided'}")
         print(f"  track multiplicity histogram (patches per track): {histstr}")
@@ -919,16 +927,16 @@ class BlobTrackData(torch.utils.data.Dataset):
         if len(matchable) == 0:
             print("  !! WARNING: NO matchable tracks — every batch is positive-free; "
                   "check that track_ids are shared across a board's sequences.")
-        elif anchored == 0:
-            print("  !! WARNING: matchable tracks exist but NONE are anchored — positives are "
-                  "tracked<->tracked only; verify the anchor sequences share track_ids.")
+        elif pdf_backed == 0:
+            print("  !! WARNING: matchable tracks exist but NONE are pdf-backed — positives are "
+                  "tracked<->tracked only; verify the PDF sequences share track_ids.")
         print()
 
     @staticmethod
     def _split_sequences(h5_path, split):
         """Return the set of board uids belonging to a train/val/test split.
 
-        A board's anchor and tracked sequences SHARE a uid (names are ``<uid>`` or
+        A board's PDF and tracked sequences SHARE a uid (names are ``<uid>`` or
         ``<media>_<uid>``), so the split must be decided per *uid*, assigned once on
         first sight — otherwise the same board could land in val via one sequence and
         train via another, leaking data across splits. Same residue rule as the
@@ -950,7 +958,7 @@ class BlobTrackData(torch.utils.data.Dataset):
 
     def _grouped_indices(self):
         """Split the dataset's global indices into positive track groups (a
-        ``track_id`` with >= 2 patches, so it can form a positive pair — its anchor
+        ``track_id`` with >= 2 patches, so it can form a positive pair — its PDF
         patch is one of them) and confusers (singleton track_ids + the untracked
         block, one representative index each — they can only ever be negatives)."""
         groups = collections.defaultdict(list)
@@ -1095,11 +1103,11 @@ class BlobTrackData(torch.utils.data.Dataset):
                 "image_size": torch.tensor([1.0, 1.0]),
                 "patches": torch.stack([item["patch"] for item in batch]),
             }
+            res["is_pdf"] = torch.tensor(
+                [int(item["is_pdf"]) for item in batch], dtype=torch.long
+            )
             if "mask" in batch[0]:
                 res["masks"] = torch.stack([item["mask"] for item in batch])
-                res["is_anchor"] = torch.tensor(
-                    [int(item["is_anchor"]) for item in batch], dtype=torch.long
-                )
             return res
 
         return collate_track
@@ -1110,13 +1118,13 @@ class BlobTrackData(torch.utils.data.Dataset):
         FPR95 is NaN for any batch with no same-``track_id`` pair (see
         ``evaluate.fpr_from_distances``). In a ``.tracks`` file each ``track_id``
         appears at most once per sequence, so a track's matching observations live
-        in *other* sequences (its anchor, or another media of the board) — a
+        in *other* sequences (its PDF render, or another media of the board) — a
         contiguous ``shuffle=False`` slice almost never captures two of them, hence
         the all-NaN validation. This sampler instead groups patches by ``track_id``
         and packs each batch as:
 
           * whole track groups (ids with >= 2 patches) — each already carries its
-            anchor patch, so anchor<->tracked positives are guaranteed — filling
+            PDF patch, so pdf<->tracked positives are guaranteed — filling
             ``1 - confuser_fraction`` of the batch, then
           * that many distinct confusers (singleton ids + the untracked block),
             each used at most once so they only ever act as negatives (no
@@ -1144,7 +1152,7 @@ if __name__ == "__main__":
     val_sequences = []
     with h5py.File(track_file, "r") as f:
         for i, seq in enumerate(f["sequences"].keys()):
-            # Names are `<media>_<uid>` (tracked) or `<uid>` (anchor); take the
+            # Names are `<media>_<uid>` (tracked) or `<uid>` (PDF render); take the
             # trailing hex uid either way.
             m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", seq)
             if m is None:

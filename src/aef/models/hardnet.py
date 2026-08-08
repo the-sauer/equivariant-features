@@ -341,12 +341,12 @@ class HardNetLogPolar(nn.Module):
       the relation between ripples that ``|X_k|`` alone discards. All three are exactly
       as rotation-invariant as the max-pool; they differ in how much shape survives.
     - ``learned_mask=True`` makes the head *mask-aware*. The pre-head feature map is
-      downweighted by the **GT mask on anchors** (identity view, where the off-board
+      downweighted by the **GT mask on PDF patches** (identity view, where the off-board
       region is given) and by a **predicted** ``m_pred`` on targets (warped view, where
       it is not) — a small 1x1 predictor emits ``m_pred`` in [0, 1] from the trunk
       features. ``forward`` returns ``(descriptor, m_pred)`` so the caller can add a
       standalone loss supervising ``m_pred`` on the **targets** against their true board
-      coverage (the anchor's mask is given, not predicted). The predictor thus learns to
+      coverage (the PDF patch's mask is given, not predicted). The predictor thus learns to
       supply, at test time, the target mask that is no longer available.
 
     Both leave the default ``head="maxpool"``/``learned_mask=False`` path — including
@@ -436,24 +436,24 @@ class HardNetLogPolar(nn.Module):
                 self.mask_head = nn.Sequential(nn.Conv2d(depths[2], 1, 1), nn.Sigmoid())
         self.apply(weights_init)
 
-    def _validity_weight(self, feat, mask, m_pred, is_anchor):
-        """Per-cell validity weight at trunk resolution: GT on anchors, ``m_pred`` else."""
+    def _validity_weight(self, feat, mask, m_pred, is_pdf):
+        """Per-cell validity weight at trunk resolution: GT on PDF patches, ``m_pred`` else."""
         _, _, A, R = feat.shape
-        if mask is None or is_anchor is None:
+        if mask is None or is_pdf is None:
             return m_pred                                     # no GT routing available
         gt = F.adaptive_avg_pool2d(mask, (A, R))              # (B,1,A,R), board coverage
-        a = is_anchor.view(-1, 1, 1, 1).to(feat.dtype)
+        a = is_pdf.view(-1, 1, 1, 1).to(feat.dtype)
         return a * gt + (1.0 - a) * m_pred
 
-    def forward(self, patches, mask=None, is_anchor=None):
+    def forward(self, patches, mask=None, is_pdf=None):
         # Default path: identical to the original (self.features only exists then).
         if hasattr(self, "features"):
             x = self.features(input_norm(patches))
             return L2Norm()(x.view(x.size(0), -1))
 
-        # Masked input-norm on anchors (known off-board fill); plain on targets/unknown.
-        if self.learned_mask and mask is not None and is_anchor is not None:
-            a = is_anchor.view(-1, 1, 1, 1).to(patches.dtype)
+        # Masked input-norm on PDF patches (known off-board fill); plain on targets/unknown.
+        if self.learned_mask and mask is not None and is_pdf is not None:
+            a = is_pdf.view(-1, 1, 1, 1).to(patches.dtype)
             innorm_mask = a * mask + (1.0 - a) * torch.ones_like(mask)
             x = input_norm(patches, mask=innorm_mask)
         else:
@@ -463,7 +463,7 @@ class HardNetLogPolar(nn.Module):
         m_pred = None
         if self.learned_mask:
             m_pred = self.mask_head(feat)                     # (B, 1, A, R) in [0, 1]
-            feat = feat * self._validity_weight(feat, mask, m_pred, is_anchor)
+            feat = feat * self._validity_weight(feat, mask, m_pred, is_pdf)
         d = L2Norm()(self.head(feat).view(patches.size(0), -1))
         return (d, m_pred) if self.learned_mask else d
 

@@ -199,18 +199,18 @@ measurement.
 
 Part of every patch is off-board junk. The two views are treated **asymmetrically**:
 
-- **Anchor** (identity view, clean board): its board mask is *given* to the network and
-  used directly — the learned predictor is not used here. (For the anchor the validity
-  is just the out-of-bounds `oob` region, since the clean board fills the frame.)
+- **Reference patch** (`is_pdf`: identity view, clean board): its board mask is *given*
+  to the network and used directly — the learned predictor is not used here. (There the
+  validity is just the out-of-bounds `oob` region, since the clean board fills the frame.)
 - **Target** (warped view, composited on a real background): the predictor emits a
   per-cell estimate `m_pred ∈ [0, 1]` from the trunk features, which is *both* used to
   weight the target's descriptor *and* trained by a standalone loss.
 
 Concretely the head:
 
-- downweights the pre-head feature map by the **given GT mask on anchors** and by the
-  **predicted `m_pred` on targets** (masked `input_norm` likewise uses the given mask on
-  anchors);
+- downweights the pre-head feature map by the **given GT mask on `is_pdf` patches** and
+  by the **predicted `m_pred` on targets** (masked `input_norm` likewise uses the given
+  mask there);
 - returns `(descriptor, m_pred)` so `process_batch_blobs` can add a BCE that supervises
   `m_pred` **on the targets** against their *true* board coverage (weight
   `training.mask_loss_weight`).
@@ -233,7 +233,8 @@ supervision — for the ablation.
 
 Two honest caveats, both to **measure**, not assume:
 
-- **Anchor-white vs target-real-background.** The anchor's off-board is bland/white; a
+- **Reference-white vs target-real-background.** The reference patch's off-board is
+  bland/white; a
   real target's is textured scene. The predictor only generalizes to test-time targets
   if it has *seen* varied junk — so this pairs with strong off-board augmentation
   (`garbage_fraction` / background variety), otherwise it overfits the training scenes.

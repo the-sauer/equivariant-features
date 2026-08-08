@@ -116,7 +116,7 @@ def test_phase_heads_compose_with_the_learned_mask():
     model = HardNetLogPolar(patch_size=64, head="bispectrum", n_harmonics=5,
                             learned_mask=True).eval()
     d, m_pred = model(torch.rand(4, 1, 64, 64), mask=torch.ones(4, 1, 64, 64),
-                      is_anchor=torch.tensor([True, False, True, False]))
+                      is_pdf=torch.tensor([True, False, True, False]))
     assert d.shape == (4, 128) and m_pred.shape[:2] == (4, 1)
 
 

@@ -74,18 +74,18 @@ def _fill_invalid_with_mean(x, mask):
     return x * m + mean * (1.0 - m)
 
 
-def _gate_input(x, mask, is_anchor):
+def _gate_input(x, mask, is_pdf):
     """Neutralize the known off-board region — on ANCHORS only (elsewhere unknown)."""
-    a = is_anchor.view(-1, 1, 1, 1).to(x.dtype)
+    a = is_pdf.view(-1, 1, 1, 1).to(x.dtype)
     return _fill_invalid_with_mean(x, a * mask + (1.0 - a) * torch.ones_like(mask))
 
 
-def _validity_weight(size, mask, m_pred, is_anchor):
-    """Per-cell validity at feature resolution: GT on anchors, ``m_pred`` elsewhere."""
-    if mask is None or is_anchor is None:
+def _validity_weight(size, mask, m_pred, is_pdf):
+    """Per-cell validity at feature resolution: GT on PDF patches, ``m_pred`` elsewhere."""
+    if mask is None or is_pdf is None:
         return m_pred                       # no GT routing available (e.g. validation)
     gt = F.adaptive_avg_pool2d(mask, size)   # (B, 1, H, W) board coverage
-    a = is_anchor.view(-1, 1, 1, 1).to(m_pred.dtype)
+    a = is_pdf.view(-1, 1, 1, 1).to(m_pred.dtype)
     return a * gt + (1.0 - a) * m_pred
 
 
@@ -170,7 +170,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
 
     ``learned_mask=True`` makes it board-validity aware, with the same contract as
     ``HardNetLogPolar`` and ``BlobDescriptorEfficient`` (see the module-level notes):
-    the 24x24 feature field is weighted by the GT mask on anchors and by a predicted
+    the 24x24 feature field is weighted by the GT mask on PDF patches and by a predicted
     ``m_pred`` elsewhere, right before the dense readout conv, and ``forward`` returns
     ``(descriptor, m_pred)``.
 
@@ -237,13 +237,13 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
         if learned_mask:
             self.mask_head = _mask_predictor(c_hid3, self.s)
 
-    def forward(self, x, mask=None, is_anchor=None):
+    def forward(self, x, mask=None, is_pdf=None):
         if not self.learned_mask:
             x = escnn.nn.GeometricTensor(x, self.field_type)
             return self.net(x).tensor
 
-        if mask is not None and is_anchor is not None:
-            x = _gate_input(x, mask, is_anchor)
+        if mask is not None and is_pdf is not None:
+            x = _gate_input(x, mask, is_pdf)
         x = escnn.nn.GeometricTensor(x, self.field_type)
 
         layers = list(self.net.children())
@@ -251,7 +251,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
             x = layer(x)
 
         m_pred = torch.sigmoid(self.mask_head(x).tensor)          # (B, 1, 24, 24)
-        w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_anchor)
+        w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf)
         x = escnn.nn.GeometricTensor(x.tensor * w, x.type)
 
         for layer in layers[self._readout_from:]:
@@ -281,7 +281,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
 
     **Board-validity masking** (``learned_mask``, default off): the *data-dependent*
     counterpart of the fixed centre mask — it removes the off-board part of the patch,
-    which is real background rather than a fixed geometric region. GT mask on anchors,
+    which is real background rather than a fixed geometric region. GT mask on PDF patches,
     predicted ``m_pred`` on targets, ``(descriptor, m_pred)`` returned; see the
     module-level notes. Both heads consume the weight where it matters: ``attention``
     multiplies it into the saliency it pools with, ``dense`` weights the field before
@@ -384,9 +384,9 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         if learned_mask:
             self.mask_head = _mask_predictor(c3, s)
 
-    def forward(self, x, mask=None, is_anchor=None):
-        if self.learned_mask and mask is not None and is_anchor is not None:
-            x = _gate_input(x, mask, is_anchor)
+    def forward(self, x, mask=None, is_pdf=None):
+        if self.learned_mask and mask is not None and is_pdf is not None:
+            x = _gate_input(x, mask, is_pdf)
         if self.inner_mask is not None:
             x = x * self.inner_mask
         x = escnn.nn.GeometricTensor(x, self.field_type)
@@ -395,7 +395,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         m_pred = w = None
         if self.learned_mask:
             m_pred = torch.sigmoid(self.mask_head(x).tensor)   # [B, 1, H, W] validity
-            w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_anchor)
+            w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf)
 
         if self.head_type == "dense":
             if w is not None:

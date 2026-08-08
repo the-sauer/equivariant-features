@@ -11,11 +11,11 @@
 # synthetic-descriptor checkpoint with `+training.init_from_checkpoint=<path>` (loads
 # model weights only, epoch 0) — see launch_track_matrix.sh.
 #
-# Split: only 18 of the 50 boards currently have tracked media (real anchor<->tracked
-# positives); the other 32 are anchor-only (they still ride in TRAIN as negatives and
+# Split: only 18 of the 50 boards currently have tracked media (real pdf<->tracked
+# positives); the other 32 are pdf-only (they still ride in TRAIN as negatives and
 # will gain tracked media later). VAL is drawn from 5 tracked-media boards (25d, 5b6,
 # f80 = multi-media; cf2, f75 = single-media hard cases) ~2.3k real positives; every
-# other board (13 tracked-media + 32 anchor-only) is in TRAIN. Disjoint by board uid.
+# other board (13 tracked-media + 32 pdf-only) is in TRAIN. Disjoint by board uid.
 defaults:
   - _self_
 
@@ -48,8 +48,8 @@ training:
       # near-frontal band own every batch and the oblique tail — the regime an affine-
       # equivariant descriptor exists for — contributes a handful of pairs per epoch.
       # With this on, each batch asks EVERY populated band for the same number of
-      # in-band patches, drawn as positive pairs (an observation + its GT anchor, or
-      # two in-band observations once the anchor is spent). A band without enough
+      # in-band patches, drawn as positive pairs (an observation + its GT rendering,
+      # or two in-band observations once that one is spent). A band without enough
       # disjoint pairs contributes all it has rather than repeating a patch (a
       # duplicate inside a batch is a distance-0 fake positive); the sampler prints
       # the per-band quota, ceiling and resampling factor on startup.
@@ -65,7 +65,7 @@ training:
       # band (shortest epoch, least repetition), "max" = one pass over the most crowded
       # one (longest, heaviest repetition of the rare bands).
       view_angle_band_target: median
-      # 45 boards = 13 tracked-media (real positives) + 32 anchor-only (negatives now,
+      # 45 boards = 13 tracked-media (real positives) + 32 pdf-only (negatives now,
       # tracked media added later). Disjoint from the val boards below.
       sequences:
         - "028"
@@ -123,6 +123,10 @@ training:
       # - name: CosineAnnealingLR
   loss:
     - name: SupCon
+    # Proxy-anchored variant: the board rendering (`is_pdf`) is its blob's proxy —
+    # outer sum over those, A(i)/P(i) over image patches only, so every image<->image
+    # term drops out. See docs/configs_and_training.md (contrastive losses).
+    # - name: ProxyAnchoredSupCon
     # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
     # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
     # patches that even have a positive present.
@@ -141,7 +145,7 @@ validation:
       min_track_length: 2
       load_into_memory: true
       include_untracked: true
-      # 5 tracked-media boards (~2.3k real anchor<->tracked positives). Disjoint from train.
+      # 5 tracked-media boards (~2.3k real pdf<->tracked positives). Disjoint from train.
       sequences:
         - "08d"
         - "5b6"
@@ -150,6 +154,11 @@ validation:
         - "f80"
   loss:
     - name: FPR95
+    # Proxy-anchored counterpart: FPR95 over pdf<->image pairs only, i.e. the matching
+    # the descriptor is actually deployed for. NOT comparable with FPR95 (different pair
+    # population), so switching restarts the validation series — and `best.pth` follows
+    # whichever entry carries weight.
+    # - name: ProxyAnchoredFPR95
     # - name: Recall1
     #   weight: 0
     # - name: PosCoverage

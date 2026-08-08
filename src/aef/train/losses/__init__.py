@@ -15,4 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from .blob import BlobLoss
-from .contrastive import Contrastive, FPR95, SupCon, Recall1, PosCoverage
+from .contrastive import (Contrastive, FPR95, ProxyAnchoredFPR95, SupCon,
+                          ProxyAnchoredSupCon, Recall1, PosCoverage)
+from .SupConLoss import SupConLoss

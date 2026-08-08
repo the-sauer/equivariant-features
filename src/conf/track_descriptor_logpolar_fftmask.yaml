@@ -1,6 +1,6 @@
 # Log-polar descriptor with the DFT-magnitude head + learned mask-aware pooling, on
 # track data. Model block mirrors blob_descriptor_logpolar_fftmask. `with_mask: true`
-# feeds the per-patch board-in-frame masks stored in the `.tracks` file so the anchor
+# feeds the per-patch board-in-frame masks stored in the `.tracks` file so the PDF
 # mask supervision (and mask-aware pooling) matches the source model.
 defaults:
   - track_descriptor_base

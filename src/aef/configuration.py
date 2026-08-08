@@ -91,7 +91,7 @@ class TrainingConfig(TrainValConfig):
     # it changes nothing for existing configs.
     mask_loss_weight: float = 1.0
     # Force the mask path off for a mask-aware model (``learned_mask=True``): it is
-    # then called as ``model(patches)`` and gets no GT mask / anchor flag. The ablation
+    # then called as ``model(patches)`` and gets no GT mask / `is_pdf` flag. The ablation
     # switch, and what lets a mask-aware model run on a dataset without masks. Models
     # that are not mask-aware never see the mask kwargs regardless.
     ignore_mask: bool = False

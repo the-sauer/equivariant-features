@@ -4,7 +4,7 @@
 `homography_frame_ids`) and the patches per OBSERVATION (`frame_id`), so the filter
 is only correct if that join is. These tests pin the join, the band bounds, and the
 alignment of everything that rides along with the patches (ids, masks, affine shapes,
-is_anchor) — a filter that silently mismatched them would still "work" and quietly
+is_pdf) — a filter that silently mismatched them would still "work" and quietly
 evaluate the wrong patches against the wrong labels.
 """
 
@@ -46,8 +46,8 @@ def _tracked(name_patch_value, track_ids, frame_ids, hom_frame_ids, angles_deg):
     )
 
 
-def _anchor(patch_values, track_ids):
-    """A GT anchor sequence: no frame_id / view_angles, one observation per track."""
+def _pdf_seq(patch_values, track_ids):
+    """A GT (board-PDF) sequence: no frame_id / view_angles, one observation per track."""
     n = len(track_ids)
     return _Group(
         {
@@ -66,7 +66,7 @@ def _anchor(patch_values, track_ids):
 
 @pytest.fixture(name="tracks_file")
 def _tracks_file():
-    """One board (uid `a1`): 4 tracked observations over 3 frames + its anchors.
+    """One board (uid `a1`): 4 tracked observations over 3 frames + its PDF patches.
 
     Frame 7 -> 5 deg, frame 3 -> 25 deg, frame 5 -> 55 deg. The pose table is
     deliberately NOT in frame order, and observations are not grouped by frame, so a
@@ -81,7 +81,7 @@ def _tracks_file():
                 hom_frame_ids=[3, 7, 5],
                 angles_deg=[25.0, 5.0, 55.0],
             ),
-            "a1": _anchor(patch_values=[1, 2, 3], track_ids=[1, 2, 3]),
+            "a1": _pdf_seq(patch_values=[1, 2, 3], track_ids=[1, 2, 3]),
         }
     }
 
@@ -91,27 +91,27 @@ def _values(patches):
 
 
 def test_no_band_loads_everything(tracks_file):
-    patches, _masks, ids, _lengths, _affine, is_anchor, _ang = _load_all_sequences(
+    patches, _masks, ids, _lengths, _affine, is_pdf, _ang = _load_all_sequences(
         tracks_file, with_mask=True)
     assert _values(patches) == [1, 2, 3, 10, 20, 30, 40]
     assert len(ids) == 7
-    assert is_anchor.sum() == 3
+    assert is_pdf.sum() == 3
 
 
-def test_band_keeps_only_in_band_observations_plus_anchors(tracks_file):
-    # [0, 10) deg -> frame 7 only: observations 10 and 40; all 3 anchors ride along.
-    patches, _masks, _ids, _lengths, _affine, is_anchor, _ang = _load_all_sequences(
+def test_band_keeps_only_in_band_observations_plus_pdf_patches(tracks_file):
+    # [0, 10) deg -> frame 7 only: observations 10 and 40; all 3 PDF patches ride along.
+    patches, _masks, _ids, _lengths, _affine, is_pdf, _ang = _load_all_sequences(
         tracks_file, view_angle_range=[0, 10])
     assert _values(patches) == [1, 2, 3, 10, 40]
-    assert is_anchor.sum() == 3
+    assert is_pdf.sum() == 3
 
 
 def test_band_boundaries_are_half_open(tracks_file):
     # 25 deg belongs to [20, 30) and not to [10, 20) or [30, 40).
     def tracked_values(band):
-        patches, _m, _i, _l, _a, is_anchor, _ang = _load_all_sequences(
+        patches, _m, _i, _l, _a, is_pdf, _ang = _load_all_sequences(
             tracks_file, view_angle_range=band)
-        return sorted(int(p[0, 0]) for p, a in zip(patches, is_anchor) if not a)
+        return sorted(int(p[0, 0]) for p, a in zip(patches, is_pdf) if not a)
 
     assert tracked_values([20, 30]) == [20]
     assert tracked_values([10, 20]) == []
@@ -120,9 +120,9 @@ def test_band_boundaries_are_half_open(tracks_file):
 
 
 def test_band_keeps_ids_masks_and_affine_aligned(tracks_file):
-    patches, masks, ids, _lengths, affine, is_anchor, _ang = _load_all_sequences(
+    patches, masks, ids, _lengths, affine, is_pdf, _ang = _load_all_sequences(
         tracks_file, with_mask=True, view_angle_range=[0, 10], unique_track_ids=False)
-    tracked = ~is_anchor.astype(bool)
+    tracked = ~is_pdf.astype(bool)
     values = patches[tracked][:, 0, 0]
     assert sorted(values.tolist()) == [10, 40]
     # masks / affine_shapes were built from the same per-observation value, and the
@@ -132,16 +132,16 @@ def test_band_keeps_ids_masks_and_affine_aligned(tracks_file):
     assert sorted(ids[tracked].tolist()) == [1, 3]
 
 
-def test_dropping_anchors_leaves_only_the_band(tracks_file):
-    patches, _m, _ids, _l, _a, is_anchor, _ang = _load_all_sequences(
-        tracks_file, view_angle_range=[0, 10], view_angle_keep_anchors=False)
+def test_dropping_pdf_patches_leaves_only_the_band(tracks_file):
+    patches, _m, _ids, _l, _a, is_pdf, _ang = _load_all_sequences(
+        tracks_file, view_angle_range=[0, 10], view_angle_keep_pdf=False)
     assert _values(patches) == [10, 40]
-    assert is_anchor.sum() == 0
+    assert is_pdf.sum() == 0
 
 
 def test_empty_band_yields_an_empty_dataset(tracks_file):
-    patches, _m, ids, _l, _a, _is_anchor, _ang = _load_all_sequences(
-        tracks_file, view_angle_range=[60, 70], view_angle_keep_anchors=False)
+    patches, _m, ids, _l, _a, _is_pdf, _ang = _load_all_sequences(
+        tracks_file, view_angle_range=[60, 70], view_angle_keep_pdf=False)
     assert patches.shape[0] == 0
     assert ids.shape[0] == 0
 
@@ -151,28 +151,28 @@ def test_observation_without_a_pose_entry_is_dropped(tracks_file):
     # dropped, never silently bucketed into a neighbouring frame's angle.
     tracks_file["sequences"]["media_a1"]["tracks"]["frame_id"] = np.asarray(
         [7, 3, 5, 99], dtype=np.int32)
-    patches, _m, _i, _l, _a, is_anchor, _ang = _load_all_sequences(
-        tracks_file, view_angle_range=[0, 10], view_angle_keep_anchors=False)
-    del is_anchor
+    patches, _m, _i, _l, _a, is_pdf, _ang = _load_all_sequences(
+        tracks_file, view_angle_range=[0, 10], view_angle_keep_pdf=False)
+    del is_pdf
     assert _values(patches) == [10]
 
 
 def test_view_angles_ride_along_with_the_patches(tracks_file):
     # The per-patch angle is what the band balancer bins, so it has to follow the same
-    # frame join as the filter: anchors NaN, tracked observations their frame's angle.
-    patches, _m, _i, _l, _a, is_anchor, angles = _load_all_sequences(tracks_file)
+    # frame join as the filter: PDF patches NaN, tracked observations their frame's angle.
+    patches, _m, _i, _l, _a, is_pdf, angles = _load_all_sequences(tracks_file)
     by_value = dict(zip((int(p[0, 0]) for p in patches), np.degrees(angles)))
     assert by_value[10] == pytest.approx(5.0)    # frame 7
     assert by_value[20] == pytest.approx(25.0)   # frame 3
     assert by_value[30] == pytest.approx(55.0)   # frame 5
     assert by_value[40] == pytest.approx(5.0)    # frame 7 again
-    assert np.isnan(angles[is_anchor.astype(bool)]).all()
+    assert np.isnan(angles[is_pdf.astype(bool)]).all()
 
 
 def test_view_angles_are_nan_without_a_pose_entry(tracks_file):
     tracks_file["sequences"]["media_a1"]["tracks"]["frame_id"] = np.asarray(
         [7, 3, 5, 99], dtype=np.int32)
-    patches, _m, _i, _l, _a, _anchor, angles = _load_all_sequences(tracks_file)
+    patches, _m, _i, _l, _a, _is_pdf, angles = _load_all_sequences(tracks_file)
     unmatched = [a for p, a in zip(patches, angles) if int(p[0, 0]) == 40]
     assert np.isnan(unmatched).all()
 
@@ -180,7 +180,7 @@ def test_view_angles_are_nan_without_a_pose_entry(tracks_file):
 def test_view_angles_are_nan_for_files_without_the_export(tracks_file):
     # No band filter -> an old file still loads, it just has no angles to balance on.
     del tracks_file["sequences"]["media_a1"]["tracks"]["view_angles"]
-    _p, _m, _i, _l, _a, _anchor, angles = _load_all_sequences(tracks_file)
+    _p, _m, _i, _l, _a, _is_pdf, angles = _load_all_sequences(tracks_file)
     assert np.isnan(angles).all()
 
 
@@ -192,7 +192,7 @@ def test_missing_view_angles_raises(tracks_file):
 
 def test_missing_view_angles_is_fine_without_a_band(tracks_file):
     del tracks_file["sequences"]["media_a1"]["tracks"]["view_angles"]
-    patches, _m, _i, _l, _a, _anchor, _ang = _load_all_sequences(tracks_file)
+    patches, _m, _i, _l, _a, _is_pdf, _ang = _load_all_sequences(tracks_file)
     assert patches.shape[0] == 7
 
 

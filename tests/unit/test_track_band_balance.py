@@ -71,16 +71,16 @@ def test_invalid_band_target_is_rejected(bad):
 
 # ------------------------------------------------------------------- pool layout --
 
-def test_pools_index_observations_by_band_and_keep_the_anchor_apart():
-    # Track 0: anchor (unbanded) + one 5 deg + one 45 deg observation.
-    # Track 1: anchor + two 5 deg observations.
+def test_pools_index_observations_by_band_and_keep_the_pdf_patch_apart():
+    # Track 0: PDF patch (unbanded) + one 5 deg + one 45 deg observation.
+    # Track 1: PDF patch + two 5 deg observations.
     pos_groups = [[0, 1, 2], [3, 4, 5]]
     bands = np.asarray([-1, 0, 4, -1, 0, 0])
     pools, groups = _band_pools(pos_groups, bands)
     assert sorted(pools) == [0, 4]
     assert sorted(pools[0]) == [(0, 1), (1, 4), (1, 5)]
     assert pools[4] == [(0, 2)]
-    assert groups[0] == ([0, 1, 2], [0])     # the anchor is the preferred partner
+    assert groups[0] == ([0, 1, 2], [0])     # the PDF patch is the preferred partner
     assert groups[1] == ([3, 4, 5], [3])
 
 
@@ -92,10 +92,10 @@ def test_group_with_no_banded_member_offers_no_draw():
 
 # ---------------------------------------------------------------------- packing --
 
-def _skewed(n_per_band, anchors=True):
+def _skewed(n_per_band, with_pdf=True):
     """Build (pools, groups, n_tracks) for bands of the given sizes.
 
-    Each track is an anchor + exactly one observation in one band, so a band's pool
+    Each track is a PDF patch + exactly one observation in one band, so a band's pool
     size equals its track count and the band composition of a batch is readable
     straight off the patch indices.
     """
@@ -103,7 +103,7 @@ def _skewed(n_per_band, anchors=True):
     for band, n in enumerate(n_per_band):
         for _ in range(n):
             base = len(bands)
-            if anchors:
+            if with_pdf:
                 pos_groups.append([base, base + 1])
                 bands.extend([-1, band])
             else:
@@ -149,7 +149,7 @@ def test_every_batch_carries_positive_pairs():
     batches = _pack_band_balanced(pools, groups, confusers=[], batch_size=60,
                                   confuser_fraction=0.5, n_batches=4,
                                   rng=random.Random(2))
-    # Every drawn track contributes exactly its (observation, anchor) pair.
+    # Every drawn track contributes exactly its (observation, PDF patch) pair.
     member_of = {i: gi for gi, (members, _) in enumerate(groups) for i in members}
     for batch in batches:
         sizes = collections.Counter(member_of[i] for i in batch)
@@ -173,22 +173,22 @@ def test_short_band_underfills_instead_of_duplicating():
 
 
 @pytest.mark.parametrize(
-    "n_obs, anchor, expected",
+    "n_obs, has_pdf, expected",
     [(1, True, 1), (2, True, 1), (3, True, 3), (4, True, 3), (6, True, 5),
      (1, False, 0), (2, False, 2), (3, False, 2), (4, False, 4)],
 )
-def test_band_capacity_counts_disjoint_pairs(n_obs, anchor, expected):
-    # One track: the anchor buys a 1-patch pair, the rest couple in twos, and an odd
+def test_band_capacity_counts_disjoint_pairs(n_obs, has_pdf, expected):
+    # One track: the PDF patch buys a 1-patch pair, the rest couple in twos, and an odd
     # observation left over at the end has nothing to pair with.
-    members = ([0] if anchor else []) + list(range(1, n_obs + 1))
-    groups = [(members, [0] if anchor else [])]
+    members = ([0] if has_pdf else []) + list(range(1, n_obs + 1))
+    groups = [(members, [0] if has_pdf else [])]
     assert _band_capacity([(0, i) for i in range(1, n_obs + 1)], groups) == expected
 
 
 def test_quota_counts_in_band_patches_not_pairs():
-    # Band 1's tracks have no anchor left over, so its instances are
+    # Band 1's tracks have no PDF patch left over, so its instances are
     # observation<->observation and put TWO in-band patches in each. Counting pairs
-    # instead of patches would let it overshoot the anchor-paired band 0.
+    # instead of patches would let it overshoot the pdf-paired band 0.
     pos_groups = [[2 * k, 2 * k + 1] for k in range(60)] + \
                  [[120 + 4 * k + j for j in range(4)] for k in range(30)]
     bands = [v for _ in range(60) for v in (-1, 0)] + [1] * 120
@@ -204,9 +204,9 @@ def test_quota_counts_in_band_patches_not_pairs():
         assert quota <= hist[1] <= quota + 1
 
 
-def test_a_track_drawn_by_two_bands_never_reuses_its_anchor():
-    # One track observed at 5 deg AND 45 deg (indices 1 and 2, anchor 0): both bands
-    # can draw it, but only one instance can take the anchor — the other has to pair
+def test_a_track_drawn_by_two_bands_never_reuses_its_pdf_patch():
+    # One track observed at 5 deg AND 45 deg (indices 1 and 2, PDF patch 0): both bands
+    # can draw it, but only one instance can take the PDF patch — the other has to pair
     # the two observations or drop out. Either way index 0 appears at most once.
     pos_groups = [[0, 1, 2]] + [[3 + 2 * k, 4 + 2 * k] for k in range(20)]
     bands = [-1, 0, 3] + [v for _ in range(20) for v in (-1, 0)]
@@ -220,7 +220,7 @@ def test_a_track_drawn_by_two_bands_never_reuses_its_anchor():
 
 
 def test_a_sparse_band_fills_its_quota_from_disjoint_pairs():
-    # A band with ONE track but five observations of it: the anchor pair plus two
+    # A band with ONE track but five observations of it: the PDF patch pair plus two
     # observation<->observation pairs are three disjoint positives, so the band is
     # not stuck at a single pair per batch.
     pos_groups = [[0, 1, 2, 3, 4, 5]] + [[6 + 2 * k, 7 + 2 * k] for k in range(40)]
@@ -247,8 +247,8 @@ def test_confusers_fill_the_negative_half_without_repeating():
 
 
 def test_tracked_only_groups_pair_two_observations():
-    # No anchors: the partner has to be the track's other observation.
-    pools, groups, _bands, _ = _skewed([30, 30], anchors=False)
+    # No PDF patches: the partner has to be the track's other observation.
+    pools, groups, _bands, _ = _skewed([30, 30], with_pdf=False)
     batches = _pack_band_balanced(pools, groups, confusers=[], batch_size=40,
                                   confuser_fraction=0.0, n_batches=3,
                                   rng=random.Random(6))
@@ -294,7 +294,7 @@ class _FakeFile(dict):
 
 
 def _fake_tracks_file():
-    """One board: 12 tracks, each an anchor + one observation, over three frames.
+    """One board: 12 tracks, each a PDF patch + one observation, over three frames.
 
     Frame angles put 6 tracks in the [0, 10) band, 3 in [20, 30) and 3 in [50, 60) —
     the same lopsided shape real footage has, small enough to assert on exactly.
