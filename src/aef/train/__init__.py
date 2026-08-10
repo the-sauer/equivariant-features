@@ -293,6 +293,22 @@ def train_func(process_batch):
                     for n, (_, _, r) in crit.items() if r]
         y_val = {k: [] for k in val_keys}
 
+        def append_curves(curves, values, n_epochs):
+            """Append this epoch's values, admitting keys the config never declared.
+
+            A ``process_batch`` function may report losses it computes itself rather
+            than pulling from the criterion — ``process_batch_blobs`` adds the
+            mask-supervision ``mask_bce`` this way — so the set of curves is only
+            known once a batch has run. A key that shows up late is backfilled with
+            NaN for the epochs before it existed, keeping every series the same
+            length as ``x``; a key that stops being reported gets NaN as well.
+            """
+            for n in values:
+                if n not in curves:
+                    curves[n] = [float("nan")] * (n_epochs - 1)
+            for n, v in curves.items():
+                v.append(values.get(n, float("nan")))
+
         lr = {sch.__class__.__name__: [] for sch in scheduler.values()}
 
         for epoch in range(start_epoch, cfg.training.num_epochs):
@@ -346,8 +362,7 @@ def train_func(process_batch):
             avg_losses = {n: v / n_items for n, v in cumulative_losses.items()}
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
-            for n, v in y_train.items():
-                v += [avg_losses[n]]
+            append_curves(y_train, avg_losses, len(x))
             # Figure heading: model type + the key scale hyperparameter (the single
             # ``scale`` config key when present, else the patch/log-polar scale param).
             model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
@@ -406,9 +421,13 @@ def train_func(process_batch):
                                 cumulative_losses[key] += l.item() * batch_items
                                 cumulative_items[key] += batch_items
                         loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
-                for k in val_keys:
-                    y_val[k].append(cumulative_losses[k] / cumulative_items[k] if cumulative_items[k] > 0 else float("nan"))
-                logging.info("finished epoch [%d/%d], avg val losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{k}: {y_val[k][-1]}" for k in val_keys))
+                # `cumulative_losses` may have grown past `val_keys` above: the
+                # process_batch function can report metrics of its own (see
+                # `append_curves`), so average over what was actually accumulated.
+                avg_val = {k: cumulative_losses[k] / cumulative_items[k]
+                           for k in cumulative_losses if cumulative_items[k] > 0}
+                append_curves(y_val, avg_val, len(x))
+                logging.info("finished epoch [%d/%d], avg val losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{k}: {v[-1]}" for k, v in y_val.items()))
 
                 _, ax = plt.subplots()
                 # Mark each series' best (lowest) value with a dashed rule in its
@@ -416,6 +435,7 @@ def train_func(process_batch):
                 # edge. Labels are collected first, then nudged apart in log space
                 # so that near-equal bests don't overprint each other.
                 best_marks = []
+                series_max = 0.0
                 for n, v in y_val.items():
                     (line,) = ax.semilogy(x, v, label=n)
                     finite = [val for val in v if math.isfinite(val)]
@@ -423,6 +443,7 @@ def train_func(process_batch):
                         best = min(finite)
                         ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
                         best_marks.append((best, line.get_color()))
+                        series_max = max(series_max, max(finite))
                 # Minimum vertical gap between labels, in decades (log10 units);
                 # walking bottom-to-top, push each label up if it crowds the one
                 # below it.
@@ -442,9 +463,13 @@ def train_func(process_batch):
                 ax.set_xlim(0, cfg.training.num_epochs)
                 # Lower bound defaults to 1e-3, but expands downward (with a little
                 # headroom) whenever a series dips below it so the curve stays visible.
+                # The top defaults to 1 — the FPR metrics live in [0, 1] — and likewise
+                # expands whenever a series exceeds it, which an unbounded loss such as
+                # `mask_bce` can do early on.
                 data_min = min((b for b, _ in best_marks), default=1e-3)
                 lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
-                ax.set_ylim(lower, 1)
+                upper = 1.0 if series_max <= 1.0 else series_max * 1.2
+                ax.set_ylim(lower, upper)
                 ax.legend()
                 plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
                 plt.close()

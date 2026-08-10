@@ -108,12 +108,34 @@ def test_ignore_mask_forces_the_plain_call():
     assert "mask_bce" not in losses
 
 
-def test_validation_withholds_the_gt_mask():
-    # At test time there is no mask, so validation must not feed one (nor score the
-    # predictor against it) — otherwise the reported metric is not reproducible.
+def test_validation_withholds_the_gt_mask_from_the_model():
+    # At test time there is no mask, so validation must not feed one to the network —
+    # otherwise the reported descriptor metric is not reproducible.
     model = _MaskAware()
     losses = _run(model, _batch(), _cfg(ignore_mask=False), validation=True)
     assert model.seen == [(False, False)]
+    # ...but the GT still reaches the LOSS, so the predictor gets its own curve. The
+    # model predicts `m_pred` either way, so scoring it here leaks nothing.
+    assert "mask_bce" in losses
+    bce, weight, report = losses["mask_bce"]
+    assert torch.isfinite(bce) and report
+    # Weight 0 at validation: a diagnostic curve must not shift what `best.pth` picks.
+    assert weight == 0.0
+
+
+def test_validation_mask_bce_stays_out_of_the_weighted_total():
+    # The config weight applies on the training path only.
+    losses = _run(_MaskAware(), _batch(), _cfg(ignore_mask=False, mask_loss_weight=3.0),
+                  validation=True)
+    assert losses["mask_bce"][1] == 0.0
+
+
+def test_validation_without_masks_reports_no_bce():
+    # A validation set that never precomputed masks (no "masks" key) simply has no
+    # curve to report, rather than raising.
+    data = _batch()
+    del data["masks"]
+    losses = _run(_MaskAware(), data, _cfg(ignore_mask=False), validation=True)
     assert "mask_bce" not in losses
 
 
