@@ -402,16 +402,36 @@ class HardNetLogPolar(nn.Module):
       standalone loss supervising ``m_pred`` on the **targets** against their true board
       coverage (the PDF patch's mask is given, not predicted). The predictor thus learns to
       supply, at test time, the target mask that is no longer available.
+    - ``cascade=True`` (needs ``learned_mask``) moves the masking from the *pooling* to
+      the *input*: the trunk runs twice, once to predict the validity and once on the
+      patch gated by that prediction. Motivation is the receptive field — at 64x64 the
+      trunk's nominal RF is 51 px, so a weight applied to the 16x16 feature grid can only
+      drop contaminated cells, never clean them, whereas a gate at the input removes the
+      off-board content before it spreads. Measured ceiling on `iteration_4` track data
+      (frozen trunk, GT mask as the gate): FPR95 0.0108 -> 0.0030, against 0.0087 for a
+      *perfect* mask used as a late weight — i.e. the input gate has ~3.6x the headroom.
+      Cashing it in requires training with the gate in the loop, because bolting a
+      predicted gate onto a late-weighted checkpoint scores 0.0217: the gate is far more
+      sensitive to mask error than the late weight is (gating with another patch's mask
+      scores 0.094, worse than not masking at all). ``cascade_late_weight`` additionally
+      keeps the late weighting on top of the gate; it is **off** by default because with
+      a correct gate it costs the entire gain (0.0030 -> 0.0088), plausibly because
+      multiplying the field by a spatially varying weight convolves the angular spectrum
+      the ``fft``-family heads read out. Costs a second trunk pass and **no parameters**:
+      the same ``trunk`` and ``mask_head`` serve both passes, so the ``state_dict`` is
+      identical to the non-cascade model and a warm start transfers exactly.
 
-    Both leave the default ``head="maxpool"``/``learned_mask=False`` path — including
+    All leave the default ``head="maxpool"``/``learned_mask=False`` path — including
     its ``state_dict`` keys — byte-for-byte identical to the original.
     """
 
     def __init__(self, in_channels=1, patch_size=64, slim=False,
                  circular_pad=True, antialias=True,
                  head="maxpool", n_harmonics=None, bispectrum_normalize=True,
-                 learned_mask=False, **_):
+                 learned_mask=False, cascade=False, cascade_late_weight=False, **_):
         super().__init__()
+        if cascade and not learned_mask:
+            raise ValueError("cascade=True needs learned_mask=True — the gate IS m_pred")
         if patch_size == 32:
             kernel_size, padding = 3, 1
         elif patch_size == 64:
@@ -423,6 +443,8 @@ class HardNetLogPolar(nn.Module):
         self.patch_size = patch_size
         self.head_type = head
         self.learned_mask = learned_mask
+        self.cascade = cascade
+        self.cascade_late_weight = cascade_late_weight
         pool = patch_size // 4          # spatial size after the two downsamples
         depths = [16, 32, 64] if slim else [32, 64, 128]
 
@@ -499,11 +521,37 @@ class HardNetLogPolar(nn.Module):
         a = is_pdf.view(-1, 1, 1, 1).to(feat.dtype)
         return a * gt + (1.0 - a) * m_pred
 
+    def _gate(self, patches, mask, is_pdf):
+        """Cascade pass 1 -> the per-pixel gate, and the ``m_pred`` that produced it.
+
+        The PDF patch keeps its GT gate: its mask is the board's own rendering, known
+        offline at test time too, so predicting it there would throw away information.
+        The target — the view whose mask does not exist at test time — is gated by the
+        prediction, upsampled from the trunk grid to patch resolution.
+        """
+        m_pred = self.mask_head(self.trunk(input_norm(patches)))
+        gate = F.interpolate(m_pred, size=patches.shape[-2:], mode="bilinear",
+                             align_corners=False)
+        if mask is not None and is_pdf is not None:
+            a = is_pdf.view(-1, 1, 1, 1).to(patches.dtype)
+            gate = a * mask + (1.0 - a) * gate
+        return gate, m_pred
+
     def forward(self, patches, mask=None, is_pdf=None):
         # Default path: identical to the original (self.features only exists then).
         if hasattr(self, "features"):
             x = self.features(input_norm(patches))
             return L2Norm()(x.view(x.size(0), -1))
+
+        if self.cascade:
+            gate, m_pred = self._gate(patches, mask, is_pdf)
+            # Gradients reach mask_head through BOTH the gate and the BCE — that is what
+            # "in the loop" buys: the predictor is trained for the job it actually does.
+            feat = self.trunk(input_norm(patches, mask=gate))
+            if self.cascade_late_weight:
+                feat = feat * self._validity_weight(feat, mask, m_pred, is_pdf)
+            d = L2Norm()(self.head(feat).view(patches.size(0), -1))
+            return d, m_pred
 
         # Masked input-norm on PDF patches (known off-board fill); plain on targets/unknown.
         if self.learned_mask and mask is not None and is_pdf is not None:

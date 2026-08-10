@@ -1,0 +1,54 @@
+# Log-polar descriptor, DFT-magnitude head, mask applied as an INPUT GATE (`cascade`)
+# instead of as a late weight on the pooling — trained with the gate in the loop.
+#
+# Why: the trunk's nominal receptive field at 64x64 is 51 px, so weighting the 16x16
+# feature grid can only drop contaminated cells, never clean them. Measured on
+# `iteration_4` track data with a frozen trunk: a *correct* mask used as an input gate
+# reaches FPR95 0.0030 against 0.0087 for a *perfect* mask used as a late weight and
+# 0.0108 for the shipped predictor — ~3.6x the headroom. That gain is NOT available by
+# bolting a predicted gate onto a late-weighted checkpoint (0.0217): the gate is much
+# more sensitive to mask error than the late weight, so the predictor has to be trained
+# for the job it actually does. Hence this config.
+#
+# `cascade` adds no parameters (the same trunk and mask_head serve both passes), so
+# `training.init_from_checkpoint` transfers a late-weighted run exactly — warm-start
+# from a `track_descriptor_logpolar_fftmask` run and the only thing that changes is
+# where the mask is applied. Costs a second trunk pass per step.
+#
+# `cascade_late_weight: false` — keeping the late weight on top of a correct gate costs
+# the whole gain (0.0030 -> 0.0088); multiplying the field by a spatially varying weight
+# convolves the angular spectrum the fft head reads out.
+defaults:
+  - track_descriptor_base
+  - _self_
+  - track_angle_validation
+
+scale: 96
+
+model:
+  name: HardNetLogPolar
+  params:
+    in_channels: 1
+    patch_size: 64
+    head: fft
+    # 4, not the 5 of the fftmask leaf: it must match the CONTROL arm this is compared
+    # against (`logpolar_fftmask` in launch_track_matrix.sh forces 4), and any checkpoint
+    # it warm-starts from — the head conv is (n_harmonics, patch/4)-shaped, so 5 would
+    # neither load nor be comparable.
+    n_harmonics: 4
+    learned_mask: true
+    cascade: true
+    cascade_late_weight: false
+
+training:
+  ignore_mask: false
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      patch_type: logpolar
+      with_mask: true
+validation:
+  dataset:
+    params:
+      patch_type: logpolar
+      with_mask: true

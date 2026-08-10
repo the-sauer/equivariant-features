@@ -37,6 +37,14 @@ declare -A CONFIG=(
   [logpolar_fftmask]=track_descriptor_logpolar_fftmask
   [logpolar_relphase_mask]=track_descriptor_logpolar_fftmask
   [logpolar_bispectrum_mask]=track_descriptor_logpolar_fftmask
+  # Mask as an INPUT GATE instead of a late weight on the pooling (two trunk passes).
+  # `logpolar_cascade` is the A-arm of that experiment, `logpolar_fftmask` its control —
+  # submit BOTH, at the same batch size, or the comparison means nothing. The `_late`
+  # variant keeps the late weight on top of the gate (see the config's header for why
+  # that is expected to lose). Costs ~2x the activation memory, hence the batch-size
+  # note in the header.
+  [logpolar_cascade]=track_descriptor_logpolar_cascade
+  [logpolar_cascade_late]=track_descriptor_logpolar_cascade
   [efficient8]=track_descriptor_efficient
   [efficient4]=track_descriptor_efficient
   # Learned board-validity masking on the steerable (escnn) descriptors — the cartesian
@@ -47,7 +55,7 @@ declare -A CONFIG=(
   [steerable_mask]=track_descriptor_steerable_mask
 )
 # Submission order (slowest last); must cover every CONFIG key.
-NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask steerable steerable_mask)
+NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask logpolar_cascade logpolar_cascade_late steerable steerable_mask)
 # What a bare (no network arg) invocation submits: the log-polar angular-head ladder
 # (max-pool/circ -> fft -> relphase/bispectrum -> fft+mask), matching
 # launch_training_matrix.sh's default.
@@ -65,6 +73,8 @@ declare -A SCALES=(
   [logpolar_fftmask]="96"
   [logpolar_relphase_mask]="96"
   [logpolar_bispectrum_mask]="96"
+  [logpolar_cascade]="96"
+  [logpolar_cascade_late]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
   [efficient8_mask]="8 16 32 64 96 128"
@@ -98,6 +108,10 @@ declare -A NET_EXTRA=(
   [logpolar_relphase_mask]="model.name=HardNetLogPolar ++model.params.head=relphase ++model.params.n_harmonics=4"
   [logpolar_bispectrum_mask]="model.name=HardNetLogPolar ++model.params.head=bispectrum ++model.params.n_harmonics=4"
   [logpolar_fftmask]="++model.params.n_harmonics=4"
+  # The config already sets cascade=true / cascade_late_weight=false; only the `_late`
+  # arm flips the second one.
+  [logpolar_cascade]=""
+  [logpolar_cascade_late]="++model.params.cascade_late_weight=true"
   # C8/C4 switch; the masking itself is in the *_mask configs (model `learned_mask` +
   # dataset `with_mask`), not overridden here.
   [efficient8_mask]="model.params.n_rotations=8"
@@ -110,6 +124,12 @@ MEM="${MEM:-64GB}"
 CPUS="${CPUS:-10}"
 TIME="${TIME:-24:00:00}"
 LOGDIR="${LOGDIR:-logs}"
+
+# Hydra overrides appended to EVERY job in the matrix. Use it for settings that must be
+# IDENTICAL across the arms of a comparison — a batch size pinned here applies to all of
+# them, where a per-net NET_EXTRA entry would silently give one arm a different one.
+#   EXTRA_OVERRIDES="training.batch_size=2048" ./launch_track_matrix.sh ...
+EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 
 DRY_RUN="${DRY_RUN:-0}"                       # DRY_RUN=1 -> print instead of submit
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,6 +163,9 @@ while [[ $# -gt 0 ]]; do
       echo "  -n, --name NAME  group runs under <YYYY_MM_DD>_NAME inside the log dir"
       echo "  network ...      restrict to given networks (default: ${DEFAULT_SWEEP[*]})"
       echo "  DRY_RUN=1 (env)  print jobs instead of submitting"
+      echo "  EXTRA_OVERRIDES= (env) hydra overrides appended to every job (e.g."
+      echo "                   training.batch_size=2048) — use for settings that must"
+      echo "                   match across the arms of a comparison"
       exit 0 ;;
     -*) echo "!! unknown option '$1'" >&2; exit 1 ;;
     *)  NETS+=("$1"); shift ;;
@@ -215,7 +238,7 @@ cd deps/BlobBoards.jl
 pixi run python ../../src/run_training.py \\
   --config-name ${cfg} scale=${scale} \\
   "track_path=${TRACK_PATH}" \\
-  +experiment_name=${exp} ${extra}
+  +experiment_name=${exp} ${extra} ${EXTRA_OVERRIDES}
 EOF
 )
   if [[ "$DRY_RUN" == "1" ]]; then
