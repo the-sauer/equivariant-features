@@ -136,6 +136,8 @@ change, no invariance change. They ship as two more angular heads in
 ```python
 X = torch.fft.rfft(feat, dim=-2)              # already computed by AngularRFFTMag
 mag   = X.abs()                               # current head
+# (the code spells this as `angular_rdft`, a real (A, F) matmul returning (re, im) —
+#  same numbers, but exportable: see "Why the code does not call torch.fft" below)
 relph = X * (X[:, :, 1:2, :].conj() / X[:, :, 1:2, :].abs()).pow(k_index)   # relative-phase
 bisp  = X[:, :, k1] * X[:, :, k2] * X[:, :, k1 + k2].conj()                 # low-order bispectrum
 # feed [mag ; Re/Im(relph)]  or  [mag ; Re/Im(bisp)]  into the final Conv/Linear

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -134,6 +136,12 @@ class LogPolarPad(nn.Module):
     In a log-polar patch the angular axis (dim -2) is periodic — row 0 and row H-1 are
     neighbours — while the radial axis (dim -1) is not (inner radius != outer radius).
     ``nn.Conv2d(padding_mode="circular")`` is no use here because it would wrap *both*.
+
+    The wrap is spelled as a slice-and-concat rather than ``F.pad(mode="circular")``
+    because the latter exports to ONNX ``Pad(mode="wrap")``, which onnxruntime's CUDA
+    EP does not implement — every one of these (ten in the log-polar trunk) would drop
+    the graph back to the CPU. ``Slice``/``Concat`` are accelerated everywhere and the
+    result is identical.
     """
 
     def __init__(self, pad):
@@ -143,8 +151,9 @@ class LogPolarPad(nn.Module):
     def forward(self, x):
         if self.pad == 0:
             return x
-        x = F.pad(x, (0, 0, self.pad, self.pad), mode="circular")            # angular wraps
-        return F.pad(x, (self.pad, self.pad, 0, 0), mode="constant", value=0)  # radial does not
+        p = self.pad
+        x = torch.cat((x[..., -p:, :], x, x[..., :p, :]), dim=-2)             # angular wraps
+        return F.pad(x, (p, p, 0, 0), mode="constant", value=0)               # radial does not
 
 
 class LogPolarBlurPool(nn.Module):
@@ -166,10 +175,47 @@ class LogPolarBlurPool(nn.Module):
         self.channels = channels
 
     def forward(self, x):
-        x = F.pad(x, (0, 0, 1, 1), mode="circular")
-        x = F.pad(x, (1, 1, 0, 0), mode="replicate")
+        # Slice-and-concat instead of F.pad(mode="circular"/"replicate"): see LogPolarPad.
+        x = torch.cat((x[..., -1:, :], x, x[..., :1, :]), dim=-2)   # angular wraps
+        x = torch.cat((x[..., :1], x, x[..., -1:]), dim=-1)         # radial replicates
         x = F.conv2d(x, self.kernel, groups=self.channels)
         return x[..., ::2, ::2]
+
+
+def angular_rdft(x, n_harmonics=None):
+    """``torch.fft.rfft(x, dim=-2)``, spelled as a real matmul; returns ``(re, im)``.
+
+    Deliberately not ``torch.fft``: the exporter turns ``rfft`` into the ONNX ``DFT``
+    op, which onnxruntime only implements on the **CPU** execution provider — in a GPU
+    session the head (and the copies in and out of host memory around it) dominate
+    inference. ONNX has no complex dtype either, so the complex arithmetic downstream
+    would be decomposed anyway.
+
+    The angular axis here is tiny — ``A = patch_size // 4``, and only the ``F`` lowest
+    bins survive — so the transform is just an ``(A, F)`` matmul, which at this size
+    beats the FFT even in eager torch and stays on the accelerator. The basis is rebuilt
+    on every call: it is a few hundred elements (and a compile-time constant once
+    exported), and keeping it out of the state dict means checkpoints stay compatible.
+
+    The basis is evaluated in float64 and rounded once, which costs nothing and keeps
+    the round-trip error ~6x below a float32 basis — the phase heads below multiply
+    three coefficients together, so the basis is the one place worth being exact.
+    """
+    a = x.shape[-2]
+    n = a // 2 + 1 if n_harmonics is None else min(n_harmonics, a // 2 + 1)
+    freq = torch.arange(n, device=x.device, dtype=torch.float64).view(1, n)
+    step = torch.arange(a, device=x.device, dtype=torch.float64).view(a, 1)
+    ang = (-2.0 * math.pi / a) * (step * freq)          # (A, F)
+    xt = x.transpose(-1, -2)                            # (B, C, R, A)
+    re = torch.matmul(xt, torch.cos(ang).to(x.dtype)).transpose(-1, -2)   # (B, C, F, R)
+    im = torch.matmul(xt, torch.sin(ang).to(x.dtype)).transpose(-1, -2)
+    return re, im
+
+
+def _magnitude(re, im, eps=1e-12):
+    """``|X_k|``. The ``eps`` only keeps the gradient finite where the bin vanishes
+    exactly (``torch.abs`` on a complex tensor used to absorb that via ``sgn``)."""
+    return torch.sqrt(re * re + im * im + eps)
 
 
 class AngularRFFTMag(nn.Module):
@@ -188,11 +234,8 @@ class AngularRFFTMag(nn.Module):
         super().__init__()
         self.n_harmonics = n_harmonics
 
-    def forward(self, x):                       # (B, C, A, R)
-        mag = torch.fft.rfft(x, dim=-2).abs()   # (B, C, A // 2 + 1, R) — shift-invariant
-        if self.n_harmonics is not None:
-            mag = mag[:, :, : self.n_harmonics, :]
-        return mag
+    def forward(self, x):                                 # (B, C, A, R)
+        return _magnitude(*angular_rdft(x, self.n_harmonics))   # (B, C, F, R)
 
 
 class AngularRelPhase(nn.Module):
@@ -230,17 +273,24 @@ class AngularRelPhase(nn.Module):
         return n_harmonics + 2 * max(0, n_harmonics - 2)
 
     def forward(self, x):                            # (B, C, A, R)
-        spec = torch.fft.rfft(x, dim=-2)             # (B, C, A // 2 + 1, R), complex
-        if self.n_harmonics is not None:
-            spec = spec[:, :, : self.n_harmonics, :]
-        mag = spec.abs()
-        if spec.shape[-2] < 3:                       # no k >= 2 to reference
+        re, im = angular_rdft(x, self.n_harmonics)   # (B, C, F, R), split real/imag
+        mag = _magnitude(re, im)
+        rows = re.shape[-2]
+        if rows < 3:                                 # no k >= 2 to reference
             return mag
-        ref = spec[:, :, 1:2, :]                     # X_1, the phase reference
-        ref = ref.conj() / (ref.abs() + self.eps)    # unit modulus (eps: |X_1| ~ 0)
-        k = torch.arange(2, spec.shape[-2], device=x.device).view(1, 1, -1, 1)
-        c = spec[:, :, 2:, :] * ref.pow(k)           # rotation cancels in the phase
-        return torch.cat([mag, c.real, c.imag], dim=-2)
+        # u = conj(X_1) / |X_1|, unit modulus (eps: |X_1| ~ 0 damps instead of blowing up).
+        den = mag[:, :, 1:2, :] + self.eps
+        u_re, u_im = re[:, :, 1:2, :] / den, -im[:, :, 1:2, :] / den
+        # u**k by repeated multiply — `rows` is a Python int, so this unrolls statically
+        # and needs neither a complex dtype nor a tensor exponent.
+        p_re, p_im = u_re, u_im                      # u**1
+        real, imag = [], []
+        for k in range(2, rows):
+            p_re, p_im = p_re * u_re - p_im * u_im, p_re * u_im + p_im * u_re   # u**k
+            x_re, x_im = re[:, :, k:k + 1, :], im[:, :, k:k + 1, :]
+            real.append(x_re * p_re - x_im * p_im)   # rotation cancels in the phase
+            imag.append(x_re * p_im + x_im * p_re)
+        return torch.cat([mag, *real, *imag], dim=-2)
 
 
 class AngularBispectrum(nn.Module):
@@ -294,21 +344,25 @@ class AngularBispectrum(nn.Module):
         return n_harmonics + 2 * len(cls.pairs(n_harmonics))
 
     def forward(self, x):                            # (B, C, A, R)
-        spec = torch.fft.rfft(x, dim=-2)             # (B, C, A // 2 + 1, R), complex
-        if self.n_harmonics is not None:
-            spec = spec[:, :, : self.n_harmonics, :]
-        mag = spec.abs()
-        pairs = self.pairs(spec.shape[-2])
+        re, im = angular_rdft(x, self.n_harmonics)   # (B, C, F, R), split real/imag
+        mag = _magnitude(re, im)
+        pairs = self.pairs(re.shape[-2])
         if not pairs:
             return mag
         k1 = torch.tensor([p[0] for p in pairs], device=x.device)
         k2 = torch.tensor([p[1] for p in pairs], device=x.device)
-        x1, x2 = spec.index_select(-2, k1), spec.index_select(-2, k2)
-        x12 = spec.index_select(-2, k1 + k2)
-        bisp = x1 * x2 * x12.conj()
+        k12 = k1 + k2
+        a_re, a_im = re.index_select(-2, k1), im.index_select(-2, k1)
+        b_re, b_im = re.index_select(-2, k2), im.index_select(-2, k2)
+        c_re, c_im = re.index_select(-2, k12), im.index_select(-2, k12)
+        p_re, p_im = a_re * b_re - a_im * b_im, a_re * b_im + a_im * b_re   # X_k1 * X_k2
+        bisp_re = p_re * c_re + p_im * c_im                                 # ... * conj(X_k1+k2)
+        bisp_im = p_im * c_re - p_re * c_im
         if self.normalize:
-            bisp = bisp / (x1.abs() * x2.abs() * x12.abs() + self.eps)
-        return torch.cat([mag, bisp.real, bisp.imag], dim=-2)
+            den = (mag.index_select(-2, k1) * mag.index_select(-2, k2)
+                   * mag.index_select(-2, k12) + self.eps)
+            bisp_re, bisp_im = bisp_re / den, bisp_im / den
+        return torch.cat([mag, bisp_re, bisp_im], dim=-2)
 
 
 class HardNetLogPolar(nn.Module):

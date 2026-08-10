@@ -46,14 +46,21 @@ underperforms.
 
 Same conv count and parameter count (1.06 M), two geometry fixes:
 
-- **`LogPolarPad`** — wraps the angular axis (`F.pad(..., mode="circular")` on dim −2)
-  and zero-pads the radial axis.
+- **`LogPolarPad`** — wraps the angular axis (dim −2) and zero-pads the radial axis.
 - **`LogPolarBlurPool`** — antialiased ×2 downsample (binomial 1-2-1 blur then
   subsample) replacing the stride-2 convs; the blur itself wraps angularly, otherwise it
   would reintroduce the seam.
 
 Both are toggleable (`circular_pad`, `antialias`); turning both off reproduces the plain
 `HardNet` structure, which is what makes the ablation exact.
+
+Both spell the wrap as a slice-and-concat rather than `F.pad(..., mode="circular")`,
+which is what it reads as. `F.pad` exports to ONNX `Pad(mode="wrap")`, and onnxruntime
+has no CUDA kernel for that — the ten of them in this trunk would each drag a GPU session
+back through host memory. `Slice`/`Concat` are accelerated everywhere and give bitwise
+identical results (`tests/unit/test_onnx_friendly_ops.py` pins that). The angular DFT
+head avoids the ONNX `DFT` op for the same reason; see
+[fft_theory.md](fft_theory.md#why-the-code-does-not-call-torchfft).
 
 ## Ablation
 
@@ -134,8 +141,9 @@ is byte-for-byte unchanged unless a config asks otherwise.
 A rotation is a *cyclic shift* of the angular axis (dim −2). The magnitude of the
 angular DFT is invariant to that shift — it lives entirely in the phase, and `|X_k|`
 drops it — exactly for integer-bin shifts, the same regime the max-pool is exact in.
-`AngularRFFTMag` replaces `MaxPool2d((pool, 1))` with `torch.fft.rfft(...).abs()`,
-keeping the lowest `n_harmonics` frequency magnitudes:
+`AngularRFFTMag` replaces `MaxPool2d((pool, 1))` with `|rfft(...)|` (spelled as the
+`angular_rdft` matmul, for export reasons), keeping the lowest `n_harmonics` frequency
+magnitudes:
 
 ```python
 nn.MaxPool2d(kernel_size=(pool, 1))    # keeps ONE peak per (channel, radius)

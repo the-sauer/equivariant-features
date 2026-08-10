@@ -27,6 +27,13 @@ pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
 
 # Lint (config in pylintrc, max-line-length=120)
 pylint src/aef
+
+# ONNX export (pixi env — .venv13 has no onnx). A checkpoint stores weights only, so
+# the architecture kwargs must be restated on the CLI (`-p KEY=VALUE` for anything
+# without a dedicated flag). `--summary` flags ops onnxruntime keeps on the CPU EP.
+pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
+  python src/to_onnx.py HardNetLogPolar path/to/best.pth \
+  --resolution 64 --head fft --n-harmonics 5 --summary
 ```
 
 `tests/unit/` is the whole suite (the old `tests/integration/` + smoke harnesses drove the since-removed detector/scale tasks and were deleted).
