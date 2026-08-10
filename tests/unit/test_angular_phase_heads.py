@@ -35,21 +35,33 @@ def _two_bump_profile(offset_bins, length=16):
     return (one + two).view(1, 1, length, 1)
 
 
-def _roll_invariant(head, x, rolls=(1, 3, 8, 15), atol=1e-5):
+def _roll_drift(head, x, rolls=(1, 3, 8, 15)):
+    """Worst drift under an angular roll, relative to the head's own output scale.
+
+    Deliberately *not* ``torch.allclose``: its ``rtol`` is elementwise, and these heads
+    emit rows that are legitimately near zero (a phase term referenced to a small
+    ``|X_1|``) while carrying float32 noise inherited from intermediates two orders of
+    magnitude larger. Judging those rows on their own size demands a precision float32
+    cannot deliver, which made this test fail for ~10% of random draws. The invariance
+    claim is about the descriptor as a whole, so scale the drift by the whole.
+    """
     base = head(x)
-    return all(torch.allclose(base, head(torch.roll(x, shifts=k, dims=-2)), atol=atol)
+    scale = base.abs().max()
+    return max(float((base - head(torch.roll(x, shifts=k, dims=-2))).abs().max() / scale)
                for k in rolls)
 
 
 def test_relphase_is_cyclic_shift_invariant():
+    torch.manual_seed(0)                      # seeded: the threshold is a noise floor
     x = torch.randn(2, 4, 16, 8)
-    assert _roll_invariant(AngularRelPhase(n_harmonics=5), x)
+    assert _roll_drift(AngularRelPhase(n_harmonics=5), x) < 1e-4
 
 
 def test_bispectrum_is_cyclic_shift_invariant():
+    torch.manual_seed(0)
     x = torch.randn(2, 4, 16, 8)
-    assert _roll_invariant(AngularBispectrum(n_harmonics=5), x)
-    assert _roll_invariant(AngularBispectrum(n_harmonics=5, normalize=False), x, atol=1e-4)
+    assert _roll_drift(AngularBispectrum(n_harmonics=5), x) < 1e-4
+    assert _roll_drift(AngularBispectrum(n_harmonics=5, normalize=False), x) < 1e-4
 
 
 def test_magnitudes_alone_cannot_separate_the_two_profiles():
