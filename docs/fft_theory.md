@@ -167,6 +167,29 @@ angular roll, *and* separation of two profiles with identical magnitude spectra 
 differ only in relative phase (a head that only passes the first is a costlier
 `AngularRFFTMag`).
 
+### Why the code does not call `torch.fft`
+
+The heads look like they should be one `torch.fft.rfft` call, and mathematically they
+are. They are written as an explicit real matmul (`angular_rdft`, returning `(re, im)`)
+for one reason: **ONNX export**. `rfft` lowers to the ONNX `DFT` op, which onnxruntime
+implements on the **CPU execution provider only** — in a GPU session the head plus a
+device→host→device round trip around it dominates inference. ONNX has no complex dtype
+either, so the `X.conj()` / `X.pow(k)` arithmetic above would have to be decomposed
+regardless.
+
+The substitution is free here because the angular axis is tiny: `A = patch_size // 4`
+(16 at `patch_size=64`) and only `F` bins survive, so the transform is an `(A, F)`
+matmul — cheaper than the FFT at this size, and a plain `MatMul` node once exported. The
+basis is evaluated in float64 and rounded once, which keeps the round-trip error ~6×
+below a float32 basis; the phase heads multiply three coefficients together, so that is
+the one place worth being exact. `tests/unit/test_onnx_friendly_ops.py` pins every head
+against the complex `torch.fft` reference it replaced.
+
+The same reasoning removed `F.pad(mode="circular")` from `LogPolarPad`/`LogPolarBlurPool`
+(it exports to `Pad(mode="wrap")`, also CPU-only) in favour of slice-and-concat — see
+[logpolar_descriptor.md](logpolar_descriptor.md). `src/to_onnx.py --summary` prints the
+exported op histogram and flags any CPU-only op that creeps back in.
+
 ## Why a modulus gives *stable* invariance
 
 For the theory of why taking a modulus (Fourier- or wavelet-magnitude) yields invariants

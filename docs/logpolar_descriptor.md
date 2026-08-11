@@ -22,6 +22,12 @@ nn.MaxPool2d(kernel_size=(pool, 1)),         # max over the ANGULAR axis -> rota
 nn.Conv2d(depths[2], 128, (1, pool)),        # dense over the RADIAL axis -> keeps scale structure
 ```
 
+Both of those hold only to the extent the view map is **affine** over the patch. A
+perspective view leaves a residual that is neither an angular nor a radial shift but a
+*shear between the two axes* — one which no angular operation can absorb, and which grows
+linearly with `logpolar_outer_factor`. See
+[perspective_and_rotation.md](perspective_and_rotation.md).
+
 ## …but `HardNet` is not actually rotation-invariant
 
 The angular max-pool only delivers invariance if the feature map really is a *cyclic

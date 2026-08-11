@@ -21,6 +21,12 @@ homography and **drops the rotational factor `U`**, so an elliptical blob maps t
 isotropic one and the residual difference between an anchor and its positive is a pure
 rotation (which the descriptor is supposed to handle). Both extractors use it.
 
+That reduction to a pure rotation is **affine-tight**: `N` is linear, so it removes the
+Jacobian and nothing beyond it. With `perspective_amplitude` non-zero the residual carries
+a second-order term the whitening cannot see —
+[perspective_and_rotation.md](perspective_and_rotation.md) derives it and sizes it for
+these configs.
+
 This one function has now produced three separate bugs — the mirror below, plus a
 double scale correction and a mis-evaluated Jacobian. All three shared a signature:
 patches that *looked* plausible in isolation but did not match their own anchor.
