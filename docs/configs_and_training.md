@@ -109,6 +109,68 @@ Note escnn checkpoints are large (~240 MB — the basis buffers live in the
 `state_dict`), so per-epoch snapshots add up fast. Resume with
 `+training.continue_from_checkpoint=<path>`.
 
+### Automatic ONNX export
+
+The same block turns the finished run into a deployable graph, so a run's directory
+carries its own artefact instead of needing a manual `to_onnx.py` pass afterwards:
+
+- `export_onnx` — off in `config.yaml`, **on** in `track_descriptor_base.yaml` (track runs
+  are the deliverable). Needs `model_checkpoints: true`; without checkpoints there is
+  nothing to load and it warns instead.
+- `export_onnx_checkpoints` — stems to export, default `[best]`. Each becomes
+  `<stem>.onnx` beside its `<stem>.pth`.
+- `export_onnx_resolution` / `export_onnx_opset` — `null` ⇒ the model's own `patch_size`
+  and torch's default opset.
+
+It runs once, after the last epoch's plots are written (`aef.export.export_after_training`).
+The model is **rebuilt from `cfg.model` and reloaded from the checkpoint** rather than
+serialized straight out of memory, since the in-memory module holds the *last* epoch's
+weights while `best.pth` is generally an earlier one — the export is therefore identical
+to what `python src/to_onnx.py --run <dir>` produces. A failing export is logged and
+swallowed: a finished run must not be lost to it. A run killed before its final epoch
+(Slurm timeout, preemption) never reaches the hook, so `to_onnx.py --run` stays the way to
+export those.
+
+### Exporting the steerable (escnn) descriptors
+
+`escnn.nn.R2Conv` holds basis coefficients, not a filter: it expands the filter on every
+forward pass and reaches into the basis' raw storage doing so. `torch.export` traces with
+FakeTensors, which have no storage, so the whole steerable family used to die with
+`RuntimeError: Cannot access data pointer of Tensor (e.g. FakeTensor)`.
+
+At eval time that expanded filter is *constant*, so `aef.models.escnn_export.deploy()`
+bakes it in, converting the model to plain torch before the trace:
+
+| escnn layer | becomes | via |
+| --- | --- | --- |
+| `R2Conv` | `Conv2d` | escnn's own `export()` |
+| `InnerBatchNorm` | `BatchNorm2d` | escnn's own `export()` (folds running stats) |
+| `ReLU` | `ReLU` | escnn's own `export()` |
+| `GroupPooling` | `MaxPoolChannels` | escnn's own `export()` |
+| `MaskModule` | fixed multiply | shim — escnn raises `NotImplementedError` |
+| `FieldDropout` | `Identity` | shim — it is already a no-op in eval mode |
+| `PointwiseAvgPoolAntialiased2D` | depthwise `Conv2d` | shim — fixed Gaussian blur + stride |
+
+The converted layers still take and return `GeometricTensor`, so the descriptors'
+`forward` methods — which wrap, unwrap and re-wrap throughout — are **not modified at
+all**; only the leaves change. `deploy()` converts **in place**, because after a forward
+pass an escnn module caches its expanded filters as non-leaf tensors that `copy.deepcopy`
+refuses; the export path builds its own model from the config, so it owns one.
+
+`aef.export.deploy_for_export` then re-runs the converted model on the same input and
+compares against the escnn output, raising rather than writing a graph that disagrees. It
+is bit-exact in practice (`max |plain - escnn| == 0` for `BlobDescriptorEfficient` in all
+four head/`learned_mask` combinations and for `BlobDescriptorNoStride` with and without
+the mask head).
+
+**The exports are large**, because a dense filter is much bigger than the basis
+coefficients it was expanded from: `BlobDescriptorEfficient` is 51 MB at `n_rotations=4`
+and 204 MB at 8, and `BlobDescriptorNoStride` (whose readout is a `R2Conv(kernel=24)` over
+1024 channels — the cost `Efficient` was written to avoid) reaches **3.05 GB** at its
+default `n_rotations=8`. Past protobuf's 2 GB ceiling torch writes the weights to a
+`<name>.onnx.data` sidecar automatically; the `.onnx` is then only meaningful next to it,
+and the log line says so.
+
 ## Contrastive losses: `SupCon` vs `ProxyAnchoredSupCon`
 
 `training.loss: [{name: SupCon}]` is the default — `pytorch_metric_learning`'s SupCon over

@@ -36,25 +36,18 @@ down exactly what it built — so point at the run directory instead and let it 
 ``--summary`` prints the exported op histogram and warns about ops that onnxruntime
 only implements on the CPU execution provider — those silently drag a GPU session back
 through host memory. Keep that list empty.
+
+Training runs configured with ``logging.export_onnx: true`` do this themselves when they
+finish (see ``aef.export.export_after_training``); this CLI is for re-exporting at a
+different resolution/opset, for runs that predate that flag, and for runs that died
+before their final epoch.
 """
 
 import argparse
 import ast
-import collections
 import os
 
-import torch
-from torch.export import Dim
-
-from aef import models
-
-
-# Ops onnxruntime implements on the CPU EP only: hitting one in a GPU session forces a
-# device->host->device round trip around it. `DFT` is the one this repo kept walking
-# into (`torch.fft.rfft` in the log-polar angular heads, now a matmul instead), and
-# `Pad(mode="wrap")` the other (circular padding, now slice+concat).
-CPU_ONLY_OPS = {"DFT", "STFT", "MelWeightMatrix", "HannWindow", "HammingWindow", "BlackmanWindow"}
-CPU_ONLY_PAD_MODES = {b"wrap", b"reflect"}
+from aef import export
 
 
 def parse_value(text):
@@ -121,33 +114,15 @@ def parse_args():
         if args.model or args.weights:
             parser.error("--run supplies MODEL and WEIGHTS itself; use --checkpoint to pick "
                          "a different .pth than best")
-        args.model, args.weights, args.run_params = from_run(args.run, args.checkpoint)
+        try:
+            args.model, args.weights, args.run_params = export.from_run(args.run, args.checkpoint)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
     else:
         if not args.model or not args.weights:
             parser.error("MODEL and WEIGHTS are required unless --run is given")
         args.run_params = {}
     return args
-
-
-def from_run(run_dir, checkpoint):
-    """Read a training run's own `cfg.yaml` — the record of what it actually built.
-
-    Returns ``(model_name, weights_path, params)``. Only the `model:` block is resolved:
-    the rest of the config keeps interpolations into keys that only exist at train time
-    (`${track_path}` and friends), which would raise here for no reason.
-    """
-    from omegaconf import OmegaConf                          # pylint: disable=import-outside-toplevel
-
-    cfg_path = os.path.join(run_dir, "cfg.yaml")
-    if not os.path.isfile(cfg_path):
-        raise SystemExit(f"no cfg.yaml in {run_dir!r} — pass MODEL and WEIGHTS explicitly")
-    weights = os.path.join(run_dir, "checkpoints", f"{checkpoint}.pth")
-    if not os.path.isfile(weights):
-        raise SystemExit(f"no such checkpoint: {weights}")
-
-    cfg = OmegaConf.load(cfg_path)
-    params = OmegaConf.to_container(cfg.model.get("params", {}), resolve=True)
-    return cfg.model.name, weights, params
 
 
 def build_params(args):
@@ -173,61 +148,6 @@ def build_params(args):
     return params
 
 
-def load_state_dict(path):
-    """Accept a training checkpoint or a bare state_dict, either pickle flavour."""
-    try:
-        blob = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:                                        # pylint: disable=broad-except
-        # Older checkpoints pickle non-tensor objects (e.g. the resolved config).
-        blob = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(blob, dict) and "model_state_dict" in blob:
-        return blob["model_state_dict"]
-    return blob
-
-
-def report(model_proto):
-    """Op histogram, plus a warning for anything onnxruntime keeps on the CPU EP."""
-    counts = collections.Counter(node.op_type for node in model_proto.graph.node)
-    print("\nexported ops:")
-    for op_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-        print(f"  {count:4d}  {op_type}")
-
-    offenders = []
-    for node in model_proto.graph.node:
-        if node.op_type in CPU_ONLY_OPS:
-            offenders.append(f"{node.op_type} ({node.name})")
-        elif node.op_type == "Pad":
-            mode = next((a.s for a in node.attribute if a.name == "mode"), b"constant")
-            if mode in CPU_ONLY_PAD_MODES:
-                offenders.append(f"Pad(mode={mode.decode()}) ({node.name})")
-    if offenders:
-        print("\nWARNING: onnxruntime has no CUDA kernel for these — the graph will fall")
-        print("back to the CPU around each one:")
-        for entry in offenders:
-            print(f"  {entry}")
-    else:
-        print("\nno CPU-only onnxruntime ops in the graph.")
-
-
-def check(path, example_inputs, expected):
-    """Numeric parity between torch and onnxruntime on the export sample."""
-    try:
-        import onnxruntime as ort                            # pylint: disable=import-outside-toplevel
-    except ImportError:
-        print("\n--check skipped: onnxruntime is not installed in this environment.")
-        return
-    session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-    feeds = {session.get_inputs()[0].name: example_inputs[0].numpy()}
-    outputs = session.run(None, feeds)
-    for name, got, want in zip([o.name for o in session.get_outputs()], outputs, expected):
-        delta = (torch.from_numpy(got) - want).abs().max()
-        print(f"\n{name}: max |onnx - torch| = {delta:.3e}")
-    # A second call with a different batch size proves the dynamic axis survived.
-    doubled = torch.cat([example_inputs[0], example_inputs[0]], dim=0)
-    session.run(None, {session.get_inputs()[0].name: doubled.numpy()})
-    print(f"dynamic batch ok: ran with batch {doubled.size(0)} as well as {example_inputs[0].size(0)}")
-
-
 def main():
     args = parse_args()
     params = build_params(args)
@@ -235,51 +155,21 @@ def main():
     print(f"{args.model}({', '.join(f'{k}={v!r}' for k, v in params.items())})")
     print(f"weights: {args.weights}")
 
-    model = getattr(models, args.model)(**params)
-    model.eval()
-    model.load_state_dict(load_state_dict(args.weights))
-
-    # Batch MUST be > 1 in the example: torch.export applies 0/1 specialization,
-    # so a size-1 batch axis is frozen to 1 and cannot be made dynamic — the export
-    # then bakes `.view(1, -1)`, and at inference N patches collapse into one
-    # flattened, globally-normalized vector (descriptors scaled ~1/sqrt(N) and
-    # interleaved). Two rows keep the axis genuinely dynamic.
-    in_channels = params.get("in_channels", 1)
-    example_inputs = (torch.randn((2, in_channels, resolution, resolution)),)
-    with torch.no_grad():
-        reference = model(*example_inputs)
-    reference = reference if isinstance(reference, tuple) else (reference,)
-    # `learned_mask` models return (descriptor, m_pred); with no mask/is_pdf given the
-    # predicted mask is the one that is applied, which is exactly the inference case.
-    output_names = [args.output_name] + [f"aux_{i}" for i in range(1, len(reference))]
-    if len(reference) > 1:
-        output_names[1] = "mask"
-
-    # torch>=2.9 defaults to the dynamo exporter, which ignores `dynamic_axes`
-    # (the legacy TorchScript arg) and consumes `dynamic_shapes` instead. A named
-    # Dim keeps `patches.size(0)` symbolic, so `.view(B, -1)` + per-row L2Norm stay
-    # per-descriptor and the output shape is exported as ['batch', 128].
-    export_kwargs = {"opset_version": args.opset} if args.opset is not None else {}
-    onnx_program = torch.onnx.export(
-        model,
-        args=example_inputs,
-        input_names=["patches"],
-        output_names=output_names,
-        dynamic_shapes={"patches": {0: Dim("batch")}},
-        dynamo=True,
-        **export_kwargs,
-    )
     # With --run the export belongs next to the checkpoint it came from: every run has a
     # `best.pth`, so the cwd default would have eight exports fighting over one name.
     default_out = os.path.splitext(args.weights if args.run else os.path.basename(args.weights))[0]
     path = args.output or f"{default_out}.onnx"
-    onnx_program.save(path)
+
+    onnx_program, example_inputs, reference = export.export_checkpoint(
+        args.model, params, args.weights, path,
+        resolution=resolution, opset=args.opset, output_name=args.output_name,
+    )
     print(f"\nwrote {path}")
 
     if args.summary:
-        report(onnx_program.model_proto)
+        export.report(onnx_program.model_proto)
     if args.check:
-        check(path, example_inputs, reference)
+        export.check(path, example_inputs, reference)
 
 
 if __name__ == "__main__":

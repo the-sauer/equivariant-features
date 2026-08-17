@@ -25,6 +25,7 @@ import omegaconf
 import torch
 from tqdm import tqdm
 
+from .. import export
 from . import losses
 from .canonicalizer import *
 from .descriptor import *
@@ -573,5 +574,11 @@ def train_func(process_batch):
         ax.legend()
         plt.savefig(os.path.join(checkpoint_dir, "..", "learning_rate.svg"))
         plt.close()
+
+        # Deployable artefact for the run, opt-in via `logging.export_onnx`. Rebuilds the
+        # model from the config and loads `best.pth` (not the last-epoch weights still in
+        # `model`), so this is exactly what `to_onnx.py --run` would produce. Failures are
+        # logged, never raised — a finished run must not be lost to a bad export.
+        export.export_after_training(cfg, checkpoint_dir)
 
     return train

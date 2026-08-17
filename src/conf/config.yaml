@@ -11,3 +11,8 @@ logging:
   checkpoint_every_epoch: false
   # null -> <logging.dir>/<experiment_name>/checkpoints
   checkpoint_dir: null
+  # After the last epoch, export each of `export_onnx_checkpoints` to `<stem>.onnx`
+  # next to its `<stem>.pth`. Requires model_checkpoints: true.
+  export_onnx: false
+  export_onnx_checkpoints: [best]
+  export_onnx_opset: null

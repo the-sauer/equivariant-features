@@ -175,3 +175,8 @@ logging:
   model_checkpoints: true
   checkpoint_every_epoch: false
   checkpoint_dir: null    # null -> <logging.dir>/<experiment_name>/checkpoints
+  # Track runs are the deliverable, so leave every run with a deployable graph:
+  # `best.onnx` lands next to `best.pth` when the last epoch finishes.
+  export_onnx: true
+  export_onnx_checkpoints: [best]
+  export_onnx_opset: null

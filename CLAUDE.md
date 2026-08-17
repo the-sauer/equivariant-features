@@ -34,7 +34,24 @@ pylint src/aef
 pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
   python src/to_onnx.py HardNetLogPolar path/to/best.pth \
   --resolution 64 --head fft --n-harmonics 5 --summary
+# ...or read the architecture out of the run's own cfg.yaml:
+pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
+  python src/to_onnx.py --run path/to/run_dir --summary --check
 ```
+
+Runs with `logging.export_onnx: true` (on in `track_descriptor_base.yaml`) do that
+themselves when the last epoch ends, writing `best.onnx` next to `best.pth`. Both paths go
+through `aef.export`, so they produce the same graph; the CLI is for re-exports, runs that
+predate the flag, and runs killed before their final epoch. See
+`docs/configs_and_training.md#automatic-onnx-export`.
+
+The steerable models need `aef.models.escnn_export.deploy()` first — `escnn.nn.R2Conv`
+expands its filter from a basis at forward time, which `torch.export` cannot trace, so the
+equivariant layers are swapped for plain-torch equivalents (escnn's own `export()`, plus
+shims for `MaskModule`/`FieldDropout`/`PointwiseAvgPoolAntialiased2D`, which escnn does not
+implement). `aef.export` does this automatically and verifies the descriptor is unchanged
+before writing. **Adding a new escnn layer type to a model may need a new shim** in
+`escnn_export.SHIMS`; the conversion raises with the layer name if one is missing.
 
 `tests/unit/` is the whole suite (the old `tests/integration/` + smoke harnesses drove the since-removed detector/scale tasks and were deleted).
 

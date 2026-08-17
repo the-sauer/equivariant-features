@@ -14,8 +14,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -114,6 +114,18 @@ class ValidationConfig:
 class LoggingConfig:
     dir: str
     interval: int
+
+    # Export the run's checkpoints to ONNX once the last epoch finishes, writing
+    # `<stem>.onnx` beside each `<stem>.pth` (see `aef.export.export_after_training`).
+    # Needs `model_checkpoints: true` — there is nothing to export otherwise. A failed
+    # export is logged, not raised.
+    export_onnx: bool = False
+    # Which checkpoint stems to export; `best` is the one a run is judged on.
+    export_onnx_checkpoints: List[str] = field(default_factory=lambda: ["best"])
+    # Side length of the dummy input; `null` uses the model's own `patch_size`.
+    export_onnx_resolution: Optional[int] = None
+    # ONNX opset; `null` lets torch pick its default.
+    export_onnx_opset: Optional[int] = None
 
 
 @dataclass
