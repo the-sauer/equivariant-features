@@ -292,6 +292,9 @@ def train_func(process_batch):
                     for label, _, crit in validation_entries
                     for n, (_, _, r) in crit.items() if r]
         y_val = {k: [] for k in val_keys}
+        # Validation runs on its own x axis: with sub-epoch validation enabled the
+        # points sit at fractional epochs, so they no longer line up 1:1 with `x`.
+        x_val = []
 
         def append_curves(curves, values, n_epochs):
             """Append this epoch's values, admitting keys the config never declared.
@@ -310,6 +313,150 @@ def train_func(process_batch):
                 v.append(values.get(n, float("nan")))
 
         lr = {sch.__class__.__name__: [] for sch in scheduler.values()}
+
+        # Figure heading: model type + the key scale hyperparameter (the single
+        # ``scale`` config key when present, else the patch/log-polar scale param).
+        model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
+        scale_desc = getattr(cfg, "scale", None)
+        if scale_desc is None:
+            _p = cfg.training.dataset.params
+            scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
+        # getattr with defaults: only the log-polar heads carry `head_type` /
+        # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
+        # crash here *after* a full epoch, at plotting time.
+        head_desc = "FFT" if getattr(model, "head_type", None) == "fft" else "MaxPool"
+        mask_desc = "& Mask " if getattr(model, "learned_mask", False) else ""
+        plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
+
+        # Optional sub-epoch validation: run the whole validation suite every N
+        # training batches on top of the end-of-epoch run, so the metrics can be
+        # watched at a finer resolution than one point per epoch. Off (0/None) by
+        # default, in which case validation points keep sitting at integer epochs.
+        val_interval = int(getattr(cfg.validation, "validate_every_n_batches", 0) or 0)
+        try:
+            total_batches = sum(len(ld) for ld in train_loader)
+        except TypeError:  # a loader without a known length (IterableDataset)
+            total_batches = 0
+        if val_interval > 0 and total_batches <= 0:
+            logging.warning("validate_every_n_batches is set but the training loader has no "
+                            "length; falling back to end-of-epoch validation only")
+            val_interval = 0
+
+        def val_position(epoch, batches_done):
+            """x coordinate of a validation point, in (fractional) epochs.
+
+            With sub-epoch validation off this stays ``epoch`` — the historical
+            position, matching the training curve. With it on, the axis becomes
+            "fraction of training consumed", so the run after batch ``k`` of an epoch
+            lands at ``epoch + k / total_batches`` and the end-of-epoch run at
+            ``epoch + 1``.
+            """
+            if val_interval <= 0:
+                return float(epoch)
+            return epoch + batches_done / total_batches
+
+        def run_validation(x_pos, epoch, tag=""):
+            """Run the full validation suite once and refresh ``validation_losses.svg``.
+
+            Appends one point per reported metric at ``x_pos`` and returns the weighted
+            average validation loss (what ``best.pth`` selection compares), or ``None``
+            when no finite batch was seen. Restores the model's train/eval mode, so it
+            is safe to call from inside the training loop.
+            """
+            was_training = model.training
+            with torch.no_grad():
+                model.eval()
+                cumulative_loss = 0.0
+                n_items = 0
+                # Per-metric-key sums and item counts: each validation dataset
+                # contributes only to its own keys, so an FPR reported for the
+                # small-blob set is divided by the small-blob item count, not the
+                # pooled total across all validation datasets.
+                cumulative_losses = {k: 0.0 for k in val_keys}
+                cumulative_items = {k: 0 for k in val_keys}
+                for label, loaders, val_crit in validation_entries:
+                    loop = tqdm(chain(*loaders), leave=True)
+                    loop.set_description(
+                        f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]{tag}")
+                    for data in loop:
+                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg, validation=True)
+                        batch_items = data["keypoints"].size(0)
+                        loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
+                        # Weighted total drives best.pth selection; with the
+                        # small/large FPRs at weight 0 this tracks the overall FPR.
+                        # Non-finite batches (e.g. a batch with no positive pair, where
+                        # FPR@recall is undefined) are skipped rather than averaged in.
+                        if torch.isfinite(loss).all():
+                            cumulative_loss += loss.item() * batch_items
+                            n_items += batch_items
+                        for n, (l, _, r) in losses.items():
+                            if r and torch.isfinite(l).all():
+                                key = report_key(label, n)
+                                if key not in cumulative_losses:
+                                    cumulative_losses[key] = 0.0
+                                    cumulative_items[key] = 0
+                                cumulative_losses[key] += l.item() * batch_items
+                                cumulative_items[key] += batch_items
+                        loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
+                # `cumulative_losses` may have grown past `val_keys` above: the
+                # process_batch function can report metrics of its own (see
+                # `append_curves`), so average over what was actually accumulated.
+                avg_val = {k: cumulative_losses[k] / cumulative_items[k]
+                           for k in cumulative_losses if cumulative_items[k] > 0}
+                x_val.append(x_pos)
+                append_curves(y_val, avg_val, len(x_val))
+                logging.info("validation at epoch %.3f [%d/%d]%s, avg val losses: %s",
+                             x_pos, epoch, cfg.training.num_epochs, tag,
+                             ", ".join(f"{k}: {v[-1]}" for k, v in y_val.items()))
+
+                _, ax = plt.subplots()
+                # Mark each series' best (lowest) value with a dashed rule in its
+                # own colour, plus a small label of that value pinned to the right
+                # edge. Labels are collected first, then nudged apart in log space
+                # so that near-equal bests don't overprint each other.
+                best_marks = []
+                series_max = 0.0
+                for n, v in y_val.items():
+                    (line,) = ax.semilogy(x_val, v, label=n)
+                    finite = [val for val in v if math.isfinite(val)]
+                    if finite:
+                        best = min(finite)
+                        ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
+                        best_marks.append((best, line.get_color()))
+                        series_max = max(series_max, max(finite))
+                # Minimum vertical gap between labels, in decades (log10 units);
+                # walking bottom-to-top, push each label up if it crowds the one
+                # below it.
+                min_gap = 0.16
+                prev = None
+                for best, color in sorted(best_marks, key=lambda m: m[0]):
+                    log_best = math.log10(best) if best > 0 else math.log10(1e-5)
+                    if prev is not None and log_best - prev < min_gap:
+                        log_best = prev + min_gap
+                    prev = log_best
+                    ax.annotate(f"{best:.4g}", xy=(1, 10 ** log_best), xycoords=("axes fraction", "data"),
+                                xytext=(2, 0), textcoords="offset points", va="center", ha="left",
+                                fontsize=7, color=color, clip_on=False)
+                ax.set_title(plot_title)
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("Average Validation Loss")
+                ax.set_xlim(0, cfg.training.num_epochs)
+                # Lower bound defaults to 1e-3, but expands downward (with a little
+                # headroom) whenever a series dips below it so the curve stays visible.
+                # The top defaults to 1 — the FPR metrics live in [0, 1] — and likewise
+                # expands whenever a series exceeds it, which an unbounded loss such as
+                # `mask_bce` can do early on.
+                data_min = min((b for b, _ in best_marks), default=1e-3)
+                lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
+                upper = 1.0 if series_max <= 1.0 else series_max * 1.2
+                ax.set_ylim(lower, upper)
+                ax.legend()
+                plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
+                plt.close()
+
+            if was_training:
+                model.train()
+            return cumulative_loss / n_items if n_items > 0 else None
 
         for epoch in range(start_epoch, cfg.training.num_epochs):
             loop = tqdm(chain(*train_loader), leave=True)
@@ -358,24 +505,16 @@ def train_func(process_batch):
                         model.zero_grad()
                         continue
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
-                    logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, len(train_loader), ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
+                    logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, total_batches, ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
+                # Sub-epoch validation. The last batch is skipped so the point does
+                # not collide with the end-of-epoch run that follows immediately.
+                if val_interval > 0 and (i + 1) % val_interval == 0 and (i + 1) < total_batches:
+                    run_validation(val_position(epoch, i + 1), epoch,
+                                   tag=f" batch [{i + 1}/{total_batches}]")
             avg_losses = {n: v / n_items for n, v in cumulative_losses.items()}
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
             append_curves(y_train, avg_losses, len(x))
-            # Figure heading: model type + the key scale hyperparameter (the single
-            # ``scale`` config key when present, else the patch/log-polar scale param).
-            model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
-            scale_desc = getattr(cfg, "scale", None)
-            if scale_desc is None:
-                _p = cfg.training.dataset.params
-                scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
-            # getattr with defaults: only the log-polar heads carry `head_type` /
-            # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
-            # crash here *after* a full epoch, at plotting time.
-            head_desc = "FFT" if getattr(model, "head_type", None) == "fft" else "MaxPool"
-            mask_desc = "& Mask " if getattr(model, "learned_mask", False) else ""
-            plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)
@@ -388,124 +527,43 @@ def train_func(process_batch):
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
 
-            with torch.no_grad():
-                model.eval()
-                cumulative_loss = 0.0
-                n_items = 0
-                # Per-metric-key sums and item counts: each validation dataset
-                # contributes only to its own keys, so an FPR reported for the
-                # small-blob set is divided by the small-blob item count, not the
-                # pooled total across all validation datasets.
-                cumulative_losses = {k: 0.0 for k in val_keys}
-                cumulative_items = {k: 0 for k in val_keys}
-                for label, loaders, val_crit in validation_entries:
-                    loop = tqdm(chain(*loaders), leave=True)
-                    loop.set_description(f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]")
-                    for data in loop:
-                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg, validation=True)
-                        batch_items = data["keypoints"].size(0)
-                        loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-                        # Weighted total drives best.pth selection; with the
-                        # small/large FPRs at weight 0 this tracks the overall FPR.
-                        # Non-finite batches (e.g. a batch with no positive pair, where
-                        # FPR@recall is undefined) are skipped rather than averaged in.
-                        if torch.isfinite(loss).all():
-                            cumulative_loss += loss.item() * batch_items
-                            n_items += batch_items
-                        for n, (l, _, r) in losses.items():
-                            if r and torch.isfinite(l).all():
-                                key = report_key(label, n)
-                                if key not in cumulative_losses:
-                                    cumulative_losses[key] = 0.0
-                                    cumulative_items[key] = 0
-                                cumulative_losses[key] += l.item() * batch_items
-                                cumulative_items[key] += batch_items
-                        loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
-                # `cumulative_losses` may have grown past `val_keys` above: the
-                # process_batch function can report metrics of its own (see
-                # `append_curves`), so average over what was actually accumulated.
-                avg_val = {k: cumulative_losses[k] / cumulative_items[k]
-                           for k in cumulative_losses if cumulative_items[k] > 0}
-                append_curves(y_val, avg_val, len(x))
-                logging.info("finished epoch [%d/%d], avg val losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{k}: {v[-1]}" for k, v in y_val.items()))
+            # End-of-epoch validation. Checkpoint selection stays here (once per
+            # epoch) even when sub-epoch validation is on, so `best.pth` keeps
+            # meaning "best epoch" rather than "best batch".
+            average_loss = run_validation(val_position(epoch, total_batches), epoch)
 
-                _, ax = plt.subplots()
-                # Mark each series' best (lowest) value with a dashed rule in its
-                # own colour, plus a small label of that value pinned to the right
-                # edge. Labels are collected first, then nudged apart in log space
-                # so that near-equal bests don't overprint each other.
-                best_marks = []
-                series_max = 0.0
-                for n, v in y_val.items():
-                    (line,) = ax.semilogy(x, v, label=n)
-                    finite = [val for val in v if math.isfinite(val)]
-                    if finite:
-                        best = min(finite)
-                        ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
-                        best_marks.append((best, line.get_color()))
-                        series_max = max(series_max, max(finite))
-                # Minimum vertical gap between labels, in decades (log10 units);
-                # walking bottom-to-top, push each label up if it crowds the one
-                # below it.
-                min_gap = 0.16
-                prev = None
-                for best, color in sorted(best_marks, key=lambda m: m[0]):
-                    log_best = math.log10(best) if best > 0 else math.log10(1e-5)
-                    if prev is not None and log_best - prev < min_gap:
-                        log_best = prev + min_gap
-                    prev = log_best
-                    ax.annotate(f"{best:.4g}", xy=(1, 10 ** log_best), xycoords=("axes fraction", "data"),
-                                xytext=(2, 0), textcoords="offset points", va="center", ha="left",
-                                fontsize=7, color=color, clip_on=False)
-                ax.set_title(plot_title)
-                ax.set_xlabel("Epoch")
-                ax.set_ylabel("Average Validation Loss")
-                ax.set_xlim(0, cfg.training.num_epochs)
-                # Lower bound defaults to 1e-3, but expands downward (with a little
-                # headroom) whenever a series dips below it so the curve stays visible.
-                # The top defaults to 1 — the FPR metrics live in [0, 1] — and likewise
-                # expands whenever a series exceeds it, which an unbounded loss such as
-                # `mask_bce` can do early on.
-                data_min = min((b for b, _ in best_marks), default=1e-3)
-                lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
-                upper = 1.0 if series_max <= 1.0 else series_max * 1.2
-                ax.set_ylim(lower, upper)
-                ax.legend()
-                plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
-                plt.close()
-
-                if cfg.logging.model_checkpoints and checkpoint_dir is not None:
-                    average_loss = cumulative_loss / n_items
-                    checkpoint = {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": {n: o.state_dict() for n, o in optimizer.items()},
-                        "scheduler_state_dict": {n: s.state_dict() for n, s in scheduler.items()},
-                        "loss": average_loss,
-                        "best_loss": best_loss,
-                        "plots": {
-                            "y_train": y_train,
-                            "y_val": y_val,
-                            "x": x
-                        }
+            if cfg.logging.model_checkpoints and checkpoint_dir is not None and average_loss is not None:
+                checkpoint = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": {n: o.state_dict() for n, o in optimizer.items()},
+                    "scheduler_state_dict": {n: s.state_dict() for n, s in scheduler.items()},
+                    "loss": average_loss,
+                    "best_loss": best_loss,
+                    "plots": {
+                        "y_train": y_train,
+                        "y_val": y_val,
+                        "x": x,
+                        "x_val": x_val
                     }
-                    # `latest.pth` is always refreshed (resume point); per-epoch
-                    # snapshots are opt-in via `logging.checkpoint_every_epoch`.
-                    if getattr(cfg.logging, "checkpoint_every_epoch", False):
-                        torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
-                    torch.save(checkpoint, os.path.join(checkpoint_dir, "latest.pth"))
-                    if average_loss < best_loss:
-                        best_loss = average_loss
-                        torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
-                        msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
-                        print("\033[1m" + msg + "\033[0m")
-                        logging.info("\033[1m" + msg + "\033[0m")
-                
-                for sch in scheduler.values():
-                    # get_last_lr() works for composite schedulers (e.g.
-                    # ChainedScheduler), whose get_lr() raises NotImplementedError.
-                    lr[sch.__class__.__name__] += sch.get_last_lr()
-                    sch.step()
+                }
+                # `latest.pth` is always refreshed (resume point); per-epoch
+                # snapshots are opt-in via `logging.checkpoint_every_epoch`.
+                if getattr(cfg.logging, "checkpoint_every_epoch", False):
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
+                torch.save(checkpoint, os.path.join(checkpoint_dir, "latest.pth"))
+                if average_loss < best_loss:
+                    best_loss = average_loss
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
+                    msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
+                    print("\033[1m" + msg + "\033[0m")
+                    logging.info("\033[1m" + msg + "\033[0m")
+
+            for sch in scheduler.values():
+                # get_last_lr() works for composite schedulers (e.g.
+                # ChainedScheduler), whose get_lr() raises NotImplementedError.
+                lr[sch.__class__.__name__] += sch.get_last_lr()
+                sch.step()
 
         _, ax = plt.subplots()
         for n, v in lr.items():

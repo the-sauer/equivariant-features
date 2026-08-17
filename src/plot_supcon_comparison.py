@@ -23,8 +23,10 @@ its counterpart is not a comparison, so it is dropped (and reported)::
     .venv13/bin/python src/plot_supcon_comparison.py /raid/data/hsa/logs/2026_08_20_pa
 
 Where the numbers come from: ``train_func`` carries the whole per-epoch curve set
-in every checkpoint under ``checkpoint["plots"]`` — ``x`` (epochs), ``y_train``
-and ``y_val``, the latter keyed ``<loss>@<validation-split>`` (e.g.
+in every checkpoint under ``checkpoint["plots"]`` — ``x`` (epochs, the training
+curve's axis), ``x_val`` (the validation axis, fractional epochs when
+``validation.validate_every_n_batches`` is set), ``y_train`` and ``y_val``, the
+latter keyed ``<loss>@<validation-split>`` (e.g.
 ``FPR95@all`` for the track configs, ``FPR95@overall`` for the synthetic ones).
 So no re-evaluation is needed; this only reads checkpoints. ``latest.pth`` is
 preferred over ``best.pth`` because ``best.pth`` is written at the best epoch and
@@ -224,7 +226,9 @@ def read_curve(run_dir, metric, split, checkpoint="auto"):
         key = pick_metric_key(keys, metric, split)
         if key is None:
             return None, None, None, keys, path
-        x = list(plots.get("x", []))
+        # `x_val` is the validation curve's own axis (it has more points than `x`
+        # when sub-epoch validation is on); older checkpoints only carry `x`.
+        x = list(plots.get("x_val") or plots.get("x", []))
         y = [float(v) for v in y_val[key]]
         n = min(len(x), len(y))
         return x[:n], y[:n], key, keys, path

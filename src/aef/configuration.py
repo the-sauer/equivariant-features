@@ -99,7 +99,15 @@ class TrainingConfig(TrainValConfig):
 
 @dataclass
 class ValidationConfig:
-    pass    # As of now everything is defined in TrainValConfig
+    # Everything else is defined in TrainValConfig.
+    #
+    # Run the full validation suite every N *training* batches, in addition to the
+    # end-of-epoch run, so the metrics can be watched at sub-epoch resolution. Those
+    # extra points are plotted at the fractional epoch they were measured at
+    # (`epoch + batches_done / batches_per_epoch`). `null`/0 (the default) keeps the
+    # historical behaviour: one validation per epoch, plotted at integer epochs.
+    # Checkpoint selection is unaffected — `best.pth` still compares epochs only.
+    validate_every_n_batches: Optional[int] = None
 
 
 @dataclass

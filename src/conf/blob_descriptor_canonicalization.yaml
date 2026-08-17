@@ -31,6 +31,9 @@ training:
     - name: AlignmentLoss
 
 validation:
+  # N training batches between validation runs (on top of the end-of-epoch one);
+  # null/0 => once per epoch. See blob_descriptor_base.yaml.
+  validate_every_n_batches: null
   dataset:
     name: BlobBoardHomographyData
     params:

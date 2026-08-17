@@ -138,6 +138,11 @@ training:
 validation:
   batch_size: 1024
   num_workers: 4
+  # Run the whole validation suite every N training batches on top of the
+  # end-of-epoch run, so the metrics can be read at sub-epoch resolution; the extra
+  # points are plotted at the fractional epoch they were measured at. null/0 => one
+  # validation per epoch (the default). `best.pth` still compares epochs only.
+  validate_every_n_batches: null
   dataset:
     name: BlobTrackData
     params:

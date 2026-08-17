@@ -47,6 +47,33 @@ the real root **and** drops struct mode) and only then merges the split's extra 
 When testing config-merge code, compose via `hydra.compose` (struct mode), **not**
 `OmegaConf.load` (non-struct) — the latter hides this class of bug.
 
+## Sub-epoch validation
+
+`validation.validate_every_n_batches` (declared as `null` in both bases) runs the
+**whole** validation suite every N training batches, on top of the end-of-epoch run.
+Use it when one point per epoch is too coarse to see what a run is doing — a long
+epoch over the track data, or a warm-started run that moves within the first few
+hundred batches.
+
+The extra points are plotted at the fractional epoch they were measured at, so the
+validation figure's x axis becomes "fraction of training consumed": the run after
+batch `k` of epoch `e` sits at `e + k/batches_per_epoch`, and the end-of-epoch run at
+`e + 1`. With the option off the axis is unchanged — one point per epoch at integer
+`e`, matching the training curve. That axis is stored alongside the curves as
+`checkpoint["plots"]["x_val"]` (the training curve keeps its own `x`);
+`plot_supcon_comparison.py` prefers `x_val` and falls back to `x` for older
+checkpoints.
+
+What it does *not* change: `best.pth` selection, which still compares whole epochs —
+a mid-epoch run only records metrics, it never writes a checkpoint. Nor is it free;
+each run is a full pass over every validation split, so N should be a decent fraction
+of an epoch (tens to hundreds of batches), not single digits.
+
+```sh
+python src/run_training.py --config-name track_descriptor_logpolar \
+  validation.validate_every_n_batches=200
+```
+
 ## DataLoader workers
 
 Both loaders honour `training.num_workers` / `validation.num_workers` (see
