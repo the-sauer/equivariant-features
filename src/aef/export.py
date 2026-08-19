@@ -96,15 +96,55 @@ def load_state_dict(path):
     return blob
 
 
+# Buffers an escnn conv derives from its basis coefficients rather than storing:
+# `expand_parameters()` writes them on the train->eval transition and `train()` deletes
+# them again, so whether a checkpoint contains them depends only on the mode the model
+# happened to be in when it was saved. They are recomputed from the loaded weights, so a
+# mismatch on them either way is not a mismatch of the trained model.
+EXPANSION_BUFFERS = {"filter", "expanded_bias"}
+
+
+def _is_expansion_buffer(key):
+    """Matched on the leaf name, so a conv at the top level counts too, not just `net.1.*`."""
+    return key.rsplit(".", 1)[-1] in EXPANSION_BUFFERS
+
+
+def load_weights(model, weights):
+    """Load `weights` into `model`, tolerating escnn's derived expansion buffers.
+
+    Must be called while `model` is still in **training** mode: `escnn.nn.R2Conv` only
+    materializes `<layer>.filter` / `<layer>.expanded_bias` when it switches to eval, and
+    a checkpoint written mid-training has no such entry — loading into an already-eval'd
+    model then dies with `Missing key(s) ... net.1.filter`. The reverse (a checkpoint
+    saved from an eval-mode model) shows up as unexpected keys. Both are ignored, and the
+    caller's later `.eval()` regenerates them from the coefficients just loaded.
+
+    Anything else missing or unexpected is a real architecture mismatch and raises.
+    """
+    state = load_state_dict(weights)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    stray_missing = [k for k in missing if not _is_expansion_buffer(k)]
+    stray_unexpected = [k for k in unexpected if not _is_expansion_buffer(k)]
+    if stray_missing or stray_unexpected:
+        raise RuntimeError(
+            f"{type(model).__name__} does not match {weights}: "
+            f"missing {stray_missing}, unexpected {stray_unexpected} — the constructor "
+            f"params do not describe the architecture this checkpoint was trained with"
+        )
+    return model
+
+
 def build_model(model_name, params, weights=None):
     """Construct `model_name` from `aef.models` with `params`, optionally loading weights.
 
-    Built on the CPU and left in eval mode, which is what the export needs.
+    Built on the CPU and left in eval mode, which is what the export needs. The weights go
+    in *before* `eval()`, so escnn's expanded filters are derived from them; see
+    :func:`load_weights`.
     """
     model = getattr(models, model_name)(**params)
-    model.eval()
     if weights is not None:
-        model.load_state_dict(load_state_dict(weights))
+        load_weights(model, weights)
+    model.eval()
     return model
 
 
