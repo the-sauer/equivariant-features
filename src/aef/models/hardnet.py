@@ -402,6 +402,30 @@ class HardNetLogPolar(nn.Module):
       standalone loss supervising ``m_pred`` on the **targets** against their true board
       coverage (the PDF patch's mask is given, not predicted). The predictor thus learns to
       supply, at test time, the target mask that is no longer available.
+    - ``mask_resolution`` (needs ``learned_mask``) taps the mask head EARLIER in the
+      trunk, where the grid is still fine: ``patch_size`` (full, after the first two
+      blocks), ``patch_size // 2``, or the default ``None`` = the trunk output
+      (``patch_size // 4``, i.e. 16x16 at 64). The default predictor emits a 16x16 map
+      whose cells each see ~51 px of a 64 px patch, so its boundary is 2-4 cells wide
+      where the true one is 1 — measured against held-out GT it reaches IoU@0.5 0.81 with
+      a mean of 0.81 against a true 0.67, i.e. it systematically under-masks. A tapped
+      head trades receptive field (shallower features, less context to tell board from
+      background) for a sharper grid. It changes ``mask_head``'s input channels, so that
+      one tensor does not transfer on a warm start (the loader reports it); the trunk and
+      the head still do. The late weighting averages a finer ``m_pred`` down to the field
+      it multiplies, while the BCE supervises it at its own resolution.
+    - ``oracle_mask=True`` (needs ``learned_mask``) hands the model the TRUE mask on
+      every view, target included, at both entry points — the ablation that answers
+      "is the mask worth having at all, or only hard to predict?". It is not a
+      deployable model: the target's mask does not exist at test time. It exists to
+      separate the two failure modes behind a masked run that does not beat its
+      unmasked twin: a mask that buys nothing, versus a predictor too coarse to cash it
+      in. ``m_pred`` is still emitted and still supervised (weight 0 is sensible), so a
+      run reports how good the predictor got while the descriptor never depended on it.
+      Because the mask reaches the network on the validation path too,
+      ``process_batch_blobs`` stops withholding it for such a model — an oracle model
+      validated without its mask would be a different model. See
+      `docs/steerable_masking.md#oracle-masks`.
     - ``cascade=True`` (needs ``learned_mask``) moves the masking from the *pooling* to
       the *input*: the trunk runs twice, once to predict the validity and once on the
       patch gated by that prediction. Motivation is the receptive field — at 64x64 the
@@ -428,10 +452,14 @@ class HardNetLogPolar(nn.Module):
     def __init__(self, in_channels=1, patch_size=64, slim=False,
                  circular_pad=True, antialias=True,
                  head="maxpool", n_harmonics=None, bispectrum_normalize=True,
-                 learned_mask=False, cascade=False, cascade_late_weight=False, **_):
+                 learned_mask=False, cascade=False, cascade_late_weight=False,
+                 mask_resolution=None, oracle_mask=False, **_):
         super().__init__()
         if cascade and not learned_mask:
             raise ValueError("cascade=True needs learned_mask=True — the gate IS m_pred")
+        if oracle_mask and not learned_mask:
+            raise ValueError("oracle_mask=True needs learned_mask=True — it replaces the "
+                             "predictor's output by the GT, it does not add a mask path")
         if patch_size == 32:
             kernel_size, padding = 3, 1
         elif patch_size == 64:
@@ -445,6 +473,7 @@ class HardNetLogPolar(nn.Module):
         self.learned_mask = learned_mask
         self.cascade = cascade
         self.cascade_late_weight = cascade_late_weight
+        self.oracle_mask = oracle_mask
         pool = patch_size // 4          # spatial size after the two downsamples
         depths = [16, 32, 64] if slim else [32, 64, 128]
 
@@ -464,15 +493,21 @@ class HardNetLogPolar(nn.Module):
                 return [*block(c_in, c_out, stride=1), LogPolarBlurPool(c_out)]
             return block(c_in, c_out, stride=2)
 
-        trunk_layers = [
-            *block(in_channels, depths[0]),
-            *block(depths[0], depths[0]),
-            *down(depths[0], depths[1]),                      # patch -> patch/2
-            *block(depths[1], depths[1]),
-            *down(depths[1], depths[2]),                      # patch/2 -> patch/4
-            *block(depths[2], depths[2]),
-            nn.Dropout(0.1),
-        ]
+        # Built incrementally so the mask head can TAP the trunk at a chosen resolution.
+        # `taps` maps a spatial size to (layer index to split at, channels there); the
+        # layer list itself is unchanged, so `state_dict` keys and the default forward
+        # stay exactly as they were.
+        trunk_layers = []
+        trunk_layers += block(in_channels, depths[0])
+        trunk_layers += block(depths[0], depths[0])
+        taps = {patch_size: (len(trunk_layers), depths[0])}          # full resolution
+        trunk_layers += down(depths[0], depths[1])                   # patch -> patch/2
+        trunk_layers += block(depths[1], depths[1])
+        taps[patch_size // 2] = (len(trunk_layers), depths[1])
+        trunk_layers += down(depths[1], depths[2])                   # patch/2 -> patch/4
+        trunk_layers += block(depths[2], depths[2])
+        trunk_layers += [nn.Dropout(0.1)]
+        taps[patch_size // 4] = (len(trunk_layers), depths[2])       # trunk output
 
         # Angular reduction head: max-pool (one peak), DFT-magnitude (full spectrum), or
         # magnitude + a phase invariant (relative phase / low-order bispectrum).
@@ -508,18 +543,56 @@ class HardNetLogPolar(nn.Module):
             self.trunk = nn.Sequential(*trunk_layers)
             self.head = nn.Sequential(*head_layers)
             if learned_mask:
-                # 1x1 predictor: per-cell validity in [0, 1] from the trunk features.
-                self.mask_head = nn.Sequential(nn.Conv2d(depths[2], 1, 1), nn.Sigmoid())
+                # 1x1 predictor: per-cell validity in [0, 1]. It reads the trunk output
+                # by default; `mask_resolution` taps an EARLIER, finer stage instead.
+                if mask_resolution is None:
+                    self.mask_tap, tap_channels = None, depths[2]
+                elif mask_resolution in taps:
+                    self.mask_tap, tap_channels = taps[mask_resolution]
+                else:
+                    raise ValueError(
+                        f"mask_resolution must be one of {sorted(taps)} for "
+                        f"patch_size={patch_size}, got {mask_resolution!r}")
+                self.mask_resolution = mask_resolution
+                self.mask_head = nn.Sequential(nn.Conv2d(tap_channels, 1, 1), nn.Sigmoid())
         self.apply(weights_init)
 
     def _validity_weight(self, feat, mask, m_pred, is_pdf):
         """Per-cell validity weight at trunk resolution: GT on PDF patches, ``m_pred`` else."""
         _, _, A, R = feat.shape
-        if mask is None or is_pdf is None:
+        # A tapped predictor emits a FINER map than the field it weights; average it down
+        # (the same reduction the GT gets), so the weight means "coverage of this cell"
+        # in both cases. Supervision still happens at the predictor's own resolution.
+        if m_pred is not None and m_pred.shape[-2:] != (A, R):
+            m_pred = F.adaptive_avg_pool2d(m_pred, (A, R))
+        if mask is None:
             return m_pred                                     # no GT routing available
         gt = F.adaptive_avg_pool2d(mask, (A, R))              # (B,1,A,R), board coverage
+        if self.oracle_mask:
+            return gt                                         # every view, prediction unused
+        if is_pdf is None:
+            return m_pred
         a = is_pdf.view(-1, 1, 1, 1).to(feat.dtype)
         return a * gt + (1.0 - a) * m_pred
+
+    def _trunk_and_mask(self, x):
+        """Run the trunk, emitting ``m_pred`` from wherever the mask head is tapped.
+
+        ``mask_tap is None`` reproduces ``mask_head(trunk(x))`` exactly; otherwise the
+        same layer list is run in two pieces around the tap, so nothing about the
+        parameters or their names changes.
+        """
+        tap = getattr(self, "mask_tap", None)
+        if tap is None:
+            feat = self.trunk(x)
+            return feat, (self.mask_head(feat) if self.learned_mask else None)
+        h = x
+        for layer in self.trunk[:tap]:
+            h = layer(h)
+        m_pred = self.mask_head(h)
+        for layer in self.trunk[tap:]:
+            h = layer(h)
+        return h, m_pred
 
     def _gate(self, patches, mask, is_pdf):
         """Cascade pass 1 -> the per-pixel gate, and the ``m_pred`` that produced it.
@@ -529,9 +602,11 @@ class HardNetLogPolar(nn.Module):
         The target — the view whose mask does not exist at test time — is gated by the
         prediction, upsampled from the trunk grid to patch resolution.
         """
-        m_pred = self.mask_head(self.trunk(input_norm(patches)))
-        gate = F.interpolate(m_pred, size=patches.shape[-2:], mode="bilinear",
-                             align_corners=False)
+        _, m_pred = self._trunk_and_mask(input_norm(patches))
+        if self.oracle_mask and mask is not None:
+            return mask, m_pred                   # every view, prediction unused
+        gate = m_pred if m_pred.shape[-2:] == patches.shape[-2:] else F.interpolate(
+            m_pred, size=patches.shape[-2:], mode="bilinear", align_corners=False)
         if mask is not None and is_pdf is not None:
             a = is_pdf.view(-1, 1, 1, 1).to(patches.dtype)
             gate = a * mask + (1.0 - a) * gate
@@ -554,17 +629,19 @@ class HardNetLogPolar(nn.Module):
             return d, m_pred
 
         # Masked input-norm on PDF patches (known off-board fill); plain on targets/unknown.
-        if self.learned_mask and mask is not None and is_pdf is not None:
+        # With `oracle_mask` the target's off-board fill is known too, so it gets the
+        # same treatment — the point of the oracle is that no view is left guessing.
+        if self.learned_mask and mask is not None and self.oracle_mask:
+            x = input_norm(patches, mask=mask)
+        elif self.learned_mask and mask is not None and is_pdf is not None:
             a = is_pdf.view(-1, 1, 1, 1).to(patches.dtype)
             innorm_mask = a * mask + (1.0 - a) * torch.ones_like(mask)
             x = input_norm(patches, mask=innorm_mask)
         else:
             x = input_norm(patches)
 
-        feat = self.trunk(x)                                  # (B, C, A, R)
-        m_pred = None
+        feat, m_pred = self._trunk_and_mask(x)                 # (B, C, A, R), (B, 1, a, r)
         if self.learned_mask:
-            m_pred = self.mask_head(feat)                     # (B, 1, A, R) in [0, 1]
             feat = feat * self._validity_weight(feat, mask, m_pred, is_pdf)
         d = L2Norm()(self.head(feat).view(patches.size(0), -1))
         return (d, m_pred) if self.learned_mask else d

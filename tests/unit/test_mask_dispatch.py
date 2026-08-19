@@ -153,3 +153,27 @@ def test_mask_bce_ignores_pdf_patches():
 def test_mask_loss_weight_is_read_from_the_config(weight):
     losses = _run(_MaskAware(), _batch(), _cfg(ignore_mask=False, mask_loss_weight=weight))
     assert losses["mask_bce"][1] == weight
+
+
+class _Oracle(_MaskAware):
+    """The ceiling arm: consumes the GT on every view, `m_pred` unused (see
+    `HardNetLogPolar`'s `oracle_mask`)."""
+
+    oracle_mask = True
+
+
+def test_oracle_model_keeps_the_mask_at_validation():
+    # An oracle model IS the mask — withholding it at validation would score a
+    # different model than the one being trained, which is the whole point of the arm.
+    model = _Oracle()
+    losses = _run(model, _batch(), _cfg(ignore_mask=False), validation=True)
+    assert model.seen == [(True, True)]
+    # The BCE is still a weight-0 diagnostic there, exactly as for a normal model.
+    assert losses["mask_bce"][1] == 0.0
+
+
+def test_ignore_mask_still_wins_over_the_oracle():
+    model = _Oracle()
+    losses = _run(model, _batch(), _cfg(ignore_mask=True), validation=True)
+    assert model.seen == [(False, False)]
+    assert "mask_bce" not in losses

@@ -17,7 +17,6 @@
 import abc
 
 import escnn
-import escnn.nn as nn
 import torch
 import torch.nn.functional as F
 
@@ -74,17 +73,36 @@ def _fill_invalid_with_mean(x, mask):
     return x * m + mean * (1.0 - m)
 
 
-def _gate_input(x, mask, is_pdf):
-    """Neutralize the known off-board region — on ANCHORS only (elsewhere unknown)."""
+def _check_oracle(learned_mask, oracle_mask):
+    if oracle_mask and not learned_mask:
+        raise ValueError("oracle_mask=True needs learned_mask=True — it replaces the "
+                         "predictor's output by the GT, it does not add a mask path")
+
+
+def _gate_input(x, mask, is_pdf, oracle=False):
+    """Neutralize the known off-board region — on ANCHORS only (elsewhere unknown).
+
+    ``oracle`` extends it to every view: the ceiling ablation hands the model the true
+    mask on the targets too (see ``HardNetLogPolar``'s ``oracle_mask``).
+    """
+    if oracle:
+        return _fill_invalid_with_mean(x, mask)
     a = is_pdf.view(-1, 1, 1, 1).to(x.dtype)
     return _fill_invalid_with_mean(x, a * mask + (1.0 - a) * torch.ones_like(mask))
 
 
-def _validity_weight(size, mask, m_pred, is_pdf):
-    """Per-cell validity at feature resolution: GT on PDF patches, ``m_pred`` elsewhere."""
-    if mask is None or is_pdf is None:
+def _validity_weight(size, mask, m_pred, is_pdf, oracle=False):
+    """Per-cell validity at feature resolution: GT on PDF patches, ``m_pred`` elsewhere.
+
+    ``oracle`` uses the GT on every view, so the prediction is bypassed entirely.
+    """
+    if mask is None:
         return m_pred                       # no GT routing available (e.g. validation)
     gt = F.adaptive_avg_pool2d(mask, size)   # (B, 1, H, W) board coverage
+    if oracle:
+        return gt
+    if is_pdf is None:
+        return m_pred
     a = is_pdf.view(-1, 1, 1, 1).to(m_pred.dtype)
     return a * gt + (1.0 - a) * m_pred
 
@@ -180,8 +198,10 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
     warm-start from a synthetic run would silently transfer nothing.
     """
 
-    def __init__(self, learned_mask=False, **kwargs):
+    def __init__(self, learned_mask=False, oracle_mask=False, **kwargs):
         super().__init__(**kwargs)
+        _check_oracle(learned_mask, oracle_mask)
+        self.oracle_mask = oracle_mask
 
         c_in = escnn.nn.FieldType(self.s, 1 * [self.s.trivial_repr])
         c_hid1 = escnn.nn.FieldType(self.s, 32 * [self.s.regular_repr])
@@ -242,8 +262,8 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
             x = escnn.nn.GeometricTensor(x, self.field_type)
             return self.net(x).tensor
 
-        if mask is not None and is_pdf is not None:
-            x = _gate_input(x, mask, is_pdf)
+        if mask is not None and (is_pdf is not None or self.oracle_mask):
+            x = _gate_input(x, mask, is_pdf, self.oracle_mask)
         x = escnn.nn.GeometricTensor(x, self.field_type)
 
         layers = list(self.net.children())
@@ -251,7 +271,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
             x = layer(x)
 
         m_pred = torch.sigmoid(self.mask_head(x).tensor)          # (B, 1, 24, 24)
-        w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf)
+        w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf, self.oracle_mask)
         x = escnn.nn.GeometricTensor(x.tensor * w, x.type)
 
         for layer in layers[self._readout_from:]:
@@ -302,9 +322,12 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         scale_factors=(64.0,),     # the patch scale factor(s); sets the centre-mask radius
         patch_size=64,
         learned_mask=False,        # board-validity aware pooling + mask predictor
+        oracle_mask=False,         # ceiling ablation: the TRUE mask on every view
         **kwargs,
     ):
         super().__init__(**kwargs)
+        _check_oracle(learned_mask, oracle_mask)
+        self.oracle_mask = oracle_mask
         s = self.s
 
         # --- Centre (donut) mask ------------------------------------------------
@@ -385,8 +408,8 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
             self.mask_head = _mask_predictor(c3, s)
 
     def forward(self, x, mask=None, is_pdf=None):
-        if self.learned_mask and mask is not None and is_pdf is not None:
-            x = _gate_input(x, mask, is_pdf)
+        if self.learned_mask and mask is not None and (is_pdf is not None or self.oracle_mask):
+            x = _gate_input(x, mask, is_pdf, self.oracle_mask)
         if self.inner_mask is not None:
             x = x * self.inner_mask
         x = escnn.nn.GeometricTensor(x, self.field_type)
@@ -395,7 +418,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         m_pred = w = None
         if self.learned_mask:
             m_pred = torch.sigmoid(self.mask_head(x).tensor)   # [B, 1, H, W] validity
-            w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf)
+            w = _validity_weight(m_pred.shape[-2:], mask, m_pred, is_pdf, self.oracle_mask)
 
         if self.head_type == "dense":
             if w is not None:

@@ -42,9 +42,15 @@ def process_batch_blobs(model, data, criterion, augmentation, device, cfg,
     # make the validation loss a different loss from the training one. Since a
     # mask-aware model returns ``m_pred`` regardless of what it was fed, this lets
     # the supervision BCE below be scored on both paths without leaking the GT.
+    #
+    # An ``oracle_mask`` model is the exception: it consumes the GT on every view by
+    # construction (it is the "what would a perfect predictor buy?" ablation, not a
+    # deployable model), so withholding the mask at validation would score a *different*
+    # model than the one being trained. It keeps the mask on both paths.
     masks = data["masks"].to(device) if "masks" in data else None
-    model_mask = None if validation else masks
-    model_is_pdf = None if validation else is_pdf
+    oracle = bool(getattr(model, "oracle_mask", False))
+    model_mask = masks if (oracle or not validation) else None
+    model_is_pdf = is_pdf if (oracle or not validation) else None
 
     # Only a mask-aware model takes the mask kwargs (it advertises itself with
     # ``learned_mask``); every other descriptor has a plain ``forward(patches)`` and

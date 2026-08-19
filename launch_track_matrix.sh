@@ -1,24 +1,19 @@
 #!/bin/bash
-# Launch a matrix of TRACK-data descriptor trainings, each WARM-STARTED from a synthetic
-# blob-descriptor checkpoint. This is the track counterpart of launch_training_matrix.sh:
-# for every network type it sweeps the `scale` hyperparameter and submits one Slurm job
-# per (network, scale) pair — but instead of building synthetic boards, each job trains
-# on a real `.tracks` file and initializes its model from a prior run's checkpoint.
+# Launch a matrix of TRACK-data descriptor trainings. This is the track counterpart of
+# launch_training_matrix.sh: for every network type it sweeps the `scale` hyperparameter
+# and submits one Slurm job per (network, scale) pair — but instead of building synthetic
+# boards, each job trains on a real `.tracks` file.
 #
-# The point of this script: `--from-dir DIR` chooses a DIRECTORY OF TRAINING RUNS and
-# continues from the checkpoints in there. For each (network, scale) it locates the
-# matching synthetic run under DIR — a `<net>_s<scale>_ss<ss>/checkpoints/<ckpt>.pth`,
-# at any depth (so dated `-n` sub-folders are found too) — and passes it as
-# `+training.init_from_checkpoint=<ckpt>`, which loads the model weights and starts a
-# FRESH run (epoch 0, new optimizer). See prepare_training in src/aef/train/__init__.py.
+# Every run trains FROM SCRATCH. The script used to warm-start each job from a matching
+# synthetic run's checkpoint, discovered under a `--from-dir DIR`; that machinery is gone.
+# `training.init_from_checkpoint` still exists in the training loop — pass it explicitly
+# via EXTRA_OVERRIDES (below) when a run really should start from a checkpoint.
 #
 # Usage:
-#   ./launch_track_matrix.sh --from-dir /raid/data/hsa/logs/2026_07_20_sweep \
-#                            --track /raid/data/hsa/datasets/only_absolute.tracks
-#   ./launch_track_matrix.sh --from-dir DIR --track FILE steerable   # only given network(s)
-#   ./launch_track_matrix.sh --from-dir DIR --track FILE --ckpt latest
-#   ./launch_track_matrix.sh --from-dir DIR --track FILE -n track_ft # group under a dated subfolder
-#   DRY_RUN=1 ./launch_track_matrix.sh --from-dir DIR --track FILE   # print jobs without submitting
+#   ./launch_track_matrix.sh --track /raid/data/hsa/datasets/only_absolute.tracks
+#   ./launch_track_matrix.sh --track FILE steerable   # only given network(s)
+#   ./launch_track_matrix.sh --track FILE -n track_ft # group under a dated subfolder
+#   DRY_RUN=1 ./launch_track_matrix.sh --track FILE   # print jobs without submitting
 #
 # There is no prebuild job — the `.tracks` file is prepared beforehand (by BlobBoards).
 #
@@ -45,6 +40,12 @@ declare -A CONFIG=(
   # note in the header.
   [logpolar_cascade]=track_descriptor_logpolar_cascade
   [logpolar_cascade_late]=track_descriptor_logpolar_cascade
+  # CEILING arm: the true mask on every view (`oracle_mask`), late weight resp. input
+  # gate. Not deployable — it is the "what would a perfect predictor be worth?"
+  # measurement that tells a useless mask apart from an unlearnable one. Submit with
+  # `logpolar_fftmask` (predicted mask) and `logpolar_fft` (no mask) or it says nothing.
+  [logpolar_oracle]=track_descriptor_logpolar_oracle
+  [logpolar_oracle_gate]=track_descriptor_logpolar_oracle
   [efficient8]=track_descriptor_efficient
   [efficient4]=track_descriptor_efficient
   # Learned board-validity masking on the steerable (escnn) descriptors — the cartesian
@@ -55,14 +56,14 @@ declare -A CONFIG=(
   [steerable_mask]=track_descriptor_steerable_mask
 )
 # Submission order (slowest last); must cover every CONFIG key.
-NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask logpolar_cascade logpolar_cascade_late steerable steerable_mask)
+NET_ORDER=(efficient8 efficient4 efficient8_mask efficient4_mask logpolar logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask logpolar_relphase_mask logpolar_bispectrum_mask logpolar_cascade logpolar_cascade_late logpolar_oracle logpolar_oracle_gate steerable steerable_mask)
 # What a bare (no network arg) invocation submits: the log-polar angular-head ladder
 # (max-pool/circ -> fft -> relphase/bispectrum -> fft+mask), matching
 # launch_training_matrix.sh's default.
 DEFAULT_SWEEP=(logpolar_circ logpolar_fft logpolar_relphase logpolar_bispectrum logpolar_fftmask)
 
-# per-network scale values (must match the synthetic runs you warm-start from, since the
-# model's scale knob has to agree with the checkpoint).
+# per-network scale values (must match the scale the `.tracks` patches were extracted at
+# — the model's scale knob and the patches have to agree).
 declare -A SCALES=(
   [steerable]="8 16 32 64 96 128"
   [logpolar]="96"
@@ -75,15 +76,14 @@ declare -A SCALES=(
   [logpolar_bispectrum_mask]="96"
   [logpolar_cascade]="96"
   [logpolar_cascade_late]="96"
+  [logpolar_oracle]="96"
+  [logpolar_oracle_gate]="96"
   [efficient8]="8 16 32 64 96 128"
   [efficient4]="8 16 32 64 96 128"
   [efficient8_mask]="8 16 32 64 96 128"
   [efficient4_mask]="8 16 32 64 96 128"
   [steerable_mask]="8 16 32 64 96 128"
 )
-# Supersample tag used ONLY to locate the source run (its name is <net>_s<scale>_ss<ss>);
-# it is not a track-training parameter (track patches are precomputed).
-SRC_SS="${SRC_SS:-3}"
 
 # Per-network memory override (falls back to $MEM, now 64GB for every net — the track
 # patches are all held in memory, so no net is meaningfully lighter). Add an entry only
@@ -112,6 +112,9 @@ declare -A NET_EXTRA=(
   # arm flips the second one.
   [logpolar_cascade]=""
   [logpolar_cascade_late]="++model.params.cascade_late_weight=true"
+  # The config already sets oracle_mask=true; the `_gate` arm moves it to the input.
+  [logpolar_oracle]=""
+  [logpolar_oracle_gate]="++model.params.cascade=true"
   # C8/C4 switch; the masking itself is in the *_mask configs (model `learned_mask` +
   # dataset `with_mask`), not overridden here.
   [efficient8_mask]="model.params.n_rotations=8"
@@ -129,36 +132,30 @@ LOGDIR="${LOGDIR:-logs}"
 # IDENTICAL across the arms of a comparison — a batch size pinned here applies to all of
 # them, where a per-net NET_EXTRA entry would silently give one arm a different one.
 #   EXTRA_OVERRIDES="training.batch_size=2048" ./launch_track_matrix.sh ...
+# It is also how to warm-start deliberately, now that the script does not:
+#   EXTRA_OVERRIDES="+training.init_from_checkpoint=/path/to/best.pth" ./launch_track_matrix.sh ...
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 
 DRY_RUN="${DRY_RUN:-0}"                       # DRY_RUN=1 -> print instead of submit
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- CLI parsing ------------------------------------------------------------
-# --from-dir DIR : directory of prior training runs to warm-start from (required)
 # --track FILE   : the .tracks HDF5 file to train on (required)
-# --ckpt NAME    : checkpoint basename to load (best|latest, default best)
 # --scales "A B" : restrict the scale sweep to these values (default: each net's SCALES)
 # -n/--name NAME : group this whole matrix under a dated "<YYYY_MM_DD>_<NAME>" subfolder
 # other args     : restrict to the given network(s) (default: DEFAULT_SWEEP)
-FROM_DIR=""
 TRACK_PATH=""
-CKPT="best"
 SCALE_FILTER=""
 RUN_NAME=""
 NETS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --from-dir) FROM_DIR="$2"; shift 2 ;;
     --track)    TRACK_PATH="$2"; shift 2 ;;
-    --ckpt)     CKPT="$2"; shift 2 ;;
     --scales)   SCALE_FILTER="$2"; shift 2 ;;
     -n|--name)  RUN_NAME="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $(basename "$0") --from-dir DIR --track FILE [--ckpt best|latest] [--scales \"A B\"] [-n NAME] [network ...]"
-      echo "  --from-dir DIR   directory of prior runs to warm-start each track run from (required)"
+      echo "Usage: $(basename "$0") --track FILE [--scales \"A B\"] [-n NAME] [network ...]"
       echo "  --track FILE     .tracks HDF5 file to train on (required)"
-      echo "  --ckpt NAME      checkpoint basename to load: best (default) or latest"
       echo "  --scales \"A B\"   restrict the scale sweep to these values (default: each net's full sweep)"
       echo "  -n, --name NAME  group runs under <YYYY_MM_DD>_NAME inside the log dir"
       echo "  network ...      restrict to given networks (default: ${DEFAULT_SWEEP[*]})"
@@ -172,11 +169,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# [[ -z "$FROM_DIR" ]] && { echo "!! --from-dir is required (directory of runs to warm-start from)" >&2; exit 1; }
 [[ -z "$TRACK_PATH" ]] && { echo "!! --track is required (path to the .tracks file)" >&2; exit 1; }
-# [[ ! -d "$FROM_DIR" ]] && { echo "!! --from-dir '$FROM_DIR' is not a directory" >&2; exit 1; }
 [[ ! -f "$TRACK_PATH" && "$DRY_RUN" != "1" ]] && { echo "!! --track '$TRACK_PATH' not found" >&2; exit 1; }
-case "$CKPT" in best|latest) ;; *) echo "!! --ckpt must be 'best' or 'latest'" >&2; exit 1 ;; esac
 
 # Every CONFIG entry must appear in NET_ORDER (so nothing silently vanishes).
 for net in "${!CONFIG[@]}"; do
@@ -196,14 +190,6 @@ fi
 LOG_OUTDIR="${LOGDIR}${RUN_SUBDIR:+/$RUN_SUBDIR}"
 mkdir -p "$REPO_ROOT/$LOG_OUTDIR"
 
-# Find the source checkpoint for a (net, scale): the descriptor run is named
-# <net>_s<scale>_ss<ss>; match its checkpoints/<ckpt>.pth at any depth under FROM_DIR.
-find_checkpoint() {
-  local net="$1" scale="$2"
-  local src_name="${net}_s${scale}_ss${SRC_SS}"
-  find "$FROM_DIR" -type f -path "*/${src_name}/checkpoints/${CKPT}.pth" 2>/dev/null | sort | head -n1
-}
-
 submit() {
   local net="$1" scale="$2"
   local cfg="${CONFIG[$net]:-}"
@@ -211,13 +197,6 @@ submit() {
     echo "!! unknown network '$net' (known: ${!CONFIG[*]})" >&2
     return 1
   fi
-
-  # local ckpt_path
-  # ckpt_path="$(find_checkpoint "$net" "$scale")"
-  # if [[ -z "$ckpt_path" ]]; then
-  #   echo "!! no ${CKPT}.pth for ${net}_s${scale}_ss${SRC_SS} under ${FROM_DIR} — skipping" >&2
-  #   return 0
-  # fi
 
   local name="track_${net}_s${scale}"
   local extra="${NET_EXTRA[$net]:-}"
@@ -242,11 +221,10 @@ pixi run python ../../src/run_training.py \\
 EOF
 )
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "===== would submit: ${name} (warm-start) ====="
+    echo "===== would submit: ${name} ====="
     echo "$job"
     echo
   else
-    
     echo "$job" | sbatch
   fi
 }
