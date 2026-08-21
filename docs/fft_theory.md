@@ -51,8 +51,7 @@ couplings, and is *complete* (invertible up to translation).
   Vision* 44(3), 341–353. Proves completeness of the bispectral invariants.
 - **Kakarala (1992).** *Triple Correlation on Groups.* PhD thesis, University of
   California, Irvine. The deep group-theoretic version.
-- **Nikias & Raghuveer (1987).** "Bispectrum Estimation: A Digital Signal Processing
-  Framework." *Proceedings of the IEEE* 75(7), 869–891. The estimation/practical side.
+- **Nikias & Raghuveer (1987).** "is." *Proceedings of the IEEE* 75(7), 869–891. The estimation/practical side.
 - **Sanborn, Shewmake, Olshausen & Hillar (2023).** "Bispectral Neural Networks." *ICLR*.
   The modern *learned* group-invariant version — "learn the invariant instead of
   hand-coding `|X|`."

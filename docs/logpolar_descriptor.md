@@ -245,6 +245,30 @@ Only a mask-aware model is ever *called* with the mask kwargs (`process_batch_bl
 checks `learned_mask`); `training.ignore_mask=true` disables the whole path — inputs and
 supervision — for the ablation.
 
+Two further knobs exist **only here** — the steerable descriptors have `learned_mask` and
+`oracle_mask` and nothing else:
+
+- **`cascade=True`** moves the masking from the pooling to the *input*: the trunk runs
+  twice, once to predict validity and once on the patch gated by that prediction, so the
+  reference view keeps its GT gate and the target gets `m_pred` upsampled to patch
+  resolution. The point is the receptive field — at 64×64 a weight on the 16×16 feature
+  grid can only drop contaminated cells, never clean them. It costs a second trunk pass
+  and **no parameters** (the same `trunk` and `mask_head` serve both), so the
+  `state_dict` is unchanged and warm starts transfer either way.
+  `cascade_late_weight` keeps the late weight on top and is off by default — with a
+  correct gate it costs the whole gain, plausibly because a spatially varying weight
+  convolves the angular spectrum the `fft` heads read out. Configs:
+  `track_descriptor_logpolar_cascade.yaml`, launcher entries `logpolar_cascade` /
+  `logpolar_cascade_late`.
+- **`mask_resolution`** taps `mask_head` earlier in the trunk for a finer `m_pred`:
+  `patch_size` (64×64), `patch_size // 2` (32×32), or the default `None` (the trunk
+  output, 16×16). The default predictor's cells each see ~51 px of a 64 px patch, so its
+  boundary is 2–4 cells wide where the true one is 1 and it systematically under-masks.
+  The tap changes `mask_head`'s input channels, so that tensor alone does not warm-start.
+
+Both are derived and measured in
+[steerable_masking.md](steerable_masking.md#cascade-the-gate-in-the-loop).
+
 Two honest caveats, both to **measure**, not assume:
 
 - **Reference-white vs target-real-background.** The reference patch's off-board is
@@ -258,12 +282,33 @@ Two honest caveats, both to **measure**, not assume:
   junk-sensitivity probe (descriptor change when the off-board region is scrambled), not
   only FPR95 and the angular-roll drift.
 
+### What it is actually worth (measured)
+
+On `iteration_4` track data a masked run does not beat its unmasked twin, and
+`src/mask_ablation.py` says why: a *perfect* mask is worth 1.7x as a late weight and 6.5x
+as an input gate, up to ~10x on occluded patches — but the predictor collects only about
+a third of the late-weight gain and nothing at all of the gate's, and it is structurally
+blind to occlusion because its supervision target is the board-in-frame mask.
+
+Training under a *perfect* mask (`oracle_mask`, the
+[`2026_08_19_MaskCeiling` sweep](mask_ceiling_experiment.md)) does not fix that and is not
+worth doing: it buys 1.35x over handing the ordinarily-trained
+trunk a perfect gate at test time, peaks in the first two epochs and degrades for the
+next 48, and leaves a model that scores 0.83 FPR95 when the mask is taken away (the
+unmasked control scores 0.035). The gap between the shipped masked model and the ceiling
+is the predictor at test time, not what the trunk was trained on.
+
+The full tables, the controls, and the ceiling arm are in
+[steerable_masking.md](steerable_masking.md#what-the-mask-is-worth-and-what-the-predictor-collects)
+— that note covers both families.
+
 ### Toggling and ablating
 
 The knobs ride through the usual config dicts (`model.params.head`,
-`model.params.n_harmonics`, `model.params.learned_mask`,
-`training.dataset.params.precompute_masks`, `training.mask_loss_weight`). A ready config
-bundles them:
+`model.params.n_harmonics`, `model.params.learned_mask`, `model.params.cascade`,
+`model.params.cascade_late_weight`, `model.params.mask_resolution`,
+`model.params.oracle_mask`, `training.dataset.params.precompute_masks`,
+`training.mask_loss_weight`, `training.ignore_mask`). A ready config bundles them:
 
 ```sh
 pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \

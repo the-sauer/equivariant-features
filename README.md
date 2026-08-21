@@ -50,6 +50,9 @@ and a whole matrix of runs (one Slurm job per network × scale) is submitted wit
 - [Log-polar descriptor](docs/logpolar_descriptor.md) — the log-polar geometry, why
   `HardNet` is not rotation-invariant on it, and `HardNetLogPolar` (circular angular
   padding + antialiased stride, with an ablation).
+- [The mask-ceiling experiment](docs/mask_ceiling_experiment.md) — what board-validity
+  masking is worth, measured: the four-arm `oracle_mask` sweep, the full ablation matrix,
+  and why training on ground-truth masks produces a model that is not a descriptor.
 
 ## Gotchas
 
