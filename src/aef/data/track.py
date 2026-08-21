@@ -390,6 +390,49 @@ def _band_target(pool_sizes, spec):
     return target
 
 
+def _band_quotas(bands, edges_deg, budget, bias):
+    """Split one batch's in-band-patch ``budget`` over the populated ``bands``.
+
+    ``bias == 0`` is the plain balance: every band gets the same quota. A positive
+    bias tilts the batch toward obliquity — a band's weight is ``exp(bias * u)`` with
+    ``u`` its band-center angle rescaled so the most frontal POPULATED band sits at 0
+    and the most oblique at 1, which makes ``exp(bias)`` exactly the ratio between the
+    two ends' quotas (``bias = ln 10 ~ 2.303`` -> the edge-on band draws 10x what the
+    near-frontal one does, the bands in between interpolating geometrically). A
+    negative bias tilts back toward fronto-parallel, i.e. part of the way to the
+    file's own distribution, without giving up the balance's floor.
+
+    Every populated band keeps at least one draw, so no bias can silence a band
+    outright; the rounding leftovers go by largest fractional remainder. Bands are
+    weighted by their center ANGLE, not by their rank, so custom
+    ``view_angle_band_edges`` (say a wide catch-all top band) tilt by how oblique a
+    band actually is.
+    """
+    bands = sorted(bands)
+    n = len(bands)
+    if n == 0:
+        return {}
+    budget = max(int(budget), n)
+    centers = np.asarray([(edges_deg[b] + edges_deg[b + 1]) / 2.0 for b in bands])
+    span = centers[-1] - centers[0]
+    u = (centers - centers[0]) / span if span > 0 else np.zeros(n)
+    weights = np.exp(float(bias) * u)
+    exact = weights / weights.sum() * budget
+    floors = np.floor(exact)
+    quotas = np.maximum(1, floors).astype(np.int64)
+    # Hand the floored-away remainder to the largest fractions, skipping the bands the
+    # >= 1 floor already lifted above their share (they have been paid).
+    left = budget - int(quotas.sum())
+    if left > 0:
+        cand = [j for j in np.argsort(-(exact - floors)) if floors[j] >= 1] or list(range(n))
+        for k in range(left):
+            quotas[cand[k % len(cand)]] += 1
+    while left < 0 and quotas.max() > 1:   # the >= 1 floor overshot a tiny budget
+        quotas[int(np.argmax(quotas))] -= 1
+        left += 1
+    return {int(b): int(q) for b, q in zip(bands, quotas)}
+
+
 class _BandCursor:
     """Cycles a band's pool in shuffled order, reshuffling on every wrap.
 
@@ -542,7 +585,7 @@ def _band_capacity(pool, groups):
 
 
 def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
-                        n_batches, rng):
+                        n_batches, rng, quotas=None):
     """Pack batches that draw EQUALLY from every populated viewing-angle band.
 
     Balance is enforced per BATCH, which is the granularity that matters: SupCon sees
@@ -553,6 +596,10 @@ def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
     with distinct confusers, the same negatives ``_pack_balanced`` uses. A band can
     land one patch over its quota (the pair that fills it may put two in-band patches
     in), so batch sizes vary slightly — as they already do under ``_pack_balanced``.
+
+    ``quotas`` (band -> in-band patches per batch, from ``_band_quotas``) overrides
+    the equal split when the caller wants the batch tilted toward the oblique bands;
+    ``None`` splits the positive half evenly, which is what "balanced" means.
 
     Two invariants carry over from ``_pack_balanced``: no index appears twice in a
     batch — a duplicate is a distance-0 fake positive — and every batch holds at least
@@ -570,7 +617,8 @@ def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
     # the sparse bands (the ones that run out of PDF patches) overshoot the crowded ones.
     # Each in-band patch drags in at most one partner, so a batch stays within
     # 2 * quota * n_bands positive slots.
-    quota = max(1, (batch_size - n_conf) // (2 * len(bands)))
+    if quotas is None:
+        quotas = {b: max(1, (batch_size - n_conf) // (2 * len(bands))) for b in bands}
     cursors = {b: _BandCursor(pools[b], rng) for b in bands}
     band_of = {i: b for b, pool in pools.items() for _gi, i in pool}
     confusers = list(confusers)
@@ -582,7 +630,7 @@ def _pack_band_balanced(pools, groups, confusers, batch_size, confuser_fraction,
         order = list(bands)
         rng.shuffle(order)   # no band is systematically first to claim a shared track
         for band in order:
-            cur = cursors[band]
+            cur, quota = cursors[band], quotas[band]
             taken, attempts, budget = 0, 0, len(cur) + quota
             while taken < quota and attempts < budget:
                 gi, seed = cur.next(rng)
@@ -626,7 +674,11 @@ class BlobTrackData(torch.utils.data.Dataset):
     viewing-angle band instead of following the file's own (heavily fronto-parallel)
     distribution — see `get_sampler`. `view_angle_band_edges` (degrees, default 0-90 in
     10 deg steps, the grid `conf/track_angle_validation.yaml` measures on) sets the
-    partition and `view_angle_band_target` the epoch length. It is orthogonal to
+    partition and `view_angle_band_target` the epoch length. `view_angle_band_bias`
+    tilts that equal draw: `0.0` (default) is the plain balance, `b > 0` gives the
+    most oblique populated band `exp(b)x` the quota of the most frontal one (so
+    `ln 10 ~ 2.3` is a 10:1 tilt), `b < 0` leans back toward fronto-parallel. It is
+    orthogonal to
     `view_angle_range`: that one restricts which observations exist at all (used to
     build the per-band validation splits), this one only reweights how the surviving
     ones are batched.
@@ -657,6 +709,7 @@ class BlobTrackData(torch.utils.data.Dataset):
         balance_view_angles=False,   # TRAINING: draw each obliquity band equally (see get_sampler)
         view_angle_band_edges=None,   # band edges in degrees; None -> 0..90 in 10 deg steps
         view_angle_band_target="median",   # in-band patches per band per epoch: min|median|mean|max or an int
+        view_angle_band_bias=0.0,   # >0 tilts the per-batch quotas toward the oblique bands (see _band_quotas)
         max_keypoints=None,   # cap per kind: <= this many positive-track patches AND confusers (see _cap_tracked)
         subsample_seed=0,   # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable
         log_stats=False,   # print a per-sequence / positive-structure breakdown on load
@@ -673,6 +726,14 @@ class BlobTrackData(torch.utils.data.Dataset):
         self.view_angle_band_edges = _band_edges(view_angle_band_edges)
         self.view_angle_band_target = view_angle_band_target
         _band_target([1], view_angle_band_target)   # same: fail on a bad spec, not at epoch 0
+        try:
+            self.view_angle_band_bias = float(view_angle_band_bias)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"view_angle_band_bias must be a number, got {view_angle_band_bias!r}") from e
+        if not np.isfinite(self.view_angle_band_bias):
+            raise ValueError(
+                f"view_angle_band_bias must be finite, got {view_angle_band_bias!r}")
         if max_keypoints is not None:
             max_keypoints = int(max_keypoints)
             if max_keypoints < 1:
@@ -1030,6 +1091,13 @@ class BlobTrackData(torch.utils.data.Dataset):
         too sparse to fill its quota out of disjoint pairs stops at what it has —
         padding it with duplicates would create distance-0 fake positives — and its
         ceiling (``_band_capacity``) is printed alongside the quota below.
+
+        ``view_angle_band_bias`` tilts those per-band quotas further, up the obliquity
+        axis (``_band_quotas``): equal treatment of the bands is already a large
+        upweighting of the oblique tail, but the tail is also where the descriptor is
+        hardest, so it can be worth spending more of the batch there than parity
+        gives. The tilt redistributes the same positive budget — the batch size, the
+        number of batches per epoch and the confuser half are unchanged.
         """
         pos_groups, confusers = self._grouped_indices()
         n_conf = max(0, round(batch_size * confuser_fraction))
@@ -1053,31 +1121,40 @@ class BlobTrackData(torch.utils.data.Dataset):
             )
 
         target = _band_target([len(p) for p in pools.values()], self.view_angle_band_target)
-        quota = max(1, (batch_size - n_conf) // (2 * len(pools)))
-        n_batches = max(1, -(-target // quota))
+        # `base` is the equal share; the bias only redistributes it between the bands,
+        # so the epoch length (and the total number of positives per batch) does not
+        # move when the bias is turned up.
+        base = max(1, (batch_size - n_conf) // (2 * len(pools)))
+        bias = self.view_angle_band_bias
+        quotas = _band_quotas(pools, self.view_angle_band_edges, base * len(pools), bias)
+        n_batches = max(1, -(-target // base))
         edges = self.view_angle_band_edges
+        tilt = (f", bias={bias:g} -> quotas {min(quotas.values())}..{max(quotas.values())}"
+                if bias else "")
         print(f"BlobTrackData train sampler (view-angle balanced): {len(pools)}/"
-              f"{len(edges) - 1} populated bands x {quota} in-band patches per batch "
+              f"{len(edges) - 1} populated bands x ~{base} in-band patches per batch "
               f"+ {n_conf} confusers, {n_batches} batches/epoch "
-              f"(target={self.view_angle_band_target!r} -> {target} draws/band/epoch)")
-        # `draws` is what every band is asked for per epoch; against its pool size that
-        # is the resampling factor — >1 means the band repeats within an epoch (the
-        # rare, oblique end), <1 means only that fraction of it is seen per epoch (the
+              f"(target={self.view_angle_band_target!r} -> {target} draws/band/epoch{tilt})")
+        # `draws` is what a band is asked for per epoch; against its pool size that is
+        # the resampling factor — >1 means the band repeats within an epoch (the rare,
+        # oblique end), <1 means only that fraction of it is seen per epoch (the
         # crowded near-frontal end; each epoch reshuffles, so the rest comes up later).
-        draws = quota * n_batches
         for band in sorted(pools):
             n_obs = len(pools[band])
             n_tracks = len({gi for gi, _ in pools[band]})
+            quota = quotas[band]
             capacity = _band_capacity(pools[band], groups)
             short = (f"  !! caps at {capacity} < quota {quota}: too few disjoint pairs, "
                      "widen this band") if capacity < quota else ""
             print(f"  band [{edges[band]:g}, {edges[band + 1]:g}) deg: {n_obs} obs, "
-                  f"{n_tracks} tracks, {draws / n_obs:.2f} draws/obs per epoch{short}")
+                  f"{n_tracks} tracks, quota {quota}/batch, "
+                  f"{quota * n_batches / n_obs:.2f} draws/obs per epoch{short}")
 
         def pack(_pos_groups, conf, bs, conf_frac, rng):
             # `pos_groups` is already folded into `pools`/`groups`; the confusers and
             # the per-epoch RNG are what the sampler still supplies.
-            return _pack_band_balanced(pools, groups, conf, bs, conf_frac, n_batches, rng)
+            return _pack_band_balanced(pools, groups, conf, bs, conf_frac, n_batches, rng,
+                                       quotas=quotas)
 
         return _ReshufflingBatchSampler(
             pack, pos_groups, confusers, batch_size, confuser_fraction, seed

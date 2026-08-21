@@ -351,9 +351,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         c3 = escnn.nn.FieldType(s, out_dim * [s.regular_repr])
 
         # Mask the boundary ring after every conv: padded convs leak zero-padding
-        # artifacts at the border that break rotation equivariance (unlike NoStride's
-        # valid convs). Re-masking each block — as BlobDescriptorRobust does — keeps
-        # the field circularly supported and the network tightly equivariant.
+        # artifacts at the border that break rotation equiightly equivariant.
         def block(cin, cout, k, size):
             return [
                 escnn.nn.R2Conv(

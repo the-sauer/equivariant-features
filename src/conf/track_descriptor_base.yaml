@@ -65,6 +65,14 @@ training:
       # band (shortest epoch, least repetition), "max" = one pass over the most crowded
       # one (longest, heaviest repetition of the rare bands).
       view_angle_band_target: median
+      # Tilt of the per-batch quotas along the obliquity axis. 0.0 = plain balance
+      # (every populated band the same quota). b > 0 spends more of the batch on the
+      # oblique bands: the most oblique populated band gets exp(b)x the quota of the
+      # most frontal one, the bands between interpolating geometrically — 2.3 is a
+      # 10:1 tilt, 0.7 a 2:1 one. b < 0 leans back toward fronto-parallel. The same
+      # positive budget is redistributed, so batch size and epoch length do not move,
+      # and every populated band keeps at least one draw.
+      view_angle_band_bias: 0.0
       # 45 boards = 13 tracked-media (real positives) + 32 pdf-only (negatives now,
       # tracked media added later). Disjoint from the val boards below.
       sequences:

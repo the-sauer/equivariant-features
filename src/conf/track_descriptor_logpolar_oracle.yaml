@@ -16,9 +16,18 @@
 # same batch size, predicted mask) and with `logpolar_fft` (no mask at all). Three arms
 # or the comparison means nothing.
 #
-# `logpolar_oracle_gate` in launch_track_matrix.sh adds `cascade: true`, i.e. the oracle
-# applied at the INPUT instead of at the pooling — where the frozen-trunk headroom was
-# ~3.6x larger (see track_descriptor_logpolar_cascade.yaml).
+# NOTE this arm masks at BOTH entry points: with `oracle_mask` the non-cascade forward
+# also runs `input_norm(patches, mask=mask)`, so it is `mask_ablation.py`'s `both_gt`, not
+# `late_gt`. `logpolar_oracle_gate` in launch_track_matrix.sh adds `cascade: true` — the
+# input gate alone, where the frozen-trunk headroom was largest.
+#
+# RESULT (2026_08_19_MaskCeiling, 50 epochs): both oracle arms peak in their first two
+# epochs (best FPR95@all 0.0247 / 0.0128 vs 0.0349 for `fft`) and then degrade for the
+# remaining 48 while their training loss keeps falling. Strip the mask off the trained
+# weights and they score 0.83 / 0.53 — they are functions of (patch, mask), not
+# descriptors. Training under the oracle buys only 1.35x over giving the ordinarily
+# trained `fftmask` trunk a perfect gate at test time (0.0129 vs 0.0174), so it is a
+# diagnostic and not a recipe. Full write-up: docs/mask_ceiling_experiment.md.
 #
 # `mask_loss_weight: 0` — the BCE is kept as a DIAGNOSTIC (it still gets its curve) but
 # does not train: with the oracle in place the descriptor never consumes `m_pred`, so

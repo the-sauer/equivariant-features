@@ -19,6 +19,7 @@ from aef.data.track import (
     _band_capacity,
     _band_edges,
     _band_pools,
+    _band_quotas,
     _band_target,
     _bands_of,
     _pack_band_balanced,
@@ -67,6 +68,69 @@ def test_band_target_ignores_empty_bands():
 def test_invalid_band_target_is_rejected(bad):
     with pytest.raises(ValueError):
         _band_target([10], bad)
+
+
+# ------------------------------------------------------------- obliquity bias --
+
+def test_zero_bias_splits_the_budget_evenly():
+    assert _band_quotas([0, 1, 2, 3], _band_edges(None), 40, 0.0) == {0: 10, 1: 10, 2: 10, 3: 10}
+
+
+def test_positive_bias_gives_the_oblique_end_exp_bias_times_the_frontal_one():
+    edges = _band_edges(None)
+    quotas = _band_quotas([0, 4, 8], edges, 3 * 100, np.log(10.0))
+    # 3 bands, u = 0 / 0.5 / 1 -> weights 1 : sqrt(10) : 10, normalized over the budget.
+    assert quotas[8] / quotas[0] == pytest.approx(10.0, rel=0.02)
+    assert quotas[4] / quotas[0] == pytest.approx(np.sqrt(10.0), rel=0.02)
+    assert sum(quotas.values()) == 300
+
+
+def test_negative_bias_tilts_back_toward_fronto_parallel():
+    quotas = _band_quotas([0, 8], _band_edges(None), 2 * 60, -np.log(4.0))
+    assert quotas[0] / quotas[8] == pytest.approx(4.0, rel=0.02)
+
+
+def test_bias_weights_bands_by_angle_not_by_rank():
+    # A wide catch-all top band [40, 90) sits at 65 deg, so it is tilted much harder
+    # than its rank (3 of 4) would suggest.
+    edges = _band_edges([0, 10, 20, 40, 90])
+    quotas = _band_quotas([0, 1, 2, 3], edges, 4 * 50, np.log(8.0))
+    centers = [5.0, 15.0, 30.0, 65.0]
+    expected = [np.exp(np.log(8.0) * (c - 5.0) / 60.0) for c in centers]
+    ratios = [quotas[b] / quotas[0] for b in range(4)]
+    assert ratios == pytest.approx([e / expected[0] for e in expected], rel=0.03)
+
+
+def test_every_populated_band_keeps_a_draw_under_an_extreme_bias():
+    quotas = _band_quotas([0, 1, 2, 8], _band_edges(None), 4 * 4, 20.0)
+    assert min(quotas.values()) >= 1
+    assert quotas[8] == max(quotas.values())
+
+
+def test_quotas_spend_the_whole_budget():
+    edges = _band_edges(None)
+    for bias in (0.0, 0.5, 2.0, -1.5):
+        for budget in (13, 40, 101):
+            quotas = _band_quotas([0, 2, 5, 7], edges, budget, bias)
+            assert sum(quotas.values()) == budget, (bias, budget)
+
+
+def test_a_single_populated_band_takes_everything_whatever_the_bias():
+    assert _band_quotas([3], _band_edges(None), 25, 3.0) == {3: 25}
+
+
+def test_biased_quotas_shape_the_batch():
+    pools, groups, bands, _ = _skewed([400, 400, 400])
+    edges = _band_edges(None)
+    quotas = _band_quotas(pools, edges, 3 * 10, np.log(4.0))
+    batches = _pack_band_balanced(pools, groups, confusers=[], batch_size=60,
+                                  confuser_fraction=0.0, n_batches=4,
+                                  rng=random.Random(11), quotas=quotas)
+    for batch in batches:
+        hist = _band_histogram(batch, bands)
+        assert [hist[b] for b in (0, 1, 2)] == [quotas[b] for b in (0, 1, 2)]
+        assert hist[2] > hist[1] > hist[0]
+        assert len(batch) == len(set(batch))
 
 
 # ------------------------------------------------------------------- pool layout --
@@ -365,6 +429,37 @@ def test_balanced_sampler_gives_every_band_the_same_share(dataset):
         # quota of pairs — that is the whole point of the mechanism.
         assert set(_band_histogram(batch, bands).values()) == {2}
         assert len(batch) == len(set(batch))
+
+
+def test_band_bias_moves_the_batch_toward_the_oblique_band(monkeypatch):
+    from aef.data import track as track_mod
+
+    monkeypatch.setattr(track_mod.h5py, "File",
+                        lambda *_a, **_k: _fake_tracks_file(), raising=False)
+    d = track_mod.BlobTrackData(
+        h5_path="fake.tracks", include_untracked=True, unique_track_ids=False,
+        balance_view_angles=True, view_angle_band_bias=np.log(4.0),
+    )
+    bands = _bands_of(d.view_angles, d.view_angle_band_edges)
+    # Same three bands ([0,10), [20,30), [50,60)) and the same positive budget as the
+    # unbiased sampler, but spent mostly on the edge-on end.
+    counts = collections.Counter()
+    for batch in d.get_sampler(batch_size=12, confuser_fraction=0.0):
+        hist = _band_histogram(batch, bands)
+        assert hist[5] > hist[0]
+        counts.update(hist)
+    assert counts[5] > counts[2] >= counts[0]
+
+
+@pytest.mark.parametrize("bad", ["steep", None, float("nan"), float("inf")])
+def test_invalid_band_bias_is_rejected(monkeypatch, bad):
+    from aef.data import track as track_mod
+
+    monkeypatch.setattr(track_mod.h5py, "File",
+                        lambda *_a, **_k: _fake_tracks_file(), raising=False)
+    with pytest.raises(ValueError):
+        track_mod.BlobTrackData(h5_path="fake.tracks", unique_track_ids=False,
+                                balance_view_angles=True, view_angle_band_bias=bad)
 
 
 def test_unbalanced_sampler_is_untouched(monkeypatch):
