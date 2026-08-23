@@ -16,8 +16,10 @@
 
 """
 This module contains the implementations of the models used in this thesis.
+
+A model is resolved by name from this namespace (``model.name`` in the Hydra config,
+and ``MODEL`` on ``src/to_onnx.py``), so anything trainable/exportable must be
+re-exported here.
 """
 
-from .blob_canon import BlobCanonicalization
-from .blob_descriptor import *
-from .hardnet import HardNet, HardNetLogPolar
+from .hardnet import HardNetLogPolar

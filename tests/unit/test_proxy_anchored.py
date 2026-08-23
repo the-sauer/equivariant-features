@@ -190,8 +190,8 @@ def test_process_batch_hands_the_flag_to_the_loss_filtered_like_the_features():
 
 
 def test_the_flag_survives_validation():
-    # Unlike the GT mask (withheld, because test time has none), the flag is a label:
-    # withholding it would silently make the validation loss a different loss.
+    # The flag is a label, not a model input: withholding it on the validation path
+    # would silently make the validation loss a different loss.
     got = _run(_patch_batch(), validation=True)
     assert torch.equal(got, torch.tensor([1, 0, 0]))
 

@@ -27,7 +27,6 @@ from tqdm import tqdm
 
 from .. import export
 from . import losses
-from .canonicalizer import *
 from .descriptor import *
 
 
@@ -134,9 +133,9 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     elif getattr(cfg.training, "init_from_checkpoint", None):
         # Warm-start: load ONLY the model weights and start a FRESH run (epoch 0, new
         # optimizer/scheduler). Distinct from `continue_from_checkpoint`, which resumes a
-        # run in place. Used to seed track training from a synthetic-descriptor checkpoint
-        # (see launch_track_matrix.sh). strict=False tolerates head/shape drift between
-        # the source model and this run's model, reporting what was skipped.
+        # run in place. Used to seed a real-track run from a synthetic-descriptor
+        # checkpoint. strict=False tolerates head/shape drift between the source model
+        # and this run's model, reporting what was skipped.
         checkpoint = torch.load(cfg.training.init_from_checkpoint, map_location=device)
         state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
         # `strict=False` only forgives missing/unexpected KEYS — a key that exists with a
@@ -301,11 +300,10 @@ def train_func(process_batch):
             """Append this epoch's values, admitting keys the config never declared.
 
             A ``process_batch`` function may report losses it computes itself rather
-            than pulling from the criterion — ``process_batch_blobs`` adds the
-            mask-supervision ``mask_bce`` this way — so the set of curves is only
-            known once a batch has run. A key that shows up late is backfilled with
-            NaN for the epochs before it existed, keeping every series the same
-            length as ``x``; a key that stops being reported gets NaN as well.
+            than pulling from the criterion, so the set of curves is only known once a
+            batch has run. A key that shows up late is backfilled with NaN for the
+            epochs before it existed, keeping every series the same length as ``x``; a
+            key that stops being reported gets NaN as well.
             """
             for n in values:
                 if n not in curves:
@@ -320,14 +318,11 @@ def train_func(process_batch):
         model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
         scale_desc = getattr(cfg, "scale", None)
         if scale_desc is None:
-            _p = cfg.training.dataset.params
-            scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
-        # getattr with defaults: only the log-polar heads carry `head_type` /
-        # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
-        # crash here *after* a full epoch, at plotting time.
+            scale_desc = cfg.training.dataset.params.get("logpolar_outer_factor", "n/a")
+        # getattr with a default: a model without `head_type` used to crash here
+        # *after* a full epoch, at plotting time.
         head_desc = "FFT" if getattr(model, "head_type", None) == "fft" else "MaxPool"
-        mask_desc = "& Mask " if getattr(model, "learned_mask", False) else ""
-        plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
+        plot_title = f"{model_name} {head_desc} (scale={scale_desc})"
 
         # Optional sub-epoch validation: run the whole validation suite every N
         # training batches on top of the end-of-epoch run, so the metrics can be
@@ -445,8 +440,7 @@ def train_func(process_batch):
                 # Lower bound defaults to 1e-3, but expands downward (with a little
                 # headroom) whenever a series dips below it so the curve stays visible.
                 # The top defaults to 1 — the FPR metrics live in [0, 1] — and likewise
-                # expands whenever a series exceeds it, which an unbounded loss such as
-                # `mask_bce` can do early on.
+                # expands whenever an unbounded series exceeds it.
                 data_min = min((b for b, _ in best_marks), default=1e-3)
                 lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
                 upper = 1.0 if series_max <= 1.0 else series_max * 1.2
@@ -521,14 +515,11 @@ def train_func(process_batch):
             model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
             scale_desc = getattr(cfg, "scale", None)
             if scale_desc is None:
-                _p = cfg.training.dataset.params
-                scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
-            # getattr with defaults: only the log-polar heads carry `head_type` /
-            # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
-            # crash here *after* a full epoch, at plotting time.
+                scale_desc = cfg.training.dataset.params.get("logpolar_outer_factor", "n/a")
+            # getattr with a default: a model without `head_type` used to crash here
+            # *after* a full epoch, at plotting time.
             head_desc = getattr(model, "head_type", None)
-            mask_desc = "& mask " if getattr(model, "learned_mask", False) else ""
-            plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
+            plot_title = f"{model_name} {head_desc} (scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)

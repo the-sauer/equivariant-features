@@ -43,7 +43,6 @@ training:
       patch_type: logpolar
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: ${scale}
-      precompute_masks: true
     name: BlobBoardHomographyData
   patch_size: 64
   process_batch: process_batch_blobs
@@ -61,7 +60,6 @@ training:
   loss:
   - name: SupCon
   num_epochs: 1000
-  ignore_mask: false
   continue: ''
 logging:
   model_checkpoints: true
@@ -114,7 +112,10 @@ validation:
       patch_type: logpolar
       logpolar_inner_factor: 2.0
       logpolar_outer_factor: ${scale}
-      precompute_masks: true
+      # Inert (the dataset ignores unknown kwargs), but it is part of this split's
+      # prepared-dataset cache key — dropping it would orphan every already-built
+      # validation cache under `cache_dir`. Same reason as `_CACHE_KEY_REMOVED` in
+      # aef/data/homography.py.
       ignore_mask: false
   datasets:
   - name: overall

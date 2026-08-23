@@ -4,7 +4,7 @@ Affine Equivariant Features, the main implementation of my master thesis.
 
 ## Getting started
 
-Make sure you have Python installed. Supported version are 3.12 and 3.13.
+Make sure you have Python installed. Supported versions are 3.12 and 3.13.
 
 Initialise the `BlobBoards.jl` submodule
 ```sh
@@ -19,40 +19,46 @@ and install the python dependencies.
 pip install -r requirements.txt
 ```
 
-You can now run a training with
+## Training
+
+Four Slurm scripts cover everything the repo trains — a synthetic pre-training pass and
+a real-footage bootstrap round, each with a `_vanilla` baseline:
+
 ```sh
-python src/run_training.py --config-name (scale|detector|descriptor)
+sbatch bootstrap_synthetic_network.sh      # synthetic boards, ProxyAnchoredSupCon + fft head
+sbatch bootstrap_synthetic_vanilla.sh      # synthetic boards, SupCon + maxpool head
+BB_ITERATION=4 sbatch bootstrap_real.sh          # real .tracks footage, round 4
+BB_ITERATION=4 sbatch bootstrap_real_vanilla.sh
 ```
 
-For the blob-descriptor configs, one training run is
+Each is a one-line wrapper around the Hydra entrypoint, so a run can be reproduced
+directly (any config key is overridable on the CLI):
+
 ```sh
-python src/run_training.py --config-name blob_descriptor_steerable scale=64
+python src/run_training.py --config-name bootstrap_synthetic scale=128
 ```
-and a whole matrix of runs (one Slurm job per network × scale) is submitted with
+
+Two supporting entrypoints:
+
 ```sh
-./launch_training_matrix.sh -n my_sweep steerable efficient8 efficient4
+python src/prebuild_datasets.py --config-name bootstrap_synthetic   # warm the dataset cache, then exit
+python src/to_onnx.py --run path/to/run_dir --summary --check       # (re-)export a checkpoint to ONNX
 ```
+
+Runs with `logging.export_onnx: true` (all four configs) export `best.onnx` themselves
+when the last epoch ends; `to_onnx.py` is for re-exports and for runs killed early.
 
 ## Documentation
 
-- [Blob-board data pipeline](docs/data_pipeline.md) — views/patches, background
-  compositing, garbage keypoints, the clean identity view, scale bands and equal-sized
-  validation splits.
-- [Configs, training & sweeps](docs/configs_and_training.md) — the base/leaf config
-  hierarchy, the single `scale` hyperparameter, `shared_params` + Hydra struct mode,
-  DataLoader workers, loss curves, and the matrix launcher.
-- [Steerable blob descriptors](docs/steerable_descriptors.md) — the `escnn` model
-  variants, why `NoStride` is heavy, and `BlobDescriptorEfficient` (design, benchmarks,
-  the equivariance trade-off).
-- [Steerable board-validity masking](docs/steerable_masking.md) — `learned_mask` on the
-  `escnn` descriptors: why weighting by a scalar field stays equivariant, the
-  given-on-`is_pdf` / predicted-on-target split, and how the predictor is supervised.
-- [Log-polar descriptor](docs/logpolar_descriptor.md) — the log-polar geometry, why
-  `HardNet` is not rotation-invariant on it, and `HardNetLogPolar` (circular angular
-  padding + antialiased stride, with an ablation).
-- [The mask-ceiling experiment](docs/mask_ceiling_experiment.md) — what board-validity
-  masking is worth, measured: the four-arm `oracle_mask` sweep, the full ablation matrix,
-  and why training on ground-truth masks produces a model that is not a descriptor.
+- [Blob-board data pipeline](docs/data_pipeline.md) — views/patches, shape
+  normalization, background compositing, garbage keypoints, the clean identity view,
+  track viewing-angle balance, and the dataset cache.
+- [Configs, training & bootstrapping](docs/configs_and_training.md) — the four entry
+  points, the single `scale` hyperparameter, `shared_params` + Hydra struct mode,
+  checkpoints, ONNX export, and the proxy-anchored losses.
+- [Log-polar descriptor](docs/logpolar_descriptor.md) — the log-polar geometry, why a
+  plain HardNet trunk is not rotation-invariant on it, and the circular-padding /
+  antialiasing / FFT-head fixes, with ablations.
 
 ## Gotchas
 

@@ -33,7 +33,6 @@ import torch
 from torch.export import Dim
 
 from . import models
-from .models import escnn_export
 
 
 # Ops onnxruntime implements on the CPU EP only: hitting one in a GPU session forces a
@@ -48,11 +47,9 @@ def batch_dynamic():
     """`dynamic_shapes` marking the batch axis of a single positional input dynamic.
 
     Positional (a 1-tuple matching ``args``), *not* a dict: a dict has to be keyed by the
-    forward parameter's own name, which differs across this repo's descriptors —
-    ``patches`` on :class:`HardNetLogPolar`, ``x`` on the steerable and efficient blob
-    descriptors — so a dict silently ties the export to one model family and raises
-    ``UserError: its top-level keys must be the arg names`` for the rest. The ONNX graph
-    input is named by ``input_names`` regardless.
+    forward parameter's own name and raises ``UserError: its top-level keys must be the
+    arg names`` when it does not match. The ONNX graph input is named by ``input_names``
+    regardless.
 
     A fresh ``Dim`` per call, since one export's symbols do not belong to another's.
     """
@@ -96,39 +93,20 @@ def load_state_dict(path):
     return blob
 
 
-# Buffers an escnn conv derives from its basis coefficients rather than storing:
-# `expand_parameters()` writes them on the train->eval transition and `train()` deletes
-# them again, so whether a checkpoint contains them depends only on the mode the model
-# happened to be in when it was saved. They are recomputed from the loaded weights, so a
-# mismatch on them either way is not a mismatch of the trained model.
-EXPANSION_BUFFERS = {"filter", "expanded_bias"}
-
-
-def _is_expansion_buffer(key):
-    """Matched on the leaf name, so a conv at the top level counts too, not just `net.1.*`."""
-    return key.rsplit(".", 1)[-1] in EXPANSION_BUFFERS
-
-
 def load_weights(model, weights):
-    """Load `weights` into `model`, tolerating escnn's derived expansion buffers.
+    """Load `weights` into `model`.
 
-    Must be called while `model` is still in **training** mode: `escnn.nn.R2Conv` only
-    materializes `<layer>.filter` / `<layer>.expanded_bias` when it switches to eval, and
-    a checkpoint written mid-training has no such entry — loading into an already-eval'd
-    model then dies with `Missing key(s) ... net.1.filter`. The reverse (a checkpoint
-    saved from an eval-mode model) shows up as unexpected keys. Both are ignored, and the
-    caller's later `.eval()` regenerates them from the coefficients just loaded.
-
-    Anything else missing or unexpected is a real architecture mismatch and raises.
+    Anything missing or unexpected is a real architecture mismatch and raises: a
+    checkpoint stores weights only, so the constructor params handed in alongside it are
+    the only description of the architecture and a silent partial load would export a
+    half-initialized graph.
     """
     state = load_state_dict(weights)
     missing, unexpected = model.load_state_dict(state, strict=False)
-    stray_missing = [k for k in missing if not _is_expansion_buffer(k)]
-    stray_unexpected = [k for k in unexpected if not _is_expansion_buffer(k)]
-    if stray_missing or stray_unexpected:
+    if missing or unexpected:
         raise RuntimeError(
             f"{type(model).__name__} does not match {weights}: "
-            f"missing {stray_missing}, unexpected {stray_unexpected} — the constructor "
+            f"missing {list(missing)}, unexpected {list(unexpected)} — the constructor "
             f"params do not describe the architecture this checkpoint was trained with"
         )
     return model
@@ -137,9 +115,7 @@ def load_weights(model, weights):
 def build_model(model_name, params, weights=None):
     """Construct `model_name` from `aef.models` with `params`, optionally loading weights.
 
-    Built on the CPU and left in eval mode, which is what the export needs. The weights go
-    in *before* `eval()`, so escnn's expanded filters are derived from them; see
-    :func:`load_weights`.
+    Built on the CPU and left in eval mode, which is what the export needs.
     """
     model = getattr(models, model_name)(**params)
     if weights is not None:
@@ -148,50 +124,12 @@ def build_model(model_name, params, weights=None):
     return model
 
 
-def deploy_for_export(model, example_inputs, reference, tolerance=1e-5):
-    """Replace a steerable model's escnn layers with plain-torch equivalents.
-
-    ``torch.export`` cannot trace ``escnn.nn.R2Conv``, which expands its filter from basis
-    coefficients on every forward and touches the basis' raw storage while doing so — with
-    FakeTensor inputs that raises ``Cannot access data pointer``. At eval time the expanded
-    filter is constant, so :func:`aef.models.escnn_export.deploy` bakes it into ordinary
-    ``Conv2d`` weights; see that module for what each layer becomes.
-
-    Converting is only safe if it changes nothing, so the converted model is re-run on the
-    same input and compared against ``reference`` — a mismatch raises rather than writing a
-    silently wrong graph. Returns the new ``(model, reference)``; the model is converted in
-    place, hence the caller must own it.
-    """
-    if not escnn_export.is_escnn(model):
-        return model, reference
-    model = escnn_export.deploy(model)
-    with torch.no_grad():
-        deployed = model(*example_inputs)
-    deployed = deployed if isinstance(deployed, tuple) else (deployed,)
-    if len(deployed) != len(reference):
-        raise RuntimeError(f"deploy() changed the number of outputs: "
-                           f"{len(reference)} -> {len(deployed)}")
-    for i, (got, want) in enumerate(zip(deployed, reference)):
-        delta = (got - want).abs().max().item()
-        if not delta <= tolerance:
-            raise RuntimeError(
-                f"deploy() changed output {i}: max |plain - escnn| = {delta:.3e} > "
-                f"{tolerance:.1e}. Refusing to export a graph that does not match the "
-                f"trained model."
-            )
-    return model, deployed
-
-
 def export_model(model, path, resolution, in_channels=1, opset=None,
                  output_name="descriptors"):
     """Export an already-built model to `path`.
 
     Returns ``(onnx_program, example_inputs, reference)``; ``reference`` is the torch
     output on the dummy input, for :func:`check`.
-
-    A steerable (escnn) model is converted to plain torch first — see
-    :func:`deploy_for_export`. That conversion is in place, so `model` must be one the
-    caller owns; :func:`export_checkpoint` builds a fresh one for exactly this reason.
     """
     model.eval()
     # Batch MUST be > 1 in the example: torch.export applies 0/1 specialization,
@@ -203,12 +141,7 @@ def export_model(model, path, resolution, in_channels=1, opset=None,
     with torch.no_grad():
         reference = model(*example_inputs)
     reference = reference if isinstance(reference, tuple) else (reference,)
-    model, reference = deploy_for_export(model, example_inputs, reference)
-    # `learned_mask` models return (descriptor, m_pred); with no mask/is_pdf given the
-    # predicted mask is the one that is applied, which is exactly the inference case.
-    output_names = [output_name] + [f"aux_{i}" for i in range(1, len(reference))]
-    if len(reference) > 1:
-        output_names[1] = "mask"
+    output_names = [output_name]
 
     # torch>=2.9 defaults to the dynamo exporter, which ignores `dynamic_axes`
     # (the legacy TorchScript arg) and consumes `dynamic_shapes` instead. The named

@@ -69,7 +69,7 @@ def _cfg(tmp_path, **logging_overrides):
             "num_workers": 0,
             "optimizer": {"name": "SGD", "params": {"lr": 0.01}},
             "loss": [],
-            "dataset": {"params": {"patch_scale_factors": [1.0]}},
+            "dataset": {"params": {"logpolar_outer_factor": 96.0}},
         },
         "validation": {"batch_size": 4, "num_workers": 0},
     })
@@ -161,10 +161,10 @@ class _NamedArg(torch.nn.Module):
 def test_batch_axis_stays_dynamic_whatever_the_arg_is_called():
     """`dynamic_shapes` keyed by name only fits models whose input is called `patches`.
 
-    `HardNetLogPolar.forward(self, patches)` is the odd one out — the steerable and
-    efficient blob descriptors take `x`, and a name-keyed dict rejects them outright
-    (`UserError: its top-level keys must be the arg names`). This is the export step that
-    runs unattended after every training run now, so it has to hold for all of them.
+    `HardNetLogPolar.forward(self, patches)` names its input `patches`; a model whose
+    forward takes `x` is rejected outright by a name-keyed dict (`UserError: its
+    top-level keys must be the arg names`). This is the export step that runs unattended
+    after every training run, so it has to hold whatever the argument is called.
     """
     for arg_name in ("patches", "x"):
         model = _NamedArg(arg_name).eval()

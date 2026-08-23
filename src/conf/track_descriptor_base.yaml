@@ -1,15 +1,13 @@
 # Base config for training a blob descriptor on REAL track data (a `.tracks` HDF5
 # file of canonicalized, track-labelled patches — one patch type / scale per file).
 #
-# Unlike the synthetic blob_descriptor_* configs this does NOT inherit `config`/`dgx`:
-# those set ILSVRC/BlobBoard dataset params (data_dir, image_size, ...) that would leak
-# into the BlobTrackData constructor. Everything BlobTrackData needs is set here; the
-# per-network leaves (track_descriptor_<net>) add only the `model` block + `scale`.
+# Everything BlobTrackData needs is set here; the leaves that compose it
+# (`bootstrap_real`, `bootstrap_real_vanilla`) add only the `model` block + `scale`.
 #
 # The `.tracks` patches are already canonicalized, so BlobTrackData plugs straight into
 # process_batch_blobs (its collate reuses the blob-batch keys). Warm-start a run from a
 # synthetic-descriptor checkpoint with `+training.init_from_checkpoint=<path>` (loads
-# model weights only, epoch 0) — see launch_track_matrix.sh.
+# model weights only, epoch 0).
 #
 # Split: only 18 of the 50 boards currently have tracked media (real pdf<->tracked
 # positives); the other 32 are pdf-only (they still ride in TRAIN as negatives and
@@ -19,8 +17,8 @@
 defaults:
   - _self_
 
-# Path to the prebuilt `.tracks` file. No in-repo default — set per run (the launcher
-# passes `track_path=...`).
+# Path to the prebuilt `.tracks` file. No in-repo default — set per run (the bootstrap
+# leaves build it from `iteration` and `scale`).
 track_path: ???
 
 # Threaded into the model's scale knob by each leaf (via ${scale}); must match the scale
@@ -28,7 +26,6 @@ track_path: ???
 scale: 64.0
 
 training:
-  ignore_mask: true
   patch_size: 64
   process_batch: process_batch_blobs
   m_per_class: 4          # SupCon/FPR95 need >=1 positive pair per batch -> class-balanced sampler
@@ -55,9 +52,8 @@ training:
       # the per-band quota, ceiling and resampling factor on startup.
       # Set false to fall back to the old whole-track-group packing.
       balance_view_angles: true
-      # Bands in degrees. Default (null) = 0..90 in 10 deg steps, the same grid
-      # `track_angle_validation.yaml` reports FPR95 over. Widen if the sampler warns
-      # that the high bands cap out below their quota.
+      # Bands in degrees. Default (null) = 0..90 in 10 deg steps. Widen if the sampler
+      # warns that the high bands cap out below their quota.
       view_angle_band_edges: null
       # Epoch LENGTH only (batches/epoch = target / per-band quota); the per-batch
       # balance is unaffected. "min"/"median"/"mean"/"max" over the populated
@@ -130,18 +126,10 @@ training:
       - name: LinearLR
       - name: CosineAnnealingLR
   loss:
-    # - name: SupCon
-    # Proxy-anchored variant: the board rendering (`is_pdf`) is its blob's proxy —
-    # outer sum over those, A(i)/P(i) over image patches only, so every image<->image
-    # term drops out. See docs/configs_and_training.md (contrastive losses).
+    # Proxy-anchored variant of SupCon: the board rendering (`is_pdf`) is its blob's
+    # proxy — outer sum over those, A(i)/P(i) over image patches only, so every
+    # image<->image term drops out. See docs/configs_and_training.md.
     - name: ProxyAnchoredSupCon
-    # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
-    # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
-    # patches that even have a positive present.
-    # - name: Recall1
-    #   weight: 0
-    # - name: PosCoverage
-      # weight: 0
 
 validation:
   batch_size: 1024
@@ -166,16 +154,11 @@ validation:
         - "f75"
         - "f80"
   loss:
-    # - name: FPR95
-    # Proxy-anchored counterpart: FPR95 over pdf<->image pairs only, i.e. the matching
-    # the descriptor is actually deployed for. NOT comparable with FPR95 (different pair
-    # population), so switching restarts the validation series — and `best.pth` follows
-    # whichever entry carries weight.
+    # Proxy-anchored counterpart of FPR95: over pdf<->image pairs only, i.e. the
+    # matching the descriptor is actually deployed for. NOT comparable with plain
+    # FPR95 (different pair population), so switching restarts the validation series —
+    # and `best.pth` follows whichever entry carries weight.
     - name: ProxyAnchoredFPR95
-    # - name: Recall1
-    #   weight: 0
-    # - name: PosCoverage
-    #   weight: 0
 
 logging:
   dir: /raid/data/hsa/logs

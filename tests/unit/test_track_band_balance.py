@@ -505,8 +505,9 @@ def test_track_config_enables_balancing_with_keys_the_dataset_accepts():
     conf_dir = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "src", "conf"))
     with initialize_config_dir(version_base=None, config_dir=conf_dir):
-        cfg = compose(config_name="track_descriptor_logpolar",
-                      overrides=["track_path=/tmp/does-not-need-to-exist.tracks"])
+        cfg = compose(config_name="bootstrap_real",
+                      overrides=["iteration=0",
+                                 "track_path=/tmp/does-not-need-to-exist.tracks"])
 
     params = cfg.training.dataset.params
     assert params.balance_view_angles is True

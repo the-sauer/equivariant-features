@@ -15,7 +15,6 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import collections
-import math
 import random
 import re
 
@@ -72,8 +71,7 @@ class _ReshufflingBatchSampler:
 
 # Single-mode `.tracks` layout (BlobBoards >= single-type/single-scale format):
 # one file holds exactly ONE patch type at ONE scale, so `tracks/patches` is a
-# single (N, P, P) dataset (no per-mode `patches/<type>` group). Each patch has a
-# companion board-in-frame mask under `tracks/masks`, and every sequence carries
+# single (N, P, P) dataset (no per-mode `patches/<type>` group). Every sequence carries
 # an `is_anchor` group attribute (1 = the GT sequence rendered from the board PDF,
 # 0 = tracked in real footage). In-tree that flag is called `is_pdf` — "anchor" is
 # SupCon's word for the rows of its logit matrix and means something else — but the
@@ -99,31 +97,6 @@ def _select_sequences(seqs, sequences):
     return [s for s in seqs.keys() if _uid_of(s) in sequences]
 
 
-def _view_angle_bounds(view_angle_range):
-    """Validate a ``[lo, hi]`` viewing-angle band in DEGREES -> bounds in radians.
-
-    ``None`` (no band) passes through as ``None``. Degrees in the config, radians in
-    the file: `.tracks` stores `view_angles` in radians, but a band is something you
-    reason about in degrees, so that is the config unit.
-    """
-    if view_angle_range is None:
-        return None
-    try:
-        lo, hi = (float(v) for v in view_angle_range)
-    except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"view_angle_range must be a [lo_deg, hi_deg] pair, got {view_angle_range!r}"
-        ) from e
-    if not lo < hi:
-        raise ValueError(f"view_angle_range must satisfy lo < hi, got [{lo}, {hi}]")
-    return math.radians(lo), math.radians(hi)
-
-
-def _read_rows(ds, sel):
-    """Read all rows of an HDF5 dataset, or just ``sel`` (an increasing index array)."""
-    return ds[:] if sel is None else ds[sel]
-
-
 def _observation_view_angles(g, name, required=True):
     """Per-observation viewing angle (radians) for a tracked sequence.
 
@@ -135,8 +108,9 @@ def _observation_view_angles(g, name, required=True):
     (should not happen; such observations are dropped rather than mis-binned).
 
     ``required=False`` returns ``(None, None)`` instead of raising when the sequence
-    predates the viewing-angle export — used when the angles are merely recorded
-    alongside the patches (for band balancing) rather than used to filter them.
+    predates the viewing-angle export — that is what the loader uses, since a file
+    without angles is still trainable, its patches just stay unbanded. ``_log_sequence_stats``
+    keeps the raising form and counts the failures.
     """
     missing = [k for k in ("frame_id", "homography_frame_ids", "view_angles") if k not in g]
     if missing:
@@ -144,8 +118,7 @@ def _observation_view_angles(g, name, required=True):
             return None, None
         raise ValueError(
             f"sequence {name!r} has no {', '.join(missing)} — it predates the viewing-angle "
-            "export in BlobBoards' build_tracks_for_sequences. Rebuild the `.tracks` file "
-            "or drop `view_angle_range`."
+            "export in BlobBoards' build_tracks_for_sequences. Rebuild the `.tracks` file."
         )
     fids = np.asarray(g["frame_id"][:]).astype(np.int64)
     hfids = np.asarray(g["homography_frame_ids"][:]).astype(np.int64)
@@ -160,30 +133,19 @@ def _observation_view_angles(g, name, required=True):
     return angles[idx], matched
 
 
-def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
-                        unique_track_ids=True, view_angle_range=None,
-                        view_angle_keep_pdf=True):
+def _load_all_sequences(f, sequences=None, with_affine=True, unique_track_ids=True):
     """Load and concatenate track data from per-sequence HDF5 groups.
 
-    Returns (patches, masks, track_ids, track_lengths, affine_shapes, is_pdf,
-    view_angles).
-    `masks` is None unless `with_mask`; `affine_shapes` None unless `with_affine`.
+    Returns (patches, track_ids, track_lengths, affine_shapes, is_pdf, view_angles).
+    `affine_shapes` is None unless `with_affine`.
     `is_pdf` is a per-patch uint8 array (broadcast from the per-sequence flag).
     `view_angles` is a per-patch float64 array of viewing obliquity in RADIANS, NaN
     wherever the patch has no pose: PDF patches (rendered fronto-parallel off the board
     image), observations whose frame is missing from the pose table, and every patch
     of a file predating the viewing-angle export. It is what
     ``BlobTrackData(balance_view_angles=True)`` bins into bands.
-    `track_lengths` is the sequence's stored (PRE-filter) histogram and is not
-    recomputed when a viewing-angle band drops observations; nothing downstream uses
-    it (group structure is rebuilt from the labels in ``_grouped_indices``).
-
-    ``view_angle_range`` — ``[lo_deg, hi_deg]``, keeps only observations whose frame
-    was viewed at an obliquity in ``[lo, hi)`` (0 = fronto-parallel, 90 = edge-on).
-    Anchor sequences carry no pose (they are rendered off the board image, i.e.
-    fronto-parallel by construction) and are kept whole unless
-    ``view_angle_keep_pdf`` is False — keeping them is what preserves the
-    pdf<->tracked positive pairs that make a narrow band evaluable at all.
+    `track_lengths` is the sequence's stored histogram; nothing downstream uses it
+    (group structure is rebuilt from the labels in ``_grouped_indices``).
 
     ``unique_track_ids`` (default True) remaps track ids to be COLLISION-FREE across
     boards. The stored ids are ``board_hash + blob_index`` packed into one ~16-bit
@@ -226,9 +188,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
             )
         return (np.int64(board_index[u]) << _BLOB_BITS) | blob_index
 
-    bounds = _view_angle_bounds(view_angle_range)
-
-    all_patches, all_masks = [], []
+    all_patches = []
     all_track_ids, all_track_lengths = [], []
     all_affine_shapes, all_is_pdf, all_view_angles = [], [], []
 
@@ -238,44 +198,25 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
         # On-disk attribute name (see the layout note above); `is_pdf` in-tree.
         is_pdf = int(sg.attrs["is_anchor"]) if "is_anchor" in sg.attrs else 0
 
-        # Join the per-frame pose table to the observations up front, so the angles can
-        # be sliced by the same `sel` as the patches. Only a band filter *requires* them
-        # (an older file without the export is loadable, its angles just stay NaN).
+        # Join the per-frame pose table to the observations, so each patch carries the
+        # obliquity the band-balanced sampler batches it by. An older file without the
+        # export is still loadable; its angles just stay NaN (hence unbanded).
         angles = matched = None
         if not is_pdf:
-            angles, matched = _observation_view_angles(g, name, required=bounds is not None)
+            angles, matched = _observation_view_angles(g, name, required=False)
 
-        # Viewing-angle band: decide WHICH observations to read before reading them,
-        # so a narrow band does not pull a whole (large) sequence through memory.
-        sel = None
-        if bounds is not None:
-            if is_pdf:
-                if not view_angle_keep_pdf:
-                    continue
-            else:
-                lo, hi = bounds
-                sel = np.flatnonzero(matched & (angles >= lo) & (angles < hi))
-                if sel.size == 0:
-                    continue
-                if sel.size == g["patches"].shape[0]:
-                    sel = None            # whole sequence: plain slice reads faster
-
-        patches = _read_rows(g["patches"], sel)
+        patches = g["patches"][:]
         n = patches.shape[0]
         all_patches.append(patches)
         if angles is None:
             all_view_angles.append(np.full(n, np.nan))
         else:
             # Unmatched observations have no pose -> NaN (unbanded), never a stale angle.
-            seq_angles = np.where(matched, angles, np.nan)
-            all_view_angles.append(seq_angles if sel is None else seq_angles[sel])
-        all_track_ids.append(remap(name, _read_rows(g["track_id"], sel)))
+            all_view_angles.append(np.where(matched, angles, np.nan))
+        all_track_ids.append(remap(name, g["track_id"][:]))
         all_track_lengths.append(g["track_lengths"][:])
-        if with_mask:
-            all_masks.append(_read_rows(g["masks"], sel) if "masks" in g
-                             else np.ones_like(patches))
         if with_affine:
-            all_affine_shapes.append(_read_rows(g["affine_shapes"], sel))
+            all_affine_shapes.append(g["affine_shapes"][:])
         all_is_pdf.append(np.full(n, is_pdf, dtype=np.uint8))
 
     def cat(parts, empty):
@@ -284,40 +225,26 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     patches = cat(all_patches, np.zeros((0, 64, 64), dtype=np.float32))
     track_ids = cat(all_track_ids, np.zeros(0, dtype=np.int64))
     track_lengths = cat(all_track_lengths, np.zeros(0, dtype=np.int32))
-    masks = cat(all_masks, np.zeros((0, 64, 64), dtype=np.float32)) if with_mask else None
     affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
     is_pdf = cat(all_is_pdf, np.zeros(0, dtype=np.uint8))
     view_angles = cat(all_view_angles, np.zeros(0, dtype=np.float64))
 
-    return patches, masks, track_ids, track_lengths, affine_shapes, is_pdf, view_angles
+    return patches, track_ids, track_lengths, affine_shapes, is_pdf, view_angles
 
 
-def load_untracked_patches(f, sequences=None, with_mask=False):
-    """Load confuser (untracked) patches, optionally with their in-frame masks.
-
-    Returns `patches` (or `(patches, masks)` when `with_mask`).
-    """
+def load_untracked_patches(f, sequences=None):
+    """Load confuser (untracked) patches."""
     seqs = f["sequences"]
     seq_names = _select_sequences(seqs, sequences)
-    parts, mask_parts = [], []
+    parts = []
     for name in seq_names:
         sg = seqs[name]
         if "untracked" in sg:
             parts.append(sg["untracked/patches"][:])
-            if with_mask:
-                ug = sg["untracked"]
-                mask_parts.append(ug["masks"][:] if "masks" in ug
-                                  else np.ones_like(parts[-1]))
-    patches = np.concatenate(parts) if parts else np.empty((0, 64, 64), dtype=np.float32)
-    if not with_mask:
-        return patches
-    masks = np.concatenate(mask_parts) if mask_parts else np.empty((0, 64, 64), dtype=np.float32)
-    return patches, masks
+    return np.concatenate(parts) if parts else np.empty((0, 64, 64), dtype=np.float32)
 
 
-# Default viewing-obliquity bands for training balance: 0-90 deg in 10 deg steps, the
-# same grid `conf/track_angle_validation.yaml` reports FPR95 over, so "balanced in
-# training" and "measured per band" mean the same partition of viewpoint space.
+# Default viewing-obliquity bands for training balance: 0-90 deg in 10 deg steps.
 _DEFAULT_BAND_EDGES = tuple(float(d) for d in range(0, 100, 10))
 
 
@@ -325,8 +252,7 @@ def _band_edges(spec):
     """Validate viewing-angle band edges (DEGREES, strictly increasing) -> ndarray.
 
     ``None`` -> `_DEFAULT_BAND_EDGES`. ``n`` edges define ``n - 1`` half-open bands
-    ``[e[i], e[i+1])``; angles outside ``[e[0], e[-1])`` are unbanded, exactly like
-    the half-open `view_angle_range` bands.
+    ``[e[i], e[i+1])``; angles outside ``[e[0], e[-1])`` are unbanded.
     """
     if spec is None:
         spec = _DEFAULT_BAND_EDGES
@@ -462,65 +388,6 @@ class _BandCursor:
 
 _Cap = collections.namedtuple(
     "_Cap", "keep n_pos n_singletons n_pos_available n_singletons_available")
-
-
-def _cap_tracked(labels, max_keypoints, seed=0):
-    """Deterministic cap on the loaded tracked block -> indices to keep.
-
-    ``max_keypoints`` is a budget PER KIND, applied to the two things a batch is
-    packed from (see ``_pack_balanced``):
-
-      * **positives** — patches of a ``track_id`` seen >= 2 times, kept as WHOLE
-        groups. Never split a group: taking a subset of size 1 would silently
-        demote a positive track to a confuser, changing the class balance the cap
-        exists to equalize.
-      * **confusers** — singleton ``track_id``s. The untracked block shares this
-        same budget (see ``_untracked_budget``), so ``max_keypoints`` bounds the
-        total negative-only pool, not just its tracked half.
-
-    Groups are shuffled with a seeded RNG and taken until the next one would
-    overflow, so a split's members are stable across runs; the returned indices are
-    sorted, leaving the on-disk ordering (and hence patch/label alignment) intact.
-
-    Returns a ``_Cap``: the sorted index array, how much of each budget it spends,
-    and how much of each kind was on offer (so the caller can tell a split that hit
-    the cap from one the file was simply too small to fill).
-    """
-    groups = collections.defaultdict(list)
-    for i, lab in enumerate(labels):
-        groups[int(lab)].append(i)
-    pos_groups = [inds for inds in groups.values() if len(inds) >= 2]
-    singletons = [inds[0] for inds in groups.values() if len(inds) == 1]
-    n_pos_available = sum(len(g) for g in pos_groups)
-
-    rng = random.Random(seed)
-    rng.shuffle(pos_groups)
-    rng.shuffle(singletons)
-
-    keep, n_pos = [], 0
-    for grp in pos_groups:
-        if n_pos + len(grp) > max_keypoints:
-            break
-        keep.extend(grp)
-        n_pos += len(grp)
-    kept_singletons = singletons[:max_keypoints]
-    keep.extend(kept_singletons)
-    keep.sort()
-    return _Cap(np.asarray(keep, dtype=np.int64), n_pos, len(kept_singletons),
-                n_pos_available, len(singletons))
-
-
-def _untracked_budget(n_tracked, ratio, n_singletons, max_keypoints):
-    """How many untracked (confuser) patches to keep.
-
-    Always ``ratio x`` the surviving tracked count. With a cap, the untracked block
-    additionally shares the confuser budget with the tracked singletons — both are
-    negative-only, so ``max_keypoints`` bounds their sum.
-    """
-    keep = int(n_tracked * ratio)
-    if max_keypoints is not None:
-        keep = min(keep, max(0, max_keypoints - n_singletons))
-    return keep
 
 
 def _band_pools(pos_groups, bands):
@@ -661,35 +528,14 @@ class BlobTrackData(torch.utils.data.Dataset):
     Only tracks with >= `min_track_length` observations are included.
     Loads all sequences by default; pass `sequence="name"` for one.
 
-    `view_angle_range=[lo_deg, hi_deg]` restricts the tracked observations to a band of
-    viewing obliquity (0 = fronto-parallel, 90 = edge-on), which is what the per-band
-    validation splits in `conf/track_angle_validation.yaml` use to report FPR95 as a
-    function of viewpoint. The band applies to tracked observations only: PDF patches have
-    no pose and are kept (they supply the positive partner), and confusers carry no
-    frame id at all, so they stay a plain negative pool — capped, as always, at
-    `max_untracked_to_tracked_ratio x` the *surviving* patch count, which keeps the
-    positive/negative balance (and hence FPR95) comparable across bands.
-
     `balance_view_angles=True` makes the TRAINING sampler draw equally from every
-    viewing-angle band instead of following the file's own (heavily fronto-parallel)
-    distribution — see `get_sampler`. `view_angle_band_edges` (degrees, default 0-90 in
-    10 deg steps, the grid `conf/track_angle_validation.yaml` measures on) sets the
-    partition and `view_angle_band_target` the epoch length. `view_angle_band_bias`
-    tilts that equal draw: `0.0` (default) is the plain balance, `b > 0` gives the
-    most oblique populated band `exp(b)x` the quota of the most frontal one (so
-    `ln 10 ~ 2.3` is a 10:1 tilt), `b < 0` leans back toward fronto-parallel. It is
-    orthogonal to
-    `view_angle_range`: that one restricts which observations exist at all (used to
-    build the per-band validation splits), this one only reweights how the surviving
-    ones are batched.
-
-    `max_keypoints` caps the split's SIZE the same way it does for `HomographyData`,
-    so bands that differ by an order of magnitude in population (real footage is
-    heavily fronto-parallel-biased) still evaluate the same number of patches and
-    their FPR95 stays comparable. It is a budget per kind, applied after the band
-    filter: at most `max_keypoints` positive-track patches (whole track groups, never
-    split) and at most `max_keypoints` confusers (tracked singletons + untracked,
-    which share the budget). `subsample_seed` fixes which ones survive.
+    viewing-angle band (obliquity: 0 = fronto-parallel, 90 = edge-on) instead of
+    following the file's own, heavily fronto-parallel distribution — see `get_sampler`.
+    `view_angle_band_edges` (degrees, default 0-90 in 10 deg steps) sets the partition
+    and `view_angle_band_target` the epoch length. `view_angle_band_bias` tilts that
+    equal draw: `0.0` (default) is the plain balance, `b > 0` gives the most oblique
+    populated band `exp(b)x` the quota of the most frontal one (so `ln 10 ~ 2.3` is a
+    10:1 tilt), `b < 0` leans back toward fronto-parallel.
     """
 
     def __init__(
@@ -701,27 +547,18 @@ class BlobTrackData(torch.utils.data.Dataset):
         split=None,   # "train"/"val"/"test": pick sequences by residue class (see _split_sequences)
         include_untracked=False,
         max_untracked_to_tracked_ratio=1.0,
-        patch_type="cartesian",   # informational: one file = one patch type
-        with_mask=False,
         unique_track_ids=True,   # remap ids to be collision-free across boards (see _load_all_sequences)
-        view_angle_range=None,   # [lo_deg, hi_deg): keep only observations viewed at this obliquity
-        view_angle_keep_pdf=True,   # PDF patches have no pose; keep them so bands still have positives
         balance_view_angles=False,   # TRAINING: draw each obliquity band equally (see get_sampler)
         view_angle_band_edges=None,   # band edges in degrees; None -> 0..90 in 10 deg steps
         view_angle_band_target="median",   # in-band patches per band per epoch: min|median|mean|max or an int
         view_angle_band_bias=0.0,   # >0 tilts the per-batch quotas toward the oblique bands (see _band_quotas)
-        max_keypoints=None,   # cap per kind: <= this many positive-track patches AND confusers (see _cap_tracked)
-        subsample_seed=0,   # RNG seed for the max_keypoints subsample; keep fixed so a split's members are stable
         log_stats=False,   # print a per-sequence / positive-structure breakdown on load
         **_,   # tolerate stray config params (mirrors HomographyData's liberal kwargs)
     ):
         if h5_path is None:
             raise ValueError("h5_path must be provided")
 
-        self.with_mask = with_mask
-        # Validate the band up front so a bad config fails before the (slow) load.
-        self.view_angle_range = list(view_angle_range) if view_angle_range is not None else None
-        _view_angle_bounds(view_angle_range)
+        # Validate the band spec up front so a bad config fails before the (slow) load.
         self.balance_view_angles = bool(balance_view_angles)
         self.view_angle_band_edges = _band_edges(view_angle_band_edges)
         self.view_angle_band_target = view_angle_band_target
@@ -734,10 +571,6 @@ class BlobTrackData(torch.utils.data.Dataset):
         if not np.isfinite(self.view_angle_band_bias):
             raise ValueError(
                 f"view_angle_band_bias must be finite, got {view_angle_band_bias!r}")
-        if max_keypoints is not None:
-            max_keypoints = int(max_keypoints)
-            if max_keypoints < 1:
-                raise ValueError(f"max_keypoints must be >= 1 or None, got {max_keypoints}")
         if not load_into_memory:
             raise NotImplementedError("BlobTrackData only supports load_into_memory=True")
 
@@ -751,11 +584,9 @@ class BlobTrackData(torch.utils.data.Dataset):
                 self._log_sequence_stats(f, sequences, split=split,
                                          unique_track_ids=unique_track_ids)
 
-            (all_patches, all_masks, track_ids, _track_lengths,
+            (all_patches, track_ids, _track_lengths,
              affine_shapes, is_pdf, view_angles) = _load_all_sequences(
-                f, sequences, with_mask=with_mask, unique_track_ids=unique_track_ids,
-                view_angle_range=view_angle_range,
-                view_angle_keep_pdf=view_angle_keep_pdf)
+                f, sequences, unique_track_ids=unique_track_ids)
 
             self.patches = all_patches
             # Per-patch obliquity in radians, NaN where there is no pose (PDF patches).
@@ -764,37 +595,24 @@ class BlobTrackData(torch.utils.data.Dataset):
             # below can exceed uint32's comfortable range once boards accumulate.
             self.labels = track_ids.astype(np.int64)
             self.affine_shapes = affine_shapes
-            self.masks = all_masks
             self.is_pdf = is_pdf
 
-            # Cap the split's size AFTER the band filter, so the budget counts only
-            # what the band kept (an uncapped band is as big as the file allows,
-            # which is what makes bands incomparable in the first place).
-            n_singletons = 0
-            if max_keypoints is not None:
-                n_singletons = self._apply_keypoint_cap(max_keypoints, subsample_seed)
-
             if include_untracked:
-                ut = load_untracked_patches(f, sequences, with_mask=with_mask)
-                ut_patches, ut_masks = ut if with_mask else (ut, None)
-                keep = _untracked_budget(len(self.patches), max_untracked_to_tracked_ratio,
-                                         n_singletons, max_keypoints)
-                self.untracked_patches = ut_patches[:keep]
-                self.untracked_masks = ut_masks[:keep] if with_mask else None
+                keep = int(len(self.patches) * max_untracked_to_tracked_ratio)
+                self.untracked_patches = load_untracked_patches(f, sequences)[:keep]
             else:
                 self.untracked_patches = None
-                self.untracked_masks = None
 
         if include_untracked and len(self.untracked_patches):
             # Confusers get fresh singleton labels; they are negatives only (their
-            # is_pdf is 0, they carry no board mask). Those labels MUST be disjoint
-            # from every real track_id — a confuser sharing an id with a real track
-            # tells SupCon to pull an unmatchable background patch toward that track,
-            # corrupting the embedding. The old scheme ((labels[0] & 0xFFFF0000) +
-            # 0x8000 + arange) assumed confusers fit a 0x8000-wide band above one
-            # board's base; with n_ut >> 32768 that band overflowed into other boards'
-            # id ranges (measured: ~20k confusers colliding with real tracks). Start
-            # strictly above the global max instead, in int64 to preclude wraparound.
+            # is_pdf is 0). Those labels MUST be disjoint from every real track_id — a
+            # confuser sharing an id with a real track tells SupCon to pull an
+            # unmatchable background patch toward that track, corrupting the embedding.
+            # The old scheme ((labels[0] & 0xFFFF0000) + 0x8000 + arange) assumed
+            # confusers fit a 0x8000-wide band above one board's base; with
+            # n_ut >> 32768 that band overflowed into other boards' id ranges
+            # (measured: ~20k confusers colliding with real tracks). Start strictly
+            # above the global max instead, in int64 to preclude wraparound.
             n_ut = len(self.untracked_patches)
             self.labels = self.labels.astype(np.int64)
             start = int(self.labels.max()) + 1 if len(self.labels) else 0
@@ -806,81 +624,29 @@ class BlobTrackData(torch.utils.data.Dataset):
             # Confusers carry no frame id, hence no angle: unbanded, negatives only.
             self.view_angles = np.concatenate([self.view_angles, np.full(n_ut, np.nan)])
 
-        band = ""
-        if self.view_angle_range is not None:
-            lo, hi = self.view_angle_range
-            band = f", view_angle=[{lo:g}, {hi:g}) deg"
-        print(f"BlobTrackDataset: {len(self.labels)} patches (with_mask={with_mask}{band})")
-
-        if self.view_angle_range is not None:
-            # A band drops tracked observations, so it can silently starve the batch of
-            # positive pairs (FPR95 is NaN without one). Report what survived — this is
-            # the number to watch when deciding whether the bands need widening.
-            pos_groups, confusers = self._grouped_indices()
-            n_tracked = int(len(self.patches))
-            print(f"  band [{lo:g}, {hi:g}) deg: {n_tracked} in-band patches "
-                  f"(+{len(self.labels) - n_tracked} confusers), "
-                  f"{len(pos_groups)} matchable tracks, {len(confusers)} singletons")
-            if len(pos_groups) < 50:
-                print(f"  !! WARNING: only {len(pos_groups)} matchable tracks in this band — "
-                      "FPR95 will be noisy or NaN; widen the band.")
-
-    def _apply_keypoint_cap(self, max_keypoints, subsample_seed):
-        """Subsample the tracked block in place to the `max_keypoints` budget.
-
-        Runs before the untracked block is appended, so `self.labels` still holds
-        track ids only. Returns how many singleton (confuser) patches survived —
-        the untracked block gets the rest of the confuser budget.
-        """
-        n_before = len(self.labels)
-        cap = _cap_tracked(self.labels, max_keypoints, subsample_seed)
-        keep = cap.keep
-        self.patches = self.patches[keep]
-        self.labels = self.labels[keep]
-        self.is_pdf = self.is_pdf[keep]
-        self.view_angles = self.view_angles[keep]
-        if self.affine_shapes is not None:
-            self.affine_shapes = self.affine_shapes[keep]
-        if self.masks is not None:
-            self.masks = self.masks[keep]
-        print(f"Keypoint cap: kept {len(keep)}/{n_before} tracked patches "
-              f"({cap.n_pos}/{cap.n_pos_available} in positive groups, "
-              f"{cap.n_singletons}/{cap.n_singletons_available} singleton confusers; "
-              f"max_keypoints={max_keypoints}, seed={subsample_seed})")
-        if cap.n_pos_available < max_keypoints:
-            print(f"  note: only {cap.n_pos_available} positive-track patches available "
-                  f"(< max_keypoints={max_keypoints}); this split is smaller than the cap")
-        return cap.n_singletons
+        print(f"BlobTrackDataset: {len(self.labels)} patches")
 
     def __len__(self):
         return len(self.labels)
 
-    def _get_patch_mask(self, idx):
-        """Return (patch, mask) numpy (P, P) for a global index, spanning the
-        tracked block and the appended untracked (confuser) block."""
+    def _patch(self, idx):
+        """The numpy (P, P) patch for a global index, spanning the tracked block and
+        the appended untracked (confuser) block."""
         n_tracked = self.patches.shape[0]
         if idx >= n_tracked:
-            j = idx - n_tracked
-            patch = self.untracked_patches[j]
-            mask = self.untracked_masks[j] if self.with_mask else None
-        else:
-            patch = self.patches[idx]
-            mask = self.masks[idx] if self.with_mask else None
-        return patch, mask
+            return self.untracked_patches[idx - n_tracked]
+        return self.patches[idx]
 
     def __getitem__(self, idx):
-        patch, mask = self._get_patch_mask(idx)
         # (P, P) -> (1, P, P), transposed to undo Julia column-major storage.
-        patch = torch.from_numpy(patch).unsqueeze(0).transpose(1, 2)
+        patch = torch.from_numpy(self._patch(idx)).unsqueeze(0).transpose(1, 2)
         item = {"patch": patch, "label": self.labels[idx]}
         if self.affine_shapes is not None:
             item["affine_shape"] = torch.from_numpy(self.affine_shapes[idx]) if idx < self.patches.shape[0] \
                 else torch.eye(2)
-        # Always emitted, mask path or not: `is_pdf` is also a LOSS-side label
+        # `is_pdf` is the LOSS-side label the proxy-anchored objectives key on
         # (`ProxyAnchoredSupCon` contrasts PDF patches against image patches only).
         item["is_pdf"] = int(self.is_pdf[idx])
-        if self.with_mask:
-            item["mask"] = torch.from_numpy(mask).unsqueeze(0).transpose(1, 2)
         return item
 
     @staticmethod
@@ -970,8 +736,8 @@ class BlobTrackData(torch.utils.data.Dataset):
         print(f"  track multiplicity histogram (patches per track): {histstr}")
 
         # Viewing-angle distribution over tracked observations, in the 10-degree bands
-        # the validation splits use — this is how you see whether a band is populated
-        # enough to be worth evaluating (see `view_angle_range`).
+        # the balanced sampler draws from — this is how you see whether a band is
+        # populated enough for `balance_view_angles` to fill its quota.
         if obs_angles:
             deg = np.degrees(np.concatenate(obs_angles)) if len(obs_angles) > 1 \
                 else np.degrees(obs_angles[0])
@@ -983,8 +749,8 @@ class BlobTrackData(torch.utils.data.Dataset):
             print(f"  view-angle 10deg bands: {bandstr}")
         if n_no_angle:
             print(f"  note: {n_no_angle} tracked sequences carry no view_angles "
-                  "(pre-dating the BlobBoards viewing-angle export) — view_angle_range "
-                  "would reject them")
+                  "(pre-dating the BlobBoards viewing-angle export) — their patches stay "
+                  "unbanded")
         if len(matchable) == 0:
             print("  !! WARNING: NO matchable tracks — every batch is positive-free; "
                   "check that track_ids are shared across a board's sequences.")
@@ -1183,8 +949,6 @@ class BlobTrackData(torch.utils.data.Dataset):
             res["is_pdf"] = torch.tensor(
                 [int(item["is_pdf"]) for item in batch], dtype=torch.long
             )
-            if "mask" in batch[0]:
-                res["masks"] = torch.stack([item["mask"] for item in batch])
             return res
 
         return collate_track

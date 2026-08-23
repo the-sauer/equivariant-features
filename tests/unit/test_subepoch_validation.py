@@ -63,7 +63,7 @@ def _cfg(tmp_path, every_n_batches, num_epochs, batch_size):
             "num_workers": 0,
             "optimizer": {"name": "SGD", "params": {"lr": 0.01}},
             "loss": [],
-            "dataset": {"params": {"patch_scale_factors": [1.0]}},
+            "dataset": {"params": {"logpolar_outer_factor": 96.0}},
         },
         "validation": {
             "batch_size": batch_size,

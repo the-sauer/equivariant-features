@@ -7,7 +7,7 @@ CPU execution provider, which in a GPU session means a device round trip per nod
     F.pad(mode="replicate")  -> Pad(mode="edge")   ditto in older ORT builds
     torch.fft.rfft           -> DFT               CPU EP only, and ONNX has no complex dtype
 
-So ``LogPolarPad``/``LogPolarBlurPool`` wrap via slice+concat and the angular heads run
+So ``LogPolarPad``/``LogPolarBlurPool`` wrap via slice+concat and the angular head runs
 the DFT as a matmul. These tests pin the rewrites to the reference torch ops they
 replaced — the whole point is that the substitution is invisible, so nothing else in the
 suite would catch a drift.
@@ -19,8 +19,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from aef.models.hardnet import (AngularBispectrum, AngularRelPhase, AngularRFFTMag,
-                                LogPolarBlurPool, LogPolarPad, angular_rdft)
+from aef.models.hardnet import (AngularRFFTMag, LogPolarBlurPool, LogPolarPad,
+                                angular_rdft)
 
 
 @pytest.mark.parametrize("pad", [0, 1, 2, 4])
@@ -70,51 +70,6 @@ def test_fft_head_matches_the_rfft_reference():
     assert torch.allclose(AngularRFFTMag(n_harmonics=5)(x), expected, atol=1e-4)
 
 
-def _relphase_reference(x, n_harmonics, eps=1e-6):
-    """The head as it reads with complex tensors — the version being replaced."""
-    spec = torch.fft.rfft(x, dim=-2)[:, :, :n_harmonics, :]
-    mag = spec.abs()
-    if spec.shape[-2] < 3:
-        return mag
-    ref = spec[:, :, 1:2, :]
-    ref = ref.conj() / (ref.abs() + eps)
-    k = torch.arange(2, spec.shape[-2]).view(1, 1, -1, 1)
-    c = spec[:, :, 2:, :] * ref.pow(k)
-    return torch.cat([mag, c.real, c.imag], dim=-2)
-
-
-def _bispectrum_reference(x, n_harmonics, normalize=True, eps=1e-6):
-    spec = torch.fft.rfft(x, dim=-2)[:, :, :n_harmonics, :]
-    mag = spec.abs()
-    pairs = AngularBispectrum.pairs(spec.shape[-2])
-    if not pairs:
-        return mag
-    k1 = torch.tensor([p[0] for p in pairs])
-    k2 = torch.tensor([p[1] for p in pairs])
-    x1, x2 = spec.index_select(-2, k1), spec.index_select(-2, k2)
-    x12 = spec.index_select(-2, k1 + k2)
-    bisp = x1 * x2 * x12.conj()
-    if normalize:
-        bisp = bisp / (x1.abs() * x2.abs() * x12.abs() + eps)
-    return torch.cat([mag, bisp.real, bisp.imag], dim=-2)
-
-
-@pytest.mark.parametrize("n_harmonics", [2, 5, 9])
-def test_relphase_matches_the_complex_reference(n_harmonics):
-    """Row order included: the final conv is sized for [mag ; Re(c_k) ; Im(c_k)]."""
-    x = torch.randn(2, 3, 16, 7)
-    head = AngularRelPhase(n_harmonics=n_harmonics)
-    assert torch.allclose(head(x), _relphase_reference(x, n_harmonics), atol=1e-4)
-
-
-@pytest.mark.parametrize("normalize", [True, False])
-def test_bispectrum_matches_the_complex_reference(normalize):
-    x = torch.randn(2, 3, 16, 7)
-    head = AngularBispectrum(n_harmonics=5, normalize=normalize)
-    expected = _bispectrum_reference(x, 5, normalize=normalize)
-    assert torch.allclose(head(x), expected, atol=1e-3 if normalize else 1e-2)
-
-
 def test_magnitude_gradient_survives_a_vanishing_bin():
     """|X_k| is a sqrt; the eps is what keeps its gradient finite where the bin is 0.
 
@@ -129,8 +84,8 @@ def test_magnitude_gradient_survives_a_vanishing_bin():
 def test_dft_basis_precision_is_not_the_bottleneck():
     """The basis is built in float64 and rounded once; a float32 basis is ~6x worse.
 
-    The phase heads multiply three coefficients together, so basis error compounds — this
-    pins the choice rather than leaving it to look like a stray cast.
+    Cheap at this size, and it pins the choice rather than leaving it to look like a
+    stray cast.
     """
     x = torch.randn(2, 4, 16, 8)
     re, im = angular_rdft(x, 5)

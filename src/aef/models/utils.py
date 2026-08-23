@@ -26,11 +26,3 @@ class L2Norm(torch.nn.Module):
         norm = torch.where(norm > self.eps, norm, torch.tensor(1.0, device=x.device))
         x = x / norm
         return x
-
-
-def input_norm(x):
-        flat = x.view(x.size(0), -1)
-        mp = torch.mean(flat, dim=1)
-        sp = torch.std(flat, dim=1) + 1e-7
-        return ((x - mp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(x)) /
-                sp.detach().unsqueeze(-1).unsqueeze(-1).unsqueeze(1).expand_as(x))

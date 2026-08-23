@@ -1,6 +1,5 @@
-# Log-polar descriptor on track data. Model block mirrors blob_descriptor_logpolar;
-# the launcher can override model.name=HardNetLogPolar (+ head=fft) for the log-polar
-# ablation variants (circ/fft), matching launch_training_matrix.sh's NET_EXTRA.
+# Log-polar descriptor on real track data, one bootstrap iteration.
+# Submitted by `bootstrap_real.sh` / `bootstrap_real_vanilla.sh` with BB_ITERATION set.
 defaults:
   - track_descriptor_base
   - _self_
@@ -19,14 +18,6 @@ model:
     antialias: true
     circular_pad: true
 
-training:
-  dataset:
-    params:
-      patch_type: logpolar
-validation:
-  dataset:
-    params:
-      patch_type: logpolar
 experiment_name: bootstrap_real_iteration_${iteration}
 
 logging:

@@ -33,13 +33,6 @@ class DatasetParams:
 
 
 @dataclass
-class FeatureSampling:
-    num_features: Optional[int]
-    stride: Optional[int]
-    detector: Optional[str]
-
-
-@dataclass
 class DatasetConfig:
     name: str
     data_dir: str
@@ -51,7 +44,6 @@ class DatasetConfig:
 class TrainValConfig:
     batch_size: int
     dataset: DatasetConfig
-    feature_sampling: FeatureSampling
 
 
 @dataclass
@@ -86,15 +78,6 @@ class TrainingConfig(TrainValConfig):
     augmentation: Optional[AugmentationConfig]
     loss: str | LossConfig | list[str | LossConfig]
     optimizer: str | OptimizerConfig | dict[str, OptimizerConfig]
-    # Weight of the learned-mask supervision loss (process_batch_blobs); only used
-    # when the model is mask-aware. Read via getattr with a 1.0 default, so omitting
-    # it changes nothing for existing configs.
-    mask_loss_weight: float = 1.0
-    # Force the mask path off for a mask-aware model (``learned_mask=True``): it is
-    # then called as ``model(patches)`` and gets no GT mask / `is_pdf` flag. The ablation
-    # switch, and what lets a mask-aware model run on a dataset without masks. Models
-    # that are not mask-aware never see the mask kwargs regardless.
-    ignore_mask: bool = False
 
 
 @dataclass

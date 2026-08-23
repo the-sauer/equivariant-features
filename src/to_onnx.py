@@ -88,9 +88,8 @@ def parse_args():
     )
     arch.add_argument("--patch-size", type=int, default=None)
     arch.add_argument("--in-channels", type=int, default=None)
-    arch.add_argument("--head", choices=["maxpool", "fft", "relphase", "bispectrum"], default=None)
+    arch.add_argument("--head", choices=["maxpool", "fft"], default=None)
     arch.add_argument("--n-harmonics", type=int, default=None)
-    arch.add_argument("--learned-mask", action="store_true", default=None)
     arch.add_argument("--slim", action="store_true", default=None)
     arch.add_argument("--no-circular-pad", dest="circular_pad", action="store_false", default=None)
     arch.add_argument("--no-antialias", dest="antialias", action="store_false", default=None)
@@ -132,7 +131,6 @@ def build_params(args):
         "in_channels": args.in_channels,
         "head": args.head,
         "n_harmonics": args.n_harmonics,
-        "learned_mask": args.learned_mask,
         "slim": args.slim,
         "circular_pad": args.circular_pad,
         "antialias": args.antialias,

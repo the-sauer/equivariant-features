@@ -1,44 +1,52 @@
-# Configs, training & sweeps
+# Configs, training & bootstrapping
 
-## Config hierarchy
+## The four entry points
 
-The blob-descriptor configs share one base and differ only in the model + patch-type:
+Everything the repo trains is submitted by one of four Slurm scripts, each naming a
+Hydra config in `src/conf/`:
 
+| script | config | data |
+| --- | --- | --- |
+| `bootstrap_synthetic_network.sh` | `bootstrap_synthetic.yaml` | synthetic blob boards, `ProxyAnchoredSupCon` + `fft` head |
+| `bootstrap_synthetic_vanilla.sh` | `bootstrap_synthetic_vanilla.yaml` | same boards, plain `SupCon` + `maxpool` head |
+| `bootstrap_real.sh` | `bootstrap_real.yaml` | real `.tracks` footage, `ProxyAnchoredSupCon` + `fft` head |
+| `bootstrap_real_vanilla.sh` | `bootstrap_real_vanilla.yaml` | same footage, plain `SupCon` + `maxpool` head |
+
+The two `_vanilla` variants are the baseline the proxy-anchored/FFT pair is measured
+against; they differ from their counterparts only in the loss and the angular head.
+
+The real ones take the bootstrap round from the environment:
+
+```sh
+BB_ITERATION=4 sbatch bootstrap_real.sh
 ```
-config.yaml            # global defaults
-└─ blob_descriptor_base.yaml     # everything shared: training/val dataset params,
-                                 # compositing, augmentation, num_workers, the whole
-                                 # `validation.shared_params` + `datasets` structure
-   ├─ blob_descriptor_steerable.yaml   # model: BlobDescriptorNoStride  (cartesian)
-   ├─ blob_descriptor_efficient.yaml   # model: BlobDescriptorEfficient (cartesian)
-   └─ blob_descriptor_logpolar.yaml    # model: HardNet                 (log-polar)
-```
 
-Each leaf keeps only what differs: the model block, any train overrides
-(`batch_size`, `num_workers`, optimizer), and the **patch-type-specific** fields
-(`patch_type` + the scale hyperparameter). Everything else lives in
-`blob_descriptor_base.yaml`. (`blob_descriptor_canonicalization.yaml` inherits from
-`config`, not this base.)
+`iteration` is interpolated into `track_path`, so round *n* trains on the `.tracks`
+file the previous round's detector produced.
+
+Both real configs compose `track_descriptor_base.yaml`, which holds everything
+`BlobTrackData` needs (the train/val board split, the view-angle balancing, the
+optimizer, the logging block); the leaves add only `model`, `scale` and the loss. The
+two synthetic configs are self-contained.
 
 ## The single `scale` hyperparameter
 
-Each leaf defines one top-level `scale` key threaded everywhere via `${scale}`:
+Each config defines one top-level `scale` key threaded everywhere via `${scale}`. For
+these log-polar configs `scale` is `logpolar_outer_factor` — the outer radius of the
+sampled annulus in units of the blob's own scale — and, on the real path, part of the
+`.tracks` filename, so the model can never drift from the patches it was trained on.
 
-- **steerable / efficient** (cartesian): `scale` = the patch scale factor; feeds
-  `model.params.scale_factors`, `training…patch_scale_factors`, and every
-  validation split's `patch_scale_factors` (so the model can never drift from the
-  dataset).
-- **logpolar**: `scale` = `logpolar_outer_factor`.
+Override it in one place:
 
-Override it in one place: `python src/run_training.py --config-name … scale=128`.
-Note the YAML quoting `["${scale}"]` — an unquoted `${...}` inside a flow sequence is
-invalid YAML.
+```sh
+python src/run_training.py --config-name bootstrap_synthetic scale=128
+```
 
 ## `shared_params` validation & Hydra struct mode
 
 `validation.shared_params` is a single `{name, params}` template; each
-`validation.datasets` entry supplies only its overrides (`scale_quantile_range`, loss
-weight). `get_validation_specs` (`src/aef/data/__init__.py`) deep-merges them.
+`validation.datasets` entry supplies only its overrides. `get_validation_specs`
+(`src/aef/data/__init__.py`) deep-merges them.
 
 Hydra composes configs in **struct mode**, which forbids adding keys not in the
 template. The merge therefore first resolves the template to a plain container
@@ -49,30 +57,22 @@ When testing config-merge code, compose via `hydra.compose` (struct mode), **not
 
 ## Sub-epoch validation
 
-`validation.validate_every_n_batches` (declared as `null` in both bases) runs the
-**whole** validation suite every N training batches, on top of the end-of-epoch run.
-Use it when one point per epoch is too coarse to see what a run is doing — a long
-epoch over the track data, or a warm-started run that moves within the first few
-hundred batches.
+`validation.validate_every_n_batches` (declared as `null`) runs the **whole** validation
+suite every N training batches, on top of the end-of-epoch run. Use it when one point
+per epoch is too coarse to see what a run is doing — a long epoch over the track data,
+or a warm-started run that moves within the first few hundred batches.
 
 The extra points are plotted at the fractional epoch they were measured at, so the
 validation figure's x axis becomes "fraction of training consumed": the run after
 batch `k` of epoch `e` sits at `e + k/batches_per_epoch`, and the end-of-epoch run at
 `e + 1`. With the option off the axis is unchanged — one point per epoch at integer
 `e`, matching the training curve. That axis is stored alongside the curves as
-`checkpoint["plots"]["x_val"]` (the training curve keeps its own `x`);
-`plot_supcon_comparison.py` prefers `x_val` and falls back to `x` for older
-checkpoints.
+`checkpoint["plots"]["x_val"]` (the training curve keeps its own `x`).
 
-What it does *not* change: `best.pth` selection, which still compares whole epochs —
-a mid-epoch run only records metrics, it never writes a checkpoint. Nor is it free;
-each run is a full pass over every validation split, so N should be a decent fraction
-of an epoch (tens to hundreds of batches), not single digits.
-
-```sh
-python src/run_training.py --config-name track_descriptor_logpolar \
-  validation.validate_every_n_batches=200
-```
+What it does *not* change: `best.pth` selection, which still compares whole epochs — a
+mid-epoch run only records metrics, it never writes a checkpoint. Nor is it free; each
+run is a full pass over every validation split, so N should be a decent fraction of an
+epoch (tens to hundreds of batches), not single digits.
 
 ## DataLoader workers
 
@@ -83,40 +83,51 @@ main process — the main lever when the GPU is starved by single-process loadin
 `-c` cores do nothing until this is set. The train loader uses `persistent_workers`
 (avoids re-forking the large in-memory dataset each epoch); validation uses fewer,
 non-persistent workers (its small loaders run sequentially). Keep Slurm `-c` ≥
-`num_workers + ~2` (main + Julia board generation). `steerable` is GPU-bound so uses
-fewer workers; the lighter nets are more data-bound.
+`num_workers + ~2` (main + Julia board generation).
 
 ## Dataset cache
 
-`cache_dir` (set in `blob_descriptor_base.yaml` for both the training dataset and
+`cache_dir` (set in both synthetic configs for the training dataset and
 `validation.shared_params`) makes a run reuse a previously prepared dataset instead of
 re-rendering boards / re-extracting patches — cold ~54 s vs warm ~0 s. The key covers
 dataset params only, so all models at a given `scale` share one entry. Set it to `null`
 to disable. See [data pipeline → dataset cache](data_pipeline.md#dataset-cache-disk)
 for the key, concurrency and the "frozen random draw" caveat.
 
+`src/prebuild_datasets.py` builds a config's datasets and exits without training, so a
+cold cache can be warmed by one job before several runs start against it (concurrent
+cold jobs would each pay the full build — the cache only turns warm after one finishes):
+
+```sh
+python src/prebuild_datasets.py --config-name bootstrap_synthetic          # all of them
+python src/prebuild_datasets.py --config-name bootstrap_synthetic +prebuild_target=train
+python src/prebuild_datasets.py --config-name bootstrap_synthetic +prebuild_target=overall
+```
+
+It needs a GPU: SIFT detection and patch extraction run on CUDA.
+
 ## Checkpoints
 
-Controlled by the `logging` block (`config.yaml`):
+Controlled by the `logging` block:
 
-- `model_checkpoints` — master switch (currently `false`).
+- `model_checkpoints` — master switch (on in all four configs; the runs are the
+  deliverable).
 - `checkpoint_dir` — `null` ⇒ `<logging.dir>/<experiment_name>/checkpoints`.
 - `checkpoint_every_epoch` — `false` (default) ⇒ only `latest.pth` (refreshed every
   epoch, the resume point) and `best.pth` (lowest weighted validation loss, i.e. the
   `overall` FPR95) are written. `true` ⇒ additionally keep `epoch_<n>.pth` snapshots.
 
-Note escnn checkpoints are large (~240 MB — the basis buffers live in the
-`state_dict`), so per-epoch snapshots add up fast. Resume with
-`+training.continue_from_checkpoint=<path>`.
+Resume in place with `+training.continue_from_checkpoint=<path>`. To start a fresh run
+from another run's weights instead, use `+training.init_from_checkpoint=<path>` — it
+loads model weights only and begins at epoch 0.
 
 ### Automatic ONNX export
 
 The same block turns the finished run into a deployable graph, so a run's directory
 carries its own artefact instead of needing a manual `to_onnx.py` pass afterwards:
 
-- `export_onnx` — off in `config.yaml`, **on** in `track_descriptor_base.yaml` (track runs
-  are the deliverable). Needs `model_checkpoints: true`; without checkpoints there is
-  nothing to load and it warns instead.
+- `export_onnx` — on in all four configs. Needs `model_checkpoints: true`; without
+  checkpoints there is nothing to load and it warns instead.
 - `export_onnx_checkpoints` — stems to export, default `[best]`. Each becomes
   `<stem>.onnx` beside its `<stem>.pth`.
 - `export_onnx_resolution` / `export_onnx_opset` — `null` ⇒ the model's own `patch_size`
@@ -128,55 +139,22 @@ serialized straight out of memory, since the in-memory module holds the *last* e
 weights while `best.pth` is generally an earlier one — the export is therefore identical
 to what `python src/to_onnx.py --run <dir>` produces. A failing export is logged and
 swallowed: a finished run must not be lost to it. A run killed before its final epoch
-(Slurm timeout, preemption) never reaches the hook, so `to_onnx.py --run` stays the way to
-export those.
+(Slurm timeout, preemption) never reaches the hook, so `to_onnx.py --run` stays the way
+to export those.
 
-### Exporting the steerable (escnn) descriptors
-
-`escnn.nn.R2Conv` holds basis coefficients, not a filter: it expands the filter on every
-forward pass and reaches into the basis' raw storage doing so. `torch.export` traces with
-FakeTensors, which have no storage, so the whole steerable family used to die with
-`RuntimeError: Cannot access data pointer of Tensor (e.g. FakeTensor)`.
-
-At eval time that expanded filter is *constant*, so `aef.models.escnn_export.deploy()`
-bakes it in, converting the model to plain torch before the trace:
-
-| escnn layer | becomes | via |
-| --- | --- | --- |
-| `R2Conv` | `Conv2d` | escnn's own `export()` |
-| `InnerBatchNorm` | `BatchNorm2d` | escnn's own `export()` (folds running stats) |
-| `ReLU` | `ReLU` | escnn's own `export()` |
-| `GroupPooling` | `MaxPoolChannels` | escnn's own `export()` |
-| `MaskModule` | fixed multiply | shim — escnn raises `NotImplementedError` |
-| `FieldDropout` | `Identity` | shim — it is already a no-op in eval mode |
-| `PointwiseAvgPoolAntialiased2D` | depthwise `Conv2d` | shim — fixed Gaussian blur + stride |
-
-The converted layers still take and return `GeometricTensor`, so the descriptors'
-`forward` methods — which wrap, unwrap and re-wrap throughout — are **not modified at
-all**; only the leaves change. `deploy()` converts **in place**, because after a forward
-pass an escnn module caches its expanded filters as non-leaf tensors that `copy.deepcopy`
-refuses; the export path builds its own model from the config, so it owns one.
-
-`aef.export.deploy_for_export` then re-runs the converted model on the same input and
-compares against the escnn output, raising rather than writing a graph that disagrees. It
-is bit-exact in practice (`max |plain - escnn| == 0` for `BlobDescriptorEfficient` in all
-four head/`learned_mask` combinations and for `BlobDescriptorNoStride` with and without
-the mask head).
-
-**The exports are large**, because a dense filter is much bigger than the basis
-coefficients it was expanded from: `BlobDescriptorEfficient` is 51 MB at `n_rotations=4`
-and 204 MB at 8, and `BlobDescriptorNoStride` (whose readout is a `R2Conv(kernel=24)` over
-1024 channels — the cost `Efficient` was written to avoid) reaches **3.05 GB** at its
-default `n_rotations=8`. Past protobuf's 2 GB ceiling torch writes the weights to a
-`<name>.onnx.data` sidecar automatically; the `.onnx` is then only meaningful next to it,
-and the log line says so.
+The log-polar trunk and head are written against ONNX primitives onnxruntime accelerates
+— slice+concat instead of `Pad(mode="wrap")`, a matmul instead of `torch.fft.rfft` (which
+exports to `DFT`, a CPU-execution-provider-only op). `to_onnx.py --summary` prints the op
+histogram and flags anything that would still fall back to the CPU; keep that list empty.
+`tests/unit/test_onnx_friendly_ops.py` pins the rewrites against the torch ops they
+replaced.
 
 ## Contrastive losses: `SupCon` vs `ProxyAnchoredSupCon`
 
-`training.loss: [{name: SupCon}]` is the default — `pytorch_metric_learning`'s SupCon over
-every patch in the batch. `ProxyAnchoredSupCon` treats the board's own rendering as the
-**proxy anchor** of its blob (vendored implementation in `train/losses/SupConLoss.py`,
-wrapper in `contrastive.py`):
+`training.loss: [{name: SupCon}]` (the `_vanilla` configs) is `pytorch_metric_learning`'s
+SupCon over every patch in the batch. `ProxyAnchoredSupCon` treats the board's own
+rendering as the **proxy anchor** of its blob (vendored implementation in
+`train/losses/SupConLoss.py`, wrapper in `contrastive.py`):
 
 - the outer sum runs over the `is_pdf` patches only — the rendering (the GT sequence in a
   `.tracks` file, the identity view in `HomographyData`);
@@ -185,8 +163,7 @@ wrapper in `contrastive.py`):
 
 The motive is that matching happens against the board's rendering, not between two
 observations, so the image<->image terms optimise something the descriptor is never
-deployed on — and on track data they are also where the label noise sits. See
-`docs/figures/proxy_anchored_supcon.tex` for the pair matrix.
+deployed on — and on track data they are also where the label noise sits.
 
 The structure is that of **Proxy-Anchor Loss** (Kim et al., CVPR 2020): proxies as
 anchors, each associated with the whole batch. The difference is where the proxy comes
@@ -199,9 +176,9 @@ means the rows of the logit matrix; it is unrelated to the flag, which is why th
 The flag comes from the batch key `"is_pdf"`, which `process_batch_blobs` filters
 alongside the features and passes to every loss; `BlobTrackData` always emits it, and
 `HomographyData` emits it whenever patches are precomputed. `ProxyAnchoredSupCon` raises
-rather than silently degenerating to plain SupCon if it is missing. Unlike the mask, the
-flag is *not* withheld during validation — otherwise the validation number would be a
-different loss from the training one.
+rather than silently degenerating to plain SupCon if it is missing. The flag is *not*
+withheld during validation — otherwise the validation number would be a different loss
+from the training one.
 
 A proxy with no in-batch positive is dropped from the mean instead of contributing a
 zero, so the value stays comparable across batches of differing yield. Note this narrows
@@ -227,47 +204,18 @@ give the one that should drive `best.pth` the weight.
 ## Loss curves
 
 `train_losses.svg` / `validation_losses.svg` (under `<logging.dir>/<experiment_name>/`)
-are titled `<model> (scale=…)` and fixed to y ∈ [0, 6] (training) and y ∈ [0, 1]
-(validation) for comparability across runs.
+are titled `<model> <head> (scale=…)`. The validation axis defaults to y ∈ [1e-3, 1] —
+the FPR metrics live in [0, 1] — and expands only when a series leaves it.
 
-## Matrix training (`launch_training_matrix.sh`)
+## Registering something new
 
-Submits one Slurm job per `(network, scale)`. Edit the `CONFIG` / `SCALES` /
-`NET_EXTRA` / `NET_MEM` / `NET_CPUS` maps at the top.
+`run_training.py` resolves everything by **name** against a package namespace, so a new
+model / loss / dataset / process-batch function needs no central registry — only an
+export from the relevant `__init__.py`:
 
-```sh
-./launch_training_matrix.sh                          # full matrix
-./launch_training_matrix.sh steerable efficient8 efficient4   # subset (e.g. model comparison)
-./launch_training_matrix.sh -n my_sweep …            # group all runs under
-                                                     #   <logdir>/YYYY_MM_DD_my_sweep/
-DRY_RUN=1 ./launch_training_matrix.sh …              # print jobs, submit nothing
-```
-
-- `-n NAME` prepends a dated subfolder (`date +%Y_%m_%d`) applied to both the Slurm
-  output logs and the training `experiment_name` (checkpoints/plots).
-- `NET_EXTRA[net]` injects arbitrary hydra overrides per network — e.g.
-  `efficient8`/`efficient4` both use `blob_descriptor_efficient` and differ only by
-  `model.params.n_rotations=8|4`.
-- Each job encodes `<net>_s<scale>` in its job name and `experiment_name`, so
-  `squeue`, logs, and output dirs stay distinct.
-
-### Dataset prebuild
-
-The launcher first submits a **prebuild job array** and gives every training job
-`--dependency=afterok:<array id>`, so they all start from a warm dataset cache. Without
-it, jobs launched together would each cold-build the same boards: the cache only turns
-warm *after* a build finishes, so concurrent cold jobs duplicate the whole
-render + composite + SIFT + extract cost.
-
-- **One array task per distinct dataset** (`src/prebuild_datasets.py` with
-  `+prebuild_target=train|<split>`), so they build in parallel rather than in sequence.
-- **Dataset groups** (`NET_DATASET_GROUP` → `GROUP_CONFIG`) collapse networks that share
-  a dataset block: the cache key covers dataset params but *not* the model, so
-  `steerable`/`efficient8`/`efficient4` are one `cartesian` group and their datasets are
-  built once. A model-comparison sweep therefore prebuilds `4 scales × 5 datasets = 20`
-  tasks rather than 12 jobs × 5 redundant builds. If a group mapping is wrong the only
-  cost is a cache miss (the training job rebuilds it) — never a wrong dataset.
-- Size it with `PREBUILD_MEM` / `PREBUILD_CPUS` / `PREBUILD_TIME`; the array is
-  unthrottled, so Slurm runs as many tasks as the cluster allows. It needs a GPU
-  (SIFT + patch extraction run on CUDA). `NO_PREBUILD=1` skips the whole thing.
-- `VAL_SPLITS` in the launcher must match the split names in `validation.datasets`.
+| config key | resolved against |
+| --- | --- |
+| `model.name` | `aef.models` |
+| `training.process_batch` | `aef.train` |
+| `training.dataset.name`, `validation…name` | `aef.data` |
+| `training.loss[].name`, `validation.loss[].name` | `aef.train.losses` |
