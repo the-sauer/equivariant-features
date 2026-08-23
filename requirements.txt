@@ -4,10 +4,17 @@ kagglehub >= 1.0, < 2
 kornia >= 0.8, < 1
 matplotlib
 numpy
+pint >= 0.24, < 1
 python-dotenv
 pytorch-metric-learning >= 1.2, < 2
 torch >= 2.11, < 3
 torchvision >= 0.26, < 1
 tqdm >= 4.67, < 5
 juliacall >= 0.9, < 1
+# ONNX export. `logging.export_onnx: true` is set in every config, so the dynamo
+# exporter (onnx + onnxscript) runs at the end of each training job; onnxruntime is
+# only needed by `to_onnx.py --check`, which diffs the exported graph against torch.
+onnx >= 1.20, < 2
+onnxscript >= 0.6, < 0.7
+onnxruntime >= 1.20, < 2
 -e./deps/BlobBoards.jl/python
