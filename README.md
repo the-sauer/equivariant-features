@@ -4,17 +4,26 @@ Affine Equivariant Features, the main implementation of my master thesis.
 
 ## Getting started
 
-Make sure you have Python installed. Supported versions are 3.12 and 3.13.
-
 Initialise the `BlobBoards.jl` submodule
 ```sh
 git submodule update --init --recursive
 ```
-instantiate `BlobBoards.jl` (optional, will be handled with the first call to the `BlobBoards.jl` through the python interface)
+then build the environment. [pixi](https://pixi.sh) is the supported path — `pixi.toml`
+at the repo root carries every Python dependency *and* the Julia bridge, and `pixi.lock`
+pins the exact resolution:
+```sh
+pixi install
+```
+The Julia side instantiates itself on the first call through the Python interface. It
+pulls its dependencies from **CauRegistry**, so register that once (a stale or missing
+mirror surfaces later as `expected package ... to be registered`):
 ```sh
 julia --project=./deps/BlobBoards.jl -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url="git@github.com:prittjam/CauRegistry.jl.git")); Pkg.instantiate()'
 ```
-and install the python dependencies.
+
+Without pixi, `requirements.txt` is the equivalent pip list (this is what the Slurm
+container recipe uses). Python 3.13 — **not** 3.14, where hydra's `@hydra.main` fails to
+build its argument parser:
 ```sh
 pip install -r requirements.txt
 ```
@@ -31,18 +40,19 @@ BB_ITERATION=4 sbatch bootstrap_real.sh          # real .tracks footage, round 4
 BB_ITERATION=4 sbatch bootstrap_real_vanilla.sh
 ```
 
-Each is a one-line wrapper around the Hydra entrypoint, so a run can be reproduced
-directly (any config key is overridable on the CLI):
+Submit them from the repo root — each is a one-line `pixi run` wrapper around the Hydra
+entrypoint, so a run can also be reproduced directly (any config key is overridable on
+the CLI):
 
 ```sh
-python src/run_training.py --config-name bootstrap_synthetic scale=128
+pixi run python src/run_training.py --config-name bootstrap_synthetic scale=128
 ```
 
 Two supporting entrypoints:
 
 ```sh
-python src/prebuild_datasets.py --config-name bootstrap_synthetic   # warm the dataset cache, then exit
-python src/to_onnx.py --run path/to/run_dir --summary --check       # (re-)export a checkpoint to ONNX
+pixi run python src/prebuild_datasets.py --config-name bootstrap_synthetic  # warm the dataset cache, then exit
+pixi run python src/to_onnx.py --run path/to/run_dir --summary --check      # (re-)export a checkpoint to ONNX
 ```
 
 Runs with `logging.export_onnx: true` (all four configs) export `best.onnx` themselves

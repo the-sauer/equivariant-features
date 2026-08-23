@@ -1,0 +1,63 @@
+[workspace]
+authors = ["Hendrik Sauer <jbpritts@gmail.com>"]
+channels = ["conda-forge"]
+name = "affine-equivariant-features"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+# Pixi-authoritative env: tell PythonCall to reuse pixi's Python instead of
+# letting CondaPkg spin up a second one. JULIA_PYTHONCALL_EXE points at the
+# interpreter pixi resolved (numpy + pint + the editable `blobboards` pkg
+# preinstalled). JULIA_CONDAPKG_BACKEND=Null disables CondaPkg's env management.
+# `blobboards` activates the Julia project itself (two directories up from its own
+# __init__.py, i.e. deps/BlobBoards.jl) and runs Pkg.instantiate on first use, so
+# nothing here has to point at it.
+[activation.env]
+JULIA_CONDAPKG_BACKEND = "Null"
+JULIA_PYTHONCALL_EXE = "$PIXI_PROJECT_ROOT/.pixi/envs/default/bin/python"
+
+[dependencies]
+# 3.14 is deliberately excluded: hydra-core 1.3.5 (its latest release) passes a
+# non-str object as `help=`, which 3.14's argparse rejects at add_argument time
+# ("badly formed help string"), so `@hydra.main` dies before src/run_training.py
+# gets to run. Raise the ceiling once hydra ships a 3.14-compatible release.
+python = ">=3.13,<3.14"
+juliaup = ">=1.18.4,<2"
+# Pinned below 3.7 to match what BlobBoards.jl's juliapkg asks OpenSSL_jll for;
+# a mismatch surfaces as a cryptic `using BlobBoards` precompile failure.
+openssl = ">=3.5.4,<4"
+pint = ">=0.24.4,<1"
+numpy = ">=2,<3"
+# Board rasterisation (blob_board writes a PDF and converts it) and the native
+# toolchain BlobBoards.jl's Julia dependencies build against.
+ghostscript = ">=10.0,<11"
+poppler = ">=25.7.0,<26"
+cmake = ">=3.30,<4"
+eigen = ">=5.0.1,<6"
+compilers = "*"
+
+[pypi-dependencies]
+juliacall = ">=0.9.24,<1"
+blobboards = { path = "./deps/BlobBoards.jl/python", editable = true }
+# Kept as pypi rather than conda deps so torchvision resolves against this exact
+# torch build — a conda-forge torchvision would pull a second, incompatible torch.
+torch = ">=2.10, <3"
+torchvision = ">=0.25, <1"
+kornia = ">=0.8, <1"
+pytorch-metric-learning = ">=2.9.0, <3"
+hydra-core = ">=1.3, <2"
+h5py = ">=3.15.1, <4"
+matplotlib = ">=3.9, <4"
+tqdm = ">=4.67, <5"
+python-dotenv = ">=1.0, <2"
+kagglehub = ">=1.0, <2"
+tensorboard = ">=2.20.0, <3"
+# ONNX export. `logging.export_onnx: true` is set in every config, so the dynamo
+# exporter (onnx + onnxscript) runs at the end of each training job; onnxruntime is
+# only needed by `to_onnx.py --check`, which diffs the graph against torch.
+onnx = ">=1.20.1, <2"
+onnxscript = ">=0.6.2, <0.7"
+onnxruntime = ">=1.20, <2"
+setuptools = "<80"

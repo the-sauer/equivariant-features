@@ -8,10 +8,12 @@ Affine Equivariant Features — the reference implementation of Hendrik Sauer's 
 
 Two Python environments coexist; pick by task:
 
-- **Running code / training / notebooks → the pixi env in `deps/BlobBoards.jl`.** It bundles `juliacall` + the `BlobBoards.jl` Julia package + all Python deps and pins `JULIA_PYTHONCALL_EXE` so PythonCall reuses pixi's interpreter. Run either `cd deps/BlobBoards.jl && pixi run python ...` or `pixi run --manifest-path deps/BlobBoards.jl/pixi.toml python ...` from the repo root. Anything that touches `BlobBoardHomographyData` (the Julia bridge) must run here.
-- **Unit tests → `.venv13`** (`.venv13/bin/python -m pytest`). `tests/conftest.py` stubs out the heavy deps (kornia, torchvision, Julia, pytorch-metric-learning), so tests need only torch + pytest. The pixi env does **not** have pytest.
+- **Running code / training / notebooks → the pixi env at the repo root** (`pixi.toml` + `pixi.lock`): `pixi run python src/run_training.py ...`. It carries every Python dep this repo imports *and* the Julia bridge — `juliacall` plus the editable `blobboards` package from `deps/BlobBoards.jl/python`, which activates the `BlobBoards.jl` Julia project itself (two directories up from its own `__init__.py`) and instantiates it on first use. `JULIA_PYTHONCALL_EXE` is pinned so PythonCall reuses pixi's interpreter and `JULIA_CONDAPKG_BACKEND=Null` stops CondaPkg spinning up a second one. Anything touching `BlobBoardHomographyData` must run here.
+  - **Python is pinned `>=3.13,<3.14` on purpose.** hydra-core 1.3.5 (its latest release) passes a non-`str` object as `help=`, which 3.14's argparse rejects at `add_argument` time (`ValueError: badly formed help string`) — so `@hydra.main` dies before either entrypoint runs. Raise the ceiling once hydra ships a 3.14-compatible release.
+  - The submodule has a `pixi.toml` of its own; that one is BlobBoards.jl's env, not this repo's. Don't add this repo's deps to it.
+- **Unit tests → `.venv13`** (`.venv13/bin/python -m pytest`). `tests/conftest.py` stubs out the heavy deps (kornia, torchvision, Julia, pytorch-metric-learning), so tests need only torch + pytest (+ hydra for the config-compose tests). The pixi env does **not** have pytest.
 
-`requirements.txt` is the pip-installable dependency list (used by the Slurm container recipe); pixi's `pixi.toml` is the authoritative local env.
+`requirements.txt` is the pip-installable dependency list (used by the Slurm container recipe); `pixi.toml` is the authoritative local env. Keep them in step — `pint` reaches the code through `data/blobboards.py` even though the `blobboards` package does not declare it, and `onnx`/`onnxscript` are needed by the automatic export that ends every run.
 
 ## Entry points
 
@@ -35,13 +37,11 @@ resurrect from git history rather than assuming something is missing.
 
 ```sh
 # Training (run inside the pixi env). --config-name picks a file from src/conf/
-pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
-  python src/run_training.py --config-name bootstrap_synthetic
+pixi run python src/run_training.py --config-name bootstrap_synthetic
 # Hydra lets you override any config key on the CLI, e.g. training.batch_size=512
 
 # Warm the dataset cache without training (one job, so parallel runs don't each cold-build)
-pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
-  python src/prebuild_datasets.py --config-name bootstrap_synthetic +prebuild_target=train
+pixi run python src/prebuild_datasets.py --config-name bootstrap_synthetic +prebuild_target=train
 
 # Unit tests
 .venv13/bin/python -m pytest tests/unit -q
@@ -53,12 +53,10 @@ pylint src/aef
 # ONNX export (pixi env — .venv13 has no onnx). A checkpoint stores weights only, so
 # the architecture kwargs must be restated on the CLI (`-p KEY=VALUE` for anything
 # without a dedicated flag). `--summary` flags ops onnxruntime keeps on the CPU EP.
-pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
-  python src/to_onnx.py HardNetLogPolar path/to/best.pth \
+pixi run python src/to_onnx.py HardNetLogPolar path/to/best.pth \
   --resolution 64 --head fft --n-harmonics 5 --summary
 # ...or read the architecture out of the run's own cfg.yaml:
-pixi run --manifest-path deps/BlobBoards.jl/pixi.toml \
-  python src/to_onnx.py --run path/to/run_dir --summary --check
+pixi run python src/to_onnx.py --run path/to/run_dir --summary --check
 ```
 
 All four configs set `logging.export_onnx: true`, so a run writes `best.onnx` next to
@@ -66,7 +64,7 @@ All four configs set `logging.export_onnx: true`, so a run writes `best.onnx` ne
 the same graph; the CLI is for re-exports and for runs killed before their final epoch.
 See `docs/configs_and_training.md#automatic-onnx-export`.
 
-First-time setup also requires the Julia submodule and registry (see README.md): `git submodule update --init --recursive`, then the pixi env handles Julia instantiation on first use.
+First-time setup also requires the Julia submodule and registry (see README.md): `git submodule update --init --recursive`, then the pixi env handles Julia instantiation on first use. The Julia deps come from **CauRegistry**; a stale local mirror shows up as `expected package \`X\` to be registered` on the first `blob_board(...)` call, which is a registry refresh, not a Python-env problem.
 
 ## Architecture
 
