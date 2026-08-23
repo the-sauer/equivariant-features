@@ -202,7 +202,7 @@ def angular_rdft(x, n_harmonics=None):
     three coefficients together, so the basis is the one place worth being exact.
     """
     a = x.shape[-2]
-    n = a // 2 + 1 if n_harmonics is None else min(n_harmonics, a // 2 + 1)
+    n = a if n_harmonics is None else min(n_harmonics, a)
     freq = torch.arange(n, device=x.device, dtype=torch.float64).view(1, n)
     step = torch.arange(a, device=x.device, dtype=torch.float64).view(a, 1)
     ang = (-2.0 * math.pi / a) * (step * freq)          # (A, F)

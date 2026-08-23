@@ -516,6 +516,19 @@ def train_func(process_batch):
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
             append_curves(y_train, avg_losses, len(x))
+            # Figure heading: model type + the key scale hyperparameter (the single
+            # ``scale`` config key when present, else the patch/log-polar scale param).
+            model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
+            scale_desc = getattr(cfg, "scale", None)
+            if scale_desc is None:
+                _p = cfg.training.dataset.params
+                scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
+            # getattr with defaults: only the log-polar heads carry `head_type` /
+            # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
+            # crash here *after* a full epoch, at plotting time.
+            head_desc = getattr(model, "head_type", None)
+            mask_desc = "& mask " if getattr(model, "learned_mask", False) else ""
+            plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)

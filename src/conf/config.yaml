@@ -5,7 +5,7 @@ training:
       suffix: train #ILSVRC/Data/CLS-LOC/train
       image_size: [256, 256]
 logging:
-  model_checkpoints: false
+  model_checkpoints: true
   # false -> only `latest.pth` (refreshed each epoch) + `best.pth` are written.
   # true  -> additionally keep a per-epoch `epoch_<n>.pth` snapshot.
   checkpoint_every_epoch: false
@@ -13,6 +13,6 @@ logging:
   checkpoint_dir: null
   # After the last epoch, export each of `export_onnx_checkpoints` to `<stem>.onnx`
   # next to its `<stem>.pth`. Requires model_checkpoints: true.
-  export_onnx: false
+  export_onnx: true
   export_onnx_checkpoints: [best]
   export_onnx_opset: null

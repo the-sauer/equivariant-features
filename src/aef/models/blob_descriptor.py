@@ -20,7 +20,7 @@ import escnn
 import torch
 import torch.nn.functional as F
 
-from .utils import L2Norm
+from .utils import L2Norm, input_norm
 
 
 class AbstractBlobDescriptor(torch.nn.Module, abc.ABC):
@@ -249,6 +249,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
             escnn.nn.GroupPooling(c_out),
         ]
         self.net = escnn.nn.SequentialModule(*layers)
+        self.output_norm = L2Norm()
 
         # The readout is the last two layers (dense 24x24 conv + group pooling); the
         # validity weighting goes in front of them, on the 24x24 feature field.
@@ -276,7 +277,7 @@ class BlobDescriptorNoStride(AbstractBlobDescriptor):
 
         for layer in layers[self._readout_from:]:
             x = layer(x)
-        return x.tensor, m_pred
+        return self.output_norm(x.tensor), m_pred
 
 
 class BlobDescriptorEfficient(AbstractBlobDescriptor):
@@ -313,7 +314,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
         out_dim=128,
         widths=(32, 64, 128),
         head="attention",          # "attention" (equivariance-robust) | "dense" (layout, but sensitive)
-        l2_normalize=False,        # NoStride returns un-normalized features; match by default
+        l2_normalize=True,          # NoStride returns normalized features; match by default
         pool_sigma=0.6,            # Gaussian sigma of the antialiased downsampling
         frequencies_cutoff=None,   # bandlimit the steerable conv basis (None = escnn default)
         dropout=0.1,
@@ -406,6 +407,7 @@ class BlobDescriptorEfficient(AbstractBlobDescriptor):
             self.mask_head = _mask_predictor(c3, s)
 
     def forward(self, x, mask=None, is_pdf=None):
+        x = input_norm(x)
         if self.learned_mask and mask is not None and (is_pdf is not None or self.oracle_mask):
             x = _gate_input(x, mask, is_pdf, self.oracle_mask)
         if self.inner_mask is not None:

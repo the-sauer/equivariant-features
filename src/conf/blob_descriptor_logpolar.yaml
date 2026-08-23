@@ -7,17 +7,17 @@ defaults:
 # THE key hyperparameter for the log-polar descriptor: the outer sampling radius
 # factor. Defined once here and threaded (via ${scale}) into the training dataset and
 # every validation split, so a single `scale=...` override changes them all.
-scale: 16.0
+scale: 96.0
 
 model:
-  name: HardNet
+  name: HardNetLogPolar
   params:
     in_channels: 1   # log-polar patches are single-channel (radial axis encodes scale)
     patch_size: 64
 
 training:
   batch_size: 4096
-  num_epochs: 500
+  num_epochs: 100
   ignore_mask: false
   dataset:
     params:

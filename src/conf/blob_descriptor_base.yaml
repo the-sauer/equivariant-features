@@ -11,7 +11,7 @@ training:
   dataset:
     name: BlobBoardHomographyData
     params:
-      num_boards: 64
+      num_boards: 32
       image_size: [150, 150]
       transforms_per_image: 1
       in_memory: true
@@ -33,7 +33,7 @@ training:
       # background garbage distractors. Only the warped views get the scene +
       # augmentation; the identity reference view stays clean.
       background: /raid/data/hsa/datasets/backgrounds
-      board_scale_range: [0.01, 0.7]
+      board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 0
       # Reuse a prepared dataset (boards, composites, garbage, extracted patches)
@@ -45,20 +45,21 @@ training:
       augmentation:
         color_jitter: {}
         gaussian_blur:
-          kernel_size: [5, 5]
+          kernel_size: [7, 7]
+          sigma: [0.1, 2.0]
         gaussian_noise: {}
   batch_size: 4096
   optimizer:
-    name: SGD
+    name: AdamW
     params:
-      lr: 4e-5
+      lr: 1e-5
       weight_decay: 1e-4
     scheduler:
       - name: LinearLR
-      # - name: CosineAnnealingLR
+      - name: CosineAnnealingLR
 
   loss:
-    - name: SupCon
+    - name: ProxyAnchoredSupCon
 
 # FPR95 is reported per blob-scale band. Every split draws from the SAME pinned
 # boards (seeds below, a validation-split residue class the training boards never
@@ -87,7 +88,7 @@ validation:
     name: BlobBoardHomographyData
     params:
       in_memory: true
-      num_boards: 16
+      num_boards: 4
       seeds: [40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340]
       image_size: [150, 150]
       transforms_per_image: 1
@@ -113,29 +114,17 @@ validation:
       # so the validation set is reproducible. Bands filter on raw intrinsic scales,
       # so a randomized placement scale does not muddy small/medium/large.
       background: /raid/data/hsa/datasets/backgrounds
-      board_scale_range: [0.01, 0.7]
+      board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 40
       cache_dir: /raid/data/hsa/datasets/homography_cache   # see training.dataset.params.cache_dir
+      augmentation:
+        color_jitter: {}
+        gaussian_blur:
+          kernel_size: [7, 7]
+          sigma: [0.1, 2.0]
+        gaussian_noise: {}
   datasets:
     - name: overall
       loss:
-        - name: FPR95
-    - name: far
-      params:
-        board_scale_range: [0.01, 0.05]
-      loss:
-        - name: FPR95
-          weight: 0   # monitor only; does not affect best.pth
-    - name: medium
-      params:
-        board_scale_range: [0.05, 0.1]
-      loss:
-        - name: FPR95
-          weight: 0   # monitor only; does not affect best.pth
-    - name: near
-      params:
-        board_scale_range: [0.4, 0.7]
-      loss:
-        - name: FPR95
-          weight: 0   # monitor only; does not affect best.pth
+        - name: ProxyAnchoredFPR95

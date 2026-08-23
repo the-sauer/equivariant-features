@@ -13,9 +13,17 @@ model:
     head: attention
     scale_factors: ["${scale}"]
     in_channels: 1
+    l2_normalize: true
 
 training:
-  batch_size: 2048
+  batch_size: 3072
+  loss:
+    - name: SupCon
+      params:
+        temperature: 0.09
+  optimizer:
+    params:
+      lr: 7.5e-5
   dataset:
     params:
       patch_type: cartesian

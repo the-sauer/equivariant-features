@@ -128,13 +128,13 @@ training:
       weight_decay: 1e-4
     scheduler:
       - name: LinearLR
-      # - name: CosineAnnealingLR
+      - name: CosineAnnealingLR
   loss:
-    - name: SupCon
+    # - name: SupCon
     # Proxy-anchored variant: the board rendering (`is_pdf`) is its blob's proxy —
     # outer sum over those, A(i)/P(i) over image patches only, so every image<->image
     # term drops out. See docs/configs_and_training.md (contrastive losses).
-    # - name: ProxyAnchoredSupCon
+    - name: ProxyAnchoredSupCon
     # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
     # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
     # patches that even have a positive present.
@@ -166,12 +166,12 @@ validation:
         - "f75"
         - "f80"
   loss:
-    - name: FPR95
+    # - name: FPR95
     # Proxy-anchored counterpart: FPR95 over pdf<->image pairs only, i.e. the matching
     # the descriptor is actually deployed for. NOT comparable with FPR95 (different pair
     # population), so switching restarts the validation series — and `best.pth` follows
     # whichever entry carries weight.
-    # - name: ProxyAnchoredFPR95
+    - name: ProxyAnchoredFPR95
     # - name: Recall1
     #   weight: 0
     # - name: PosCoverage
