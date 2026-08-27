@@ -1,0 +1,115 @@
+track_path: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final/tracks/iteration_3_logpolar_s96.tracks
+scale: 96
+training:
+  ignore_mask: true
+  patch_size: 64
+  process_batch: process_batch_blobs
+  m_per_class: 4
+  num_workers: 8
+  num_epochs: 50
+  batch_size: 4096
+  dataset:
+    name: BlobTrackData
+    params:
+      h5_path: ${track_path}
+      min_track_length: 2
+      load_into_memory: true
+      include_untracked: true
+      max_untracked_to_tracked_ratio: 1.0
+      balance_view_angles: true
+      view_angle_band_edges: null
+      view_angle_band_target: median
+      view_angle_band_bias: 0.0
+      sequences:
+      - '028'
+      - '102'
+      - 14b
+      - '187'
+      - '232'
+      - 25d
+      - '291'
+      - 2f7
+      - 2fe
+      - '336'
+      - '452'
+      - '536'
+      - '568'
+      - '5e2'
+      - '602'
+      - '662'
+      - '695'
+      - 6a6
+      - 6b0
+      - 7ff
+      - '878'
+      - 88b
+      - 8a1
+      - '940'
+      - '942'
+      - 9ca
+      - a28
+      - a2e
+      - a4b
+      - a62
+      - b0b
+      - b70
+      - b9f
+      - bce
+      - c8e
+      - d42
+      - da0
+      - dd2
+      - e89
+      - eee
+      - ef7
+      - f23
+      - f3f
+      - f71
+      - fde
+      patch_type: logpolar
+  optimizer:
+    name: AdamW
+    params:
+      lr: 0.0001
+      weight_decay: 0.0001
+    scheduler:
+    - name: LinearLR
+    - name: CosineAnnealingLR
+  loss:
+  - name: ProxyAnchoredSupCon
+validation:
+  batch_size: 1024
+  num_workers: 4
+  validate_every_n_batches: null
+  dataset:
+    name: BlobTrackData
+    params:
+      h5_path: ${track_path}
+      min_track_length: 2
+      load_into_memory: true
+      include_untracked: true
+      sequences:
+      - 08d
+      - 5b6
+      - cf2
+      - f75
+      - f80
+      patch_type: logpolar
+  loss:
+  - name: ProxyAnchoredFPR95
+logging:
+  dir: /raid/data/hsa/logs/2026_08_24/bmvc_first_submission
+  model_checkpoints: true
+  checkpoint_every_epoch: false
+  checkpoint_dir: null
+  export_onnx: true
+  export_onnx_checkpoints:
+  - best
+  export_onnx_opset: null
+iteration: 3
+model:
+  name: HardNet
+  params:
+    in_channels: 1
+    patch_size: 64
+experiment_name: bmvc_first_submission

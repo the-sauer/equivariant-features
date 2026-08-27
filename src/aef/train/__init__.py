@@ -78,7 +78,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 scheduler = { "main":
                     torch.optim.lr_scheduler.ChainedScheduler([
                         (
-                            getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], T_max=100, **sched_cfg.get("params", {}))
+                            getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], T_max=cfg.training.num_epochs, **sched_cfg.get("params", {}))
                             if sched_cfg.name == "CosineAnnealingLR"
                             else getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], **sched_cfg.get("params", {}))
                         )
@@ -89,7 +89,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 sched_cfg = opt_cfg.scheduler
                 if sched_cfg.name == "CosineAnnealingLR":
                     scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
-                                                                                    T_max=50,
+                                                                                    T_max=cfg.training.num_epochs,
                                                                                     **sched_cfg.get("params", {}))}
                 else:
                     scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 

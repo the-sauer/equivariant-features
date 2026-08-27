@@ -68,7 +68,7 @@ logging:
   export_onnx: true
   checkpoint_every_epoch: false
   checkpoint_dir: null
-  dir: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla/networks
+  dir: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla2/networks
 validation:
   batch_size: 1024
   num_workers: 4

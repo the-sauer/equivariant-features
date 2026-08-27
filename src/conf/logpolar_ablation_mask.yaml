@@ -5,18 +5,19 @@ defaults:
   - track_descriptor_base
   - _self_
 
-iteration: ???
 scale: 96
-track_path: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla2/tracks/iteration_${iteration}_logpolar_s${scale}.tracks
+
+track_path: /raid/data/hsa/datasets/BlobBoardTrainingFootage/multiscale/tracks_logpolar_s96.tracks
 
 model:
   name: HardNetLogPolar
   params:
     in_channels: 1
     patch_size: 64
-    head: maxpool
+    head: fft
     antialias: true
     circular_pad: true
+    learned_mask: true
 
 training:
   dataset:
@@ -31,11 +32,11 @@ validation:
       patch_type: logpolar
   loss:
     - name: FPR95
-experiment_name: bootstrap_real_iteration_${iteration}
+experiment_name: fft_mask
 
 logging:
   model_checkpoints: true
   export_onnx: true
   checkpoint_every_epoch: false
   checkpoint_dir: null
-  dir: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla2/networks
+  dir: /raid/data/hsa/evaluation/logpolar_ablation
