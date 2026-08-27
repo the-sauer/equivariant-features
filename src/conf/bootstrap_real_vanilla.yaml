@@ -22,6 +22,7 @@ training:
   dataset:
     params:
       patch_type: logpolar
+      balance_view_angles: false
   loss:
     - name: SupCon
 validation:
