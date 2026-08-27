@@ -18,6 +18,9 @@ model:
     circular_pad: true
 
 training:
+  dataset:
+    params:
+      balance_view_angles: false
   loss:
     - name: SupCon
 validation:
