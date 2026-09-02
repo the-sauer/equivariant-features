@@ -1,7 +1,7 @@
 defaults:
   - blob_descriptor_base
   # - homography_validation
-  - dgx
+  # - dgx
   - _self_
 
 # THE key hyperparameter for the log-polar descriptor: the outer sampling radius

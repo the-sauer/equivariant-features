@@ -1,0 +1,25 @@
+# Julia environment for the BlobBoards Python bridge.
+#
+# `blob_board` is only a stub in the BlobBoards core (src/authoring_stubs.jl);
+# the real method lives in BlobBoardsAuthoringExt, whose triggers are
+# CairoMakie + Makie. Those are [weakdeps] of BlobBoards, and Julia refuses to
+# load a package's own weakdeps from that package's project env:
+#
+#   julia --project=deps/BlobBoards.jl -e 'using CairoMakie'
+#   ERROR: ArgumentError: Package CairoMakie not found in current path.
+#
+# So board generation cannot run under `--project=deps/BlobBoards.jl`. This env
+# dev's the checkout and lists CairoMakie as an ordinary dep, which activates
+# BlobBoardsAuthoringExt. It mirrors BlobBoards' own dev/Project.toml, and the
+# same trick its test target uses (CairoMakie is in the `test` target).
+#
+# `aef.data.blobboards` activates and instantiates this env before the first
+# blob_board call; see _ensure_authoring() there.
+
+[deps]
+BlobBoards = "93a5632c-6c4c-4c98-b3b2-221d1d9ee9e0"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+
+[sources]
+BlobBoards = { path = "../BlobBoards.jl" }

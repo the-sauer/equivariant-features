@@ -230,3 +230,7 @@ logs
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# Julia manifest of the board-authoring env — regenerable by Pkg.instantiate()
+# from deps/julia/Project.toml (same convention as BlobBoards' own dev/).
+/deps/julia/Manifest.toml

@@ -1,7 +1,7 @@
 training:
   dataset:
     params:
-      data_dir: /data/datasets
+      data_dir: ./datasets
       suffix: train #ILSVRC/Data/CLS-LOC/train
       image_size: [256, 256]
 logging:

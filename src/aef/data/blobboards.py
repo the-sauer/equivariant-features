@@ -30,6 +30,44 @@ from .homography import HomographyData, dataset_cache_key, effective_params
 _ureg = pint.UnitRegistry()
 _dpi = 1 / _ureg.inch
 
+# Julia env that carries the board-authoring trigger; see deps/julia/Project.toml.
+_JULIA_ENV = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "deps", "julia")
+)
+_authoring_ready = False
+
+
+def _ensure_authoring():
+    """Make `BlobBoards.blob_board` dispatchable before the first board is rendered.
+
+    Since BlobBoards 0.22 the core package only declares `blob_board`
+    (`src/authoring_stubs.jl`); the method that assembles the figure lives in
+    `BlobBoardsAuthoringExt`, whose triggers are CairoMakie + Makie. Without them
+    loaded, `blobboards.blob_board` reaches the Julia side and dies with
+
+        MethodError: no method matching blob_board(::Size2{...}, ::Quantity{...}; ...)
+        The function `blob_board` exists, but no method is defined for this
+        combination of argument types.
+
+    Both triggers are BlobBoards `[weakdeps]`, and Julia will not load a package's
+    own weakdeps from that package's project env — which is exactly what
+    `blobboards._init()` activates. So the extension can never come up there, and
+    we activate `deps/julia` instead (it dev's the checkout and lists CairoMakie as
+    an ordinary dep). `_init()` runs first: it registers CauRegistry, without which
+    instantiating our env cannot resolve BlobBoards' own dependencies.
+    """
+    global _authoring_ready
+    if _authoring_ready:
+        return
+    # CauRegistry + General registered, BlobBoards loaded
+    blobboards._init()                                       # pylint: disable=protected-access
+    from juliacall import Main as jl                         # pylint: disable=import-outside-toplevel
+    jl.seval("import Pkg")
+    jl.Pkg.activate(_JULIA_ENV, io=jl.devnull)
+    jl.Pkg.instantiate(io=jl.devnull)
+    jl.seval("using CairoMakie")
+    _authoring_ready = True
+
 
 def get_seeds(num_seeds, seed_range=(0, 10000), split="train"):
     seeds = []
@@ -124,6 +162,7 @@ class BlobBoardHomographyData(HomographyData):
         # *different board* (1189 vs 1202 blobs, unrelated layouts) — changing it gives
         # a new draw, not a finer rendering of the same one.
         boards = []
+        _ensure_authoring()
         for s, p in zip(board_seeds, polarity):
             board = blobboards.blob_board(
                 (image_size[0] * _ureg.mm, image_size[1] * _ureg.mm),

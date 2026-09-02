@@ -32,7 +32,7 @@ training:
       # kagglehub default arnaud58/landscape-pictures) with random placement +
       # background garbage distractors. Only the warped views get the scene +
       # augmentation; the identity reference view stays clean.
-      background: /raid/data/hsa/datasets/backgrounds
+      background: ./backgrounds
       board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 0
@@ -41,7 +41,7 @@ training:
       # model at the same `scale` — build it once. Saving is best-effort; set to null
       # to disable. NOTE: a hit reuses the exact same random draw (homographies, and
       # unpinned board seeds), so runs sharing a key see identical data.
-      cache_dir: /raid/data/hsa/datasets/homography_cache
+      cache_dir: ./homography_cache
       augmentation:
         color_jitter: {}
         gaussian_blur:
@@ -113,11 +113,11 @@ validation:
       # Board-on-scene compositing + garbage distractors, pinned via background_seed
       # so the validation set is reproducible. Bands filter on raw intrinsic scales,
       # so a randomized placement scale does not muddy small/medium/large.
-      background: /raid/data/hsa/datasets/backgrounds
+      background: ./backgrounds
       board_scale_range: [0.4, 0.7]
       garbage_fraction: 0.3
       background_seed: 40
-      cache_dir: /raid/data/hsa/datasets/homography_cache   # see training.dataset.params.cache_dir
+      cache_dir: ./homography_cache   # see training.dataset.params.cache_dir
       augmentation:
         color_jitter: {}
         gaussian_blur:
