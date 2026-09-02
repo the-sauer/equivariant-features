@@ -10,7 +10,6 @@ python-dotenv
 pytorch-metric-learning >= 1.2, < 2
 torch >= 2.11, < 3
 torchvision >= 0.26, < 1
-treverhines-rbf >= 2025.7.4, < 2025.8
 tqdm >= 4.67, < 5
 juliacall >= 0.9, < 1
 -e./deps/BlobBoards.jl/python

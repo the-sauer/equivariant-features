@@ -27,7 +27,6 @@ from tqdm import tqdm
 
 from .. import export
 from . import losses
-from .canonicalizer import *
 from .descriptor import *
 
 

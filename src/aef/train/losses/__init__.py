@@ -14,7 +14,5 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from .blob import BlobLoss
-from .contrastive import (Contrastive, FPR95, ProxyAnchoredFPR95, SupCon,
-                          ProxyAnchoredSupCon, Recall1, PosCoverage)
-from .SupConLoss import SupConLoss
+from .contrastive import *
+from .SupConLoss import *

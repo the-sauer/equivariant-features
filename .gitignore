@@ -227,3 +227,6 @@ logs
 **/.DS_Store
 
 **/debug_imgs
+# pixi environments
+.pixi/*
+!.pixi/config.toml
