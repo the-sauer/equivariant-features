@@ -18,8 +18,5 @@
 This module contains the implementations of the models used in this thesis.
 """
 
-from .approach_one import *
-from .approach_two import *
+from .steerable import *
 from .hardnet import *
-from .scale import *
-from .unet import *

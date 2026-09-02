@@ -1,0 +1,34 @@
+defaults:
+  - blob_descriptor_base
+  - homography_validation
+  - dgx
+  - _self_
+
+# THE key hyperparameter for the cartesian/steerable descriptor: the patch scale
+# factor. Defined once here and threaded (via ${scale}) into the model, the training
+# dataset, and every validation split, so a single `scale=...` override changes them
+# all in lockstep (and the model's scale_factors can never drift from the dataset's).
+scale: 64.0
+
+model:
+  name: BlobDescriptorNoStride
+  params:
+    scale_factors: ["${scale}"]
+    in_channels: 1
+
+training:
+  num_epochs: 10
+  batch_size: 1024
+  num_workers: 6   # escnn forward is GPU-bound, so fewer loader workers keep the GPU fed
+  dataset:
+    params:
+      patch_type: cartesian
+      patch_scale_factors: ["${scale}"]
+  optimizer:
+    name: AdamW
+
+validation:
+  shared_params:
+    params:
+      patch_type: cartesian
+      patch_scale_factors: ["${scale}"]

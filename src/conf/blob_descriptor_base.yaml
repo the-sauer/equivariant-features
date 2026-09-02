@@ -1,0 +1,130 @@
+defaults:
+  - config
+  - _self_
+
+training:
+  patch_size: 64
+  process_batch: process_batch_blobs
+  m_per_class: 4
+  num_workers: 8   # DataLoader workers; keep Slurm `-c` >= this + ~2 (main + Julia board-gen)
+
+  dataset:
+    name: BlobBoardHomographyData
+    params:
+      num_boards: 32
+      image_size: [150, 150]
+      transforms_per_image: 1
+      in_memory: true
+      extraction_batch_size: 4096
+      supersample: 3   # sub-taps per output pixel per axis, area-averaged (patch anti-aliasing)
+      transform_params:
+        fit_to_frame: true
+        perspective_amplitude_x: 0.3
+        perspective_amplitude_y: 0.3
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      # Place boards on real background scenes (local folder preferred, else the
+      # kagglehub default arnaud58/landscape-pictures) with random placement +
+      # background garbage distractors. Only the warped views get the scene +
+      # augmentation; the identity reference view stays clean.
+      background: ./backgrounds
+      board_scale_range: [0.4, 0.7]
+      garbage_fraction: 0.3
+      background_seed: 0
+      # Reuse a prepared dataset (boards, composites, garbage, extracted patches)
+      # keyed by a hash of the params above. Runs that share a dataset — e.g. every
+      # model at the same `scale` — build it once. Saving is best-effort; set to null
+      # to disable. NOTE: a hit reuses the exact same random draw (homographies, and
+      # unpinned board seeds), so runs sharing a key see identical data.
+      cache_dir: ./homography_cache
+      augmentation:
+        color_jitter: {}
+        gaussian_blur:
+          kernel_size: [7, 7]
+          sigma: [0.1, 2.0]
+        gaussian_noise: {}
+  batch_size: 4096
+  optimizer:
+    name: AdamW
+    params:
+      lr: 1e-5
+      weight_decay: 1e-4
+    scheduler:
+      - name: LinearLR
+      - name: CosineAnnealingLR
+
+  loss:
+    - name: ProxyAnchoredSupCon
+
+# FPR95 is reported per blob-scale band. Every split draws from the SAME pinned
+# boards (seeds below, a validation-split residue class the training boards never
+# draw). `shared_params` holds the common dataset template; each split under
+# `datasets` only states what differs (its scale band + loss weight), deep-merged
+# onto the template by get_validation_specs. The patch-type-specific fields
+# (patch_type + the scale hyperparameter) are added by the leaf config.
+#
+# The small/medium/large sets keep the lower/middle/upper third of the boards'
+# intrinsic blob-scale distribution (scale_quantile_range); `overall` keeps the
+# full range. `max_keypoints` caps each split to the same fixed count, so all four
+# splits are exactly the same size (the cap is applied *after* the band filter, and
+# `overall` is a subsample of the full pool rather than the literal union of the
+# bands). Reported as FPR95@overall / FPR95@small / FPR95@medium / FPR95@large.
+# Only the overall FPR drives best.pth selection (the bands carry weight 0, so they
+# are monitored but not optimized).
+validation:
+  batch_size: 1024
+  num_workers: 4   # validation loaders are small + iterated sequentially -> fewer workers
+  # Run the whole validation suite every N training batches on top of the
+  # end-of-epoch run, so the metrics can be read at sub-epoch resolution; the extra
+  # points are plotted at the fractional epoch they were measured at. null/0 => one
+  # validation per epoch (the default). `best.pth` still compares epochs only.
+  validate_every_n_batches: null
+  shared_params:
+    name: BlobBoardHomographyData
+    params:
+      in_memory: true
+      num_boards: 4
+      seeds: [40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340]
+      image_size: [150, 150]
+      transforms_per_image: 1
+      extraction_batch_size: 4096
+      supersample: 3
+      transform_params:
+        fit_to_frame: true
+        perspective_amplitude_x: 0.3
+        perspective_amplitude_y: 0.3
+      blobboard_params:
+        board_size: [142, 142]
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      # Pin the warps so every band sees the SAME warp of each (already pinned) board.
+      # Without it each band draws its own from numpy's global RNG, so the bands differ
+      # by a random rotation on top of the scale filter they are meant to isolate —
+      # which is exactly the confound that makes their FPR95 numbers incomparable.
+      homography_seed: 40
+      # Board-on-scene compositing + garbage distractors, pinned via background_seed
+      # so the validation set is reproducible. Bands filter on raw intrinsic scales,
+      # so a randomized placement scale does not muddy small/medium/large.
+      background: ./backgrounds
+      board_scale_range: [0.4, 0.7]
+      garbage_fraction: 0.3
+      background_seed: 40
+      cache_dir: ./homography_cache   # see training.dataset.params.cache_dir
+      augmentation:
+        color_jitter: {}
+        gaussian_blur:
+          kernel_size: [7, 7]
+          sigma: [0.1, 2.0]
+        gaussian_noise: {}
+  datasets:
+    - name: overall
+      loss:
+        - name: ProxyAnchoredFPR95

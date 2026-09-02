@@ -1,6 +1,6 @@
 [BASIC]
 
-good-names=H, A, B, E, F, W, DoG, N, D
+good-names=H, A, B, E, F, W, DoG, N, D, Su
 
 good-names-rgxs=H[a-z0-9_]{1,30}$, K[a-z0-9_]{1,30}$, N[a-z0-9_]{1,30}$, R[a-z0-9_]{1,30}$
 

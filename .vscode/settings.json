@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
-        "./deps/BlobBoards.jl/python"
+        "./deps/BlobBoards.jl/python",
+        "/home/hsa/env_packages"
     ]
 }

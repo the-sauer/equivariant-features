@@ -1,0 +1,190 @@
+# Base config for training a blob descriptor on REAL track data (a `.tracks` HDF5
+# file of canonicalized, track-labelled patches — one patch type / scale per file).
+#
+# Unlike the synthetic blob_descriptor_* configs this does NOT inherit `config`/`dgx`:
+# those set ILSVRC/BlobBoard dataset params (data_dir, image_size, ...) that would leak
+# into the BlobTrackData constructor. Everything BlobTrackData needs is set here; the
+# per-network leaves (track_descriptor_<net>) add only the `model` block + `scale`.
+#
+# The `.tracks` patches are already canonicalized, so BlobTrackData plugs straight into
+# process_batch_blobs (its collate reuses the blob-batch keys). Warm-start a run from a
+# synthetic-descriptor checkpoint with `+training.init_from_checkpoint=<path>` (loads
+# model weights only, epoch 0) — see launch_track_matrix.sh.
+#
+# Split: only 18 of the 50 boards currently have tracked media (real pdf<->tracked
+# positives); the other 32 are pdf-only (they still ride in TRAIN as negatives and
+# will gain tracked media later). VAL is drawn from 5 tracked-media boards (25d, 5b6,
+# f80 = multi-media; cf2, f75 = single-media hard cases) ~2.3k real positives; every
+# other board (13 tracked-media + 32 pdf-only) is in TRAIN. Disjoint by board uid.
+defaults:
+  - _self_
+
+# Path to the prebuilt `.tracks` file. No in-repo default — set per run (the launcher
+# passes `track_path=...`).
+track_path: ???
+
+# Threaded into the model's scale knob by each leaf (via ${scale}); must match the scale
+# the source checkpoint / the `.tracks` patches were produced at. Overridden per run.
+scale: 64.0
+
+training:
+  ignore_mask: true
+  patch_size: 64
+  process_batch: process_batch_blobs
+  m_per_class: 4          # SupCon/FPR95 need >=1 positive pair per batch -> class-balanced sampler
+  num_workers: 8
+  num_epochs: 50
+  batch_size: 4096
+  dataset:
+    name: BlobTrackData
+    params:
+      h5_path: ${track_path}
+      min_track_length: 2
+      load_into_memory: true
+      include_untracked: true          # confusers as extra negatives
+      max_untracked_to_tracked_ratio: 1.0
+      # Viewing-obliquity balance. Real footage is heavily fronto-parallel-biased (see
+      # the 10 deg histogram `log_stats: true` prints), so the default packing lets the
+      # near-frontal band own every batch and the oblique tail — the regime an affine-
+      # equivariant descriptor exists for — contributes a handful of pairs per epoch.
+      # With this on, each batch asks EVERY populated band for the same number of
+      # in-band patches, drawn as positive pairs (an observation + its GT rendering,
+      # or two in-band observations once that one is spent). A band without enough
+      # disjoint pairs contributes all it has rather than repeating a patch (a
+      # duplicate inside a batch is a distance-0 fake positive); the sampler prints
+      # the per-band quota, ceiling and resampling factor on startup.
+      # Set false to fall back to the old whole-track-group packing.
+      balance_view_angles: true
+      # Bands in degrees. Default (null) = 0..90 in 10 deg steps, the same grid
+      # `track_angle_validation.yaml` reports FPR95 over. Widen if the sampler warns
+      # that the high bands cap out below their quota.
+      view_angle_band_edges: null
+      # Epoch LENGTH only (batches/epoch = target / per-band quota); the per-batch
+      # balance is unaffected. "min"/"median"/"mean"/"max" over the populated
+      # bands' observation counts, or an explicit int. "min" = one pass over the rarest
+      # band (shortest epoch, least repetition), "max" = one pass over the most crowded
+      # one (longest, heaviest repetition of the rare bands).
+      view_angle_band_target: median
+      # Tilt of the per-batch quotas along the obliquity axis. 0.0 = plain balance
+      # (every populated band the same quota). b > 0 spends more of the batch on the
+      # oblique bands: the most oblique populated band gets exp(b)x the quota of the
+      # most frontal one, the bands between interpolating geometrically — 2.3 is a
+      # 10:1 tilt, 0.7 a 2:1 one. b < 0 leans back toward fronto-parallel. The same
+      # positive budget is redistributed, so batch size and epoch length do not move,
+      # and every populated band keeps at least one draw.
+      view_angle_band_bias: 0.0
+      # 45 boards = 13 tracked-media (real positives) + 32 pdf-only (negatives now,
+      # tracked media added later). Disjoint from the val boards below.
+      sequences:
+        - "028"
+        - "102"
+        - "14b"
+        - "187"
+        - "232"
+        - "25d"
+        - "291"
+        - "2f7"
+        - "2fe"
+        - "336"
+        - "452"
+        - "536"
+        - "568"
+        - "5e2"
+        - "602"
+        - "662"
+        - "695"
+        - "6a6"
+        - "6b0"
+        - "7ff"
+        - "878"
+        - "88b"
+        - "8a1"
+        - "940"
+        - "942"
+        - "9ca"
+        - "a28"
+        - "a2e"
+        - "a4b"
+        - "a62"
+        - "b0b"
+        - "b70"
+        - "b9f"
+        - "bce"
+        - "c8e"
+        - "d42"
+        - "da0"
+        - "dd2"
+        - "e89"
+        - "eee"
+        - "ef7"
+        - "f23"
+        - "f3f"
+        - "f71"
+        - "fde"
+  optimizer:
+    name: AdamW
+    params:
+      lr: 1e-4
+      weight_decay: 1e-4
+    scheduler:
+      - name: LinearLR
+      - name: CosineAnnealingLR
+  loss:
+    # - name: SupCon
+    # Proxy-anchored variant: the board rendering (`is_pdf`) is its blob's proxy —
+    # outer sum over those, A(i)/P(i) over image patches only, so every image<->image
+    # term drops out. See docs/configs_and_training.md (contrastive losses).
+    - name: ProxyAnchoredSupCon
+    # Report-only diagnostics (weight 0 -> monitored, not optimized): the per-batch
+    # true-positive rate (nearest-neighbour retrieval accuracy) and the fraction of
+    # patches that even have a positive present.
+    # - name: Recall1
+    #   weight: 0
+    # - name: PosCoverage
+      # weight: 0
+
+validation:
+  batch_size: 1024
+  num_workers: 4
+  # Run the whole validation suite every N training batches on top of the
+  # end-of-epoch run, so the metrics can be read at sub-epoch resolution; the extra
+  # points are plotted at the fractional epoch they were measured at. null/0 => one
+  # validation per epoch (the default). `best.pth` still compares epochs only.
+  validate_every_n_batches: null
+  dataset:
+    name: BlobTrackData
+    params:
+      h5_path: ${track_path}
+      min_track_length: 2
+      load_into_memory: true
+      include_untracked: true
+      # 5 tracked-media boards (~2.3k real pdf<->tracked positives). Disjoint from train.
+      sequences:
+        - "08d"
+        - "5b6"
+        - "cf2"
+        - "f75"
+        - "f80"
+  loss:
+    # - name: FPR95
+    # Proxy-anchored counterpart: FPR95 over pdf<->image pairs only, i.e. the matching
+    # the descriptor is actually deployed for. NOT comparable with FPR95 (different pair
+    # population), so switching restarts the validation series — and `best.pth` follows
+    # whichever entry carries weight.
+    - name: ProxyAnchoredFPR95
+    # - name: Recall1
+    #   weight: 0
+    # - name: PosCoverage
+    #   weight: 0
+
+logging:
+  dir: /raid/data/hsa/logs
+  # Track runs ARE the deliverable, so persist checkpoints (latest.pth + best.pth).
+  model_checkpoints: true
+  checkpoint_every_epoch: false
+  checkpoint_dir: null    # null -> <logging.dir>/<experiment_name>/checkpoints
+  # Track runs are the deliverable, so leave every run with a deployable graph:
+  # `best.onnx` lands next to `best.pth` when the last epoch finishes.
+  export_onnx: true
+  export_onnx_checkpoints: [best]
+  export_onnx_opset: null

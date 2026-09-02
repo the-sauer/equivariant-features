@@ -1,0 +1,36 @@
+defaults:
+  - blob_descriptor_logpolar
+  - dgx
+  - _self_
+
+# Log-polar descriptor with the DFT-magnitude head + learned mask-aware pooling.
+# Every toggle here defaults to OFF in code, so the base `blob_descriptor_logpolar`
+# behaviour (angular max-pool, no mask) is unchanged unless a config opts in:
+#   model.params.head=fft             -> AngularRFFTMag replaces the angular max-pool
+#                                        (keeps the full angular spectrum, not one peak)
+#   model.params.learned_mask=true    -> GT board-validity mask on the `is_pdf` view,
+#                                        predicted mask on the (warped) target views
+#   dataset.params.precompute_masks   -> co-extract + cache the GT validity mask
+#   training.mask_loss_weight         -> weight of the mask-supervision BCE
+
+model:
+  name: HardNetLogPolar
+  params:
+    in_channels: 1
+    patch_size: 64
+    head: fft
+    n_harmonics: 5      # keep the 5 lowest angular-frequency magnitudes (of A//2+1 = 9)
+    learned_mask: true
+
+training:
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      precompute_masks: true
+  loss:
+    - name: SupCon
+
+validation:
+  shared_params:
+    params:
+      precompute_masks: true

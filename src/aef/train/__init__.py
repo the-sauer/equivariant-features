@@ -16,48 +16,31 @@
 
 import itertools
 import logging
+import math
 import os
 from typing import Callable
 
 from matplotlib import pyplot as plt
 import omegaconf
 import torch
-from torchvision.transforms import v2
 from tqdm import tqdm
 
+from .. import export
 from . import losses
-
 from .descriptor import *
-from .detector import *
-from .scale import *
 
 
-ProcessBatchType = Callable[
-    [
-        torch.nn.Module,
-        tuple[torch.Tensor, ...],
-        Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-        Callable[[torch.Tensor], torch.Tensor],
-        torch.device,
-        omegaconf.DictConfig
-    ],
-    torch.Tensor
-]
+class chain:
+    def __init__(self, *args):
+        self.iterators = args
 
+    def __iter__(self):
+        for it in self.iterators:
+            for b in it:
+                yield b
 
-OPTIMIZERS = {
-    "adam": torch.optim.Adam,
-    "adamw": torch.optim.AdamW,
-    "sgd": torch.optim.SGD
-}
-
-
-SCHEDULERS = {
-    "step": torch.optim.lr_scheduler.StepLR,
-    "multistep": torch.optim.lr_scheduler.MultiStepLR,
-    "exponential": torch.optim.lr_scheduler.ExponentialLR,
-    "cosine": torch.optim.lr_scheduler.CosineAnnealingLR
-}
+    def __len__(self):
+        return sum(map(len, self.iterators))
 
 
 def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name):
@@ -65,9 +48,14 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
     Prepares the training by setting up logging, device, model, optimizer, scheduler, data loaders, criterion and
     augmentation.
     """
+    print(f"Preparing experiment \033[1m{experiment_name}\033[0m")
     if hasattr(cfg, "logging") and cfg.logging is not None:
         os.makedirs(os.path.join(cfg.logging.dir, experiment_name), exist_ok=True)
-        checkpoint_dir = os.path.join(cfg.logging.dir, experiment_name, "checkpoints")
+        # Defaults to <log_dir>/<experiment_name>/checkpoints; override with
+        # `logging.checkpoint_dir`.
+        checkpoint_dir = getattr(cfg.logging, "checkpoint_dir", None) or os.path.join(
+            cfg.logging.dir, experiment_name, "checkpoints"
+        )
         os.makedirs(checkpoint_dir, exist_ok=True)
         logfile = os.path.join(cfg.logging.dir, experiment_name, "training.log")
         logging.basicConfig(filename=logfile, level=logging.DEBUG, force=True)
@@ -83,28 +71,46 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
     opt_cfg = cfg.training.optimizer
     if hasattr(opt_cfg, "name"):
-        optimizer = {"main": OPTIMIZERS[opt_cfg.name](model.parameters(), **opt_cfg.get("params", {}))}
+        optimizer = {"main": getattr(torch.optim, opt_cfg.name)(model.parameters(), **opt_cfg.get("params", {}))}
         if hasattr(opt_cfg, "scheduler"):
-            sched_cfg = opt_cfg.scheduler
-            scheduler = {"main": SCHEDULERS[sched_cfg.name](optimizer["main"], **sched_cfg.get("params", {}))}
+            if isinstance(opt_cfg.scheduler, omegaconf.ListConfig):
+                scheduler = { "main":
+                    torch.optim.lr_scheduler.ChainedScheduler([
+                        (
+                            getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], T_max=cfg.training.num_epochs, **sched_cfg.get("params", {}))
+                            if sched_cfg.name == "CosineAnnealingLR"
+                            else getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], **sched_cfg.get("params", {}))
+                        )
+                        for sched_cfg in opt_cfg.scheduler
+                    ])
+                }
+            else:
+                sched_cfg = opt_cfg.scheduler
+                if sched_cfg.name == "CosineAnnealingLR":
+                    scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
+                                                                                    T_max=cfg.training.num_epochs,
+                                                                                    **sched_cfg.get("params", {}))}
+                else:
+                    scheduler = {"main": getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer["main"], 
+                                                                                   **sched_cfg.get("params", {}))}
         else:
             scheduler = {}
     else:
         optimizer = {
-            n: OPTIMIZERS[o.name](
-                (getattr(model, o.model_params).parameters()
-                    if isinstance(o.model_params, str)
-                    else itertools.chain(*(getattr(model, mp).parameters() for mp in o.model_params)))
-                if hasattr(o, "model_params") else model.parameters(),
-                **o.get("params", {})
+            o_name: getattr(torch.optim, o_cfg.name)(
+                (getattr(model, o_cfg.model_params).parameters()
+                    if isinstance(o_cfg.model_params, str)
+                    else itertools.chain(*(getattr(model, mp).parameters() for mp in o_cfg.model_params)))
+                if hasattr(o_cfg, "model_params") else model.parameters(),
+                **o_cfg.get("params", {})
             )
-            for n, o in opt_cfg.items()
+            for o_name, o_cfg in opt_cfg.items()
         }
         scheduler = {}
         for n, o in opt_cfg.items():
             if hasattr(o, "scheduler"):
                 sched_cfg = o.scheduler
-                scheduler[n] = SCHEDULERS[sched_cfg.name](optimizer[n], **sched_cfg.get("params", {}))
+                scheduler[n] = getattr(torch.optim.lr_scheduler, sched_cfg.name)(optimizer[n], **sched_cfg.get("params", {}))
 
     if hasattr(cfg.training, "continue_from_checkpoint"):
         checkpoint = torch.load(cfg.training.continue_from_checkpoint, map_location=device)
@@ -124,99 +130,408 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
 
         start_epoch = checkpoint["epoch"] + 1
         best_loss = float("inf") #checkpoint["best_loss"]
+    elif getattr(cfg.training, "init_from_checkpoint", None):
+        # Warm-start: load ONLY the model weights and start a FRESH run (epoch 0, new
+        # optimizer/scheduler). Distinct from `continue_from_checkpoint`, which resumes a
+        # run in place. Used to seed track training from a synthetic-descriptor checkpoint
+        # (see launch_track_matrix.sh). strict=False tolerates head/shape drift between
+        # the source model and this run's model, reporting what was skipped.
+        checkpoint = torch.load(cfg.training.init_from_checkpoint, map_location=device)
+        state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+        # `strict=False` only forgives missing/unexpected KEYS — a key that exists with a
+        # different shape still raises. Angular heads differ in exactly that way (the
+        # final conv is (128, 128, rows, radial), and `rows` depends on the head), so drop
+        # the mismatched tensors here and let them start fresh.
+        own = model.state_dict()
+        mismatched = [k for k, v in state.items()
+                      if k in own and own[k].shape != getattr(v, "shape", own[k].shape)]
+        if mismatched:
+            state = {k: v for k, v in state.items() if k not in mismatched}
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        msg = (f"Warm-started model from {cfg.training.init_from_checkpoint} "
+               f"(missing={len(missing)}, unexpected={len(unexpected)} keys, "
+               f"shape-mismatched={len(mismatched)}: {mismatched})")
+        print("\033[1m" + msg + "\033[0m")
+        logging.info(msg)
+        start_epoch = 0
+        best_loss = float("inf")
     else:
         start_epoch = 0
         best_loss = float("inf")
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        collate_fn=train_dataset.get_collate_func()
-    )
-    validation_loader = torch.utils.data.DataLoader(
-        validation_dataset,
-        batch_size=cfg.validation.batch_size,
-        shuffle=True,
-        collate_fn=validation_dataset.get_collate_func()
-    )
+    # Optional class-balanced sampling (m views per keypoint per batch) for
+    # contrastive training; enabled by setting `training.m_per_class` in the
+    # config. Falls back to plain shuffling for datasets/tasks that don't use it.
+    m_per_class = getattr(cfg.training, "m_per_class", None)
 
-    criterion = {
-        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.training.loss
-    }
+    # DataLoader worker config. With num_workers>0 the data pipeline (index the
+    # precomputed patches, collate, H2D copy) overlaps with the GPU forward/backward
+    # instead of running synchronously in the main process — the main lever when the
+    # GPU is starved by single-process loading. persistent_workers keeps the train
+    # loader's workers alive across epochs to avoid re-forking the large in-memory
+    # dataset each epoch; validation uses fewer, non-persistent workers since its
+    # several small loaders are iterated sequentially. Sizes come from
+    # `training.num_workers` / `validation.num_workers` (match Slurm `-c` to them).
+    def _loader_kwargs(num_workers, persistent):
+        num_workers = int(num_workers)
+        kw = {"num_workers": num_workers, "pin_memory": True}
+        if num_workers > 0:
+            kw["persistent_workers"] = persistent
+            kw["prefetch_factor"] = 2
+        return kw
 
-    validation_criterion = {
-        loss_cfg.name: (getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})), getattr(loss_cfg, "weight", 1.0), getattr(loss_cfg, "report", True)) for loss_cfg in cfg.validation.loss
-    }
+    train_workers = int(getattr(cfg.training, "num_workers", 8))
+    val_workers = int(getattr(cfg.validation, "num_workers", 4))
 
-    if hasattr(cfg.training, "augmentation") and cfg.training.augmentation is not None:
-        # TODO: Check for all innner augmentations
-        augmentation = v2.Compose([
-            v2.ColorJitter(**cfg.training.augmentation.color_jitter),
-            v2.GaussianBlur(
-                cfg.training.augmentation.gaussian_blur.kernel_size,
-                sigma=cfg.training.augmentation.gaussian_blur.sigma
-            ),
-            v2.GaussianNoise(**cfg.training.augmentation.gaussian_noise),
-        ])
-    else:
-        augmentation = lambda x: x  # noqa: E731
+    train_loader = []
+    for d in train_dataset:
+        sampler = (
+            d.get_sampler(cfg.training.batch_size, m=int(m_per_class))
+            if m_per_class and hasattr(d, "get_sampler")
+            else None
+        )
+        # A dataset may return a *batch* sampler (yields index lists) rather than a
+        # per-sample sampler — BlobTrackData does, to guarantee positive pairs and
+        # avoid the singleton-confuser duplication MPerClassSampler would introduce.
+        # Those are mutually exclusive with batch_size/shuffle/sampler on DataLoader.
+        if getattr(sampler, "is_batch_sampler", False):
+            train_loader.append(torch.utils.data.DataLoader(
+                d,
+                batch_sampler=sampler,
+                collate_fn=d.get_collate_func(),
+                **_loader_kwargs(train_workers, persistent=True),
+            ))
+        else:
+            train_loader.append(torch.utils.data.DataLoader(
+                d,
+                batch_size=cfg.training.batch_size,
+                shuffle=sampler is None,
+                sampler=sampler,
+                collate_fn=d.get_collate_func(),
+                **_loader_kwargs(train_workers, persistent=True),
+            ))
+    def build_criterion(loss_cfgs):
+        return {
+            loss_cfg.name: (
+                getattr(losses, loss_cfg.name)(**loss_cfg.get("params", {})),
+                getattr(loss_cfg, "weight", 1.0),
+                getattr(loss_cfg, "report", True),
+            )
+            for loss_cfg in loss_cfgs
+        }
 
-    return model, optimizer, scheduler, criterion, validation_criterion, train_loader, validation_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
+    criterion = build_criterion(cfg.training.loss)
+
+    # ``validation_dataset`` is a list of (label, [dataset], [loss_cfg]) specs.
+    # Pair each dataset with its own criterion + loader(s) so their metrics are
+    # accumulated and reported separately (keyed ``<loss>@<label>``) rather than
+    # pooled into a single number across all validation datasets.
+    #
+    # A dataset that exposes ``get_eval_batch_sampler`` (BlobTrackData) drives a
+    # class-balanced batch_sampler so every validation batch contains positive
+    # pairs — a plain contiguous ``shuffle=False`` slice of a track file has its
+    # matching observations scattered across sequences, so most batches would have
+    # no positive and FPR95 would be NaN. ``validation.confuser_fraction`` (default
+    # 0.5) sets how much of each batch is hard-negative confusers.
+    val_conf_frac = float(getattr(cfg.validation, "confuser_fraction", 0.5))
+
+    def _val_loader(d):
+        if hasattr(d, "get_eval_batch_sampler"):
+            batch_sampler = d.get_eval_batch_sampler(
+                cfg.validation.batch_size, confuser_fraction=val_conf_frac
+            )
+            return torch.utils.data.DataLoader(
+                d, batch_sampler=batch_sampler, collate_fn=d.get_collate_func(),
+                **_loader_kwargs(val_workers, persistent=False))
+        return torch.utils.data.DataLoader(
+            d, batch_size=cfg.validation.batch_size, shuffle=False,
+            collate_fn=d.get_collate_func(),
+            **_loader_kwargs(val_workers, persistent=False))
+
+    validation_entries = [
+        (label, [_val_loader(d) for d in datasets], build_criterion(loss_cfgs))
+        for label, datasets, loss_cfgs in validation_dataset
+    ]
+
+    # Augmentation is applied by the dataset (`training.dataset.params.augmentation`,
+    # see HomographyData.compute_patches), which is also the only place a config sets
+    # it — the process_batch functions ignore this argument.
+    augmentation = lambda x: x  # noqa: E731
+
+    return model, optimizer, scheduler, criterion, validation_entries, train_loader, augmentation, device, checkpoint_dir, start_epoch, best_loss
 
 
-def train_func(process_batch: ProcessBatchType):
+def train_func(process_batch):
     def train(model, train_dataset, validation_dataset, cfg, experiment_name="default"):
         (
             model,
             optimizer,
             scheduler,
             criterion,
-            validation_criterion,
+            validation_entries,
             train_loader,
-            validation_loader,
             augmentation,
             device,
             checkpoint_dir,
             start_epoch,
             best_loss
         ) = prepare_training(model, train_dataset, validation_dataset, cfg, experiment_name)
+        print(f"Running experiment \033[1m{experiment_name}\033[0m")
 
+        def report_key(label, name):
+            return f"{name}@{label}" if label else name
+
+        print("Training datasets", *(f"{d.__class__.__name__}: {len(d)}"for d in train_dataset))
+        print("Validation datasets", *(
+            f"{label or 'val'}[{d.__class__.__name__}]: {len(d)}"
+            for label, loaders, _ in validation_entries for d in (ld.dataset for ld in loaders)))
         x = []
         y_train = {n: [] for n in criterion.keys() if criterion[n][2]}
-        y_val = {n: [] for n in validation_criterion.keys() if validation_criterion[n][2]}
+        # One curve per (validation dataset, reported metric), keyed <metric>@<label>.
+        val_keys = [report_key(label, n)
+                    for label, _, crit in validation_entries
+                    for n, (_, _, r) in crit.items() if r]
+        y_val = {k: [] for k in val_keys}
+        # Validation runs on its own x axis: with sub-epoch validation enabled the
+        # points sit at fractional epochs, so they no longer line up 1:1 with `x`.
+        x_val = []
+
+        def append_curves(curves, values, n_epochs):
+            """Append this epoch's values, admitting keys the config never declared.
+
+            A ``process_batch`` function may report losses it computes itself rather
+            than pulling from the criterion — ``process_batch_blobs`` adds the
+            mask-supervision ``mask_bce`` this way — so the set of curves is only
+            known once a batch has run. A key that shows up late is backfilled with
+            NaN for the epochs before it existed, keeping every series the same
+            length as ``x``; a key that stops being reported gets NaN as well.
+            """
+            for n in values:
+                if n not in curves:
+                    curves[n] = [float("nan")] * (n_epochs - 1)
+            for n, v in curves.items():
+                v.append(values.get(n, float("nan")))
+
+        lr = {sch.__class__.__name__: [] for sch in scheduler.values()}
+
+        # Figure heading: model type + the key scale hyperparameter (the single
+        # ``scale`` config key when present, else the patch/log-polar scale param).
+        model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
+        scale_desc = getattr(cfg, "scale", None)
+        if scale_desc is None:
+            _p = cfg.training.dataset.params
+            scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
+        # getattr with defaults: only the log-polar heads carry `head_type` /
+        # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
+        # crash here *after* a full epoch, at plotting time.
+        head_desc = "FFT" if getattr(model, "head_type", None) == "fft" else "MaxPool"
+        mask_desc = "& Mask " if getattr(model, "learned_mask", False) else ""
+        plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
+
+        # Optional sub-epoch validation: run the whole validation suite every N
+        # training batches on top of the end-of-epoch run, so the metrics can be
+        # watched at a finer resolution than one point per epoch. Off (0/None) by
+        # default, in which case validation points keep sitting at integer epochs.
+        val_interval = int(getattr(cfg.validation, "validate_every_n_batches", 0) or 0)
+        try:
+            total_batches = sum(len(ld) for ld in train_loader)
+        except TypeError:  # a loader without a known length (IterableDataset)
+            total_batches = 0
+        if val_interval > 0 and total_batches <= 0:
+            logging.warning("validate_every_n_batches is set but the training loader has no "
+                            "length; falling back to end-of-epoch validation only")
+            val_interval = 0
+
+        def val_position(epoch, batches_done):
+            """x coordinate of a validation point, in (fractional) epochs.
+
+            With sub-epoch validation off this stays ``epoch`` — the historical
+            position, matching the training curve. With it on, the axis becomes
+            "fraction of training consumed", so the run after batch ``k`` of an epoch
+            lands at ``epoch + k / total_batches`` and the end-of-epoch run at
+            ``epoch + 1``.
+            """
+            if val_interval <= 0:
+                return float(epoch)
+            return epoch + batches_done / total_batches
+
+        def run_validation(x_pos, epoch, tag=""):
+            """Run the full validation suite once and refresh ``validation_losses.svg``.
+
+            Appends one point per reported metric at ``x_pos`` and returns the weighted
+            average validation loss (what ``best.pth`` selection compares), or ``None``
+            when no finite batch was seen. Restores the model's train/eval mode, so it
+            is safe to call from inside the training loop.
+            """
+            was_training = model.training
+            with torch.no_grad():
+                model.eval()
+                cumulative_loss = 0.0
+                n_items = 0
+                # Per-metric-key sums and item counts: each validation dataset
+                # contributes only to its own keys, so an FPR reported for the
+                # small-blob set is divided by the small-blob item count, not the
+                # pooled total across all validation datasets.
+                cumulative_losses = {k: 0.0 for k in val_keys}
+                cumulative_items = {k: 0 for k in val_keys}
+                for label, loaders, val_crit in validation_entries:
+                    loop = tqdm(chain(*loaders), leave=True)
+                    loop.set_description(
+                        f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]{tag}")
+                    for data in loop:
+                        losses = process_batch(model, data, val_crit, lambda x: x, device, cfg, validation=True)
+                        batch_items = data["keypoints"].size(0)
+                        loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
+                        # Weighted total drives best.pth selection; with the
+                        # small/large FPRs at weight 0 this tracks the overall FPR.
+                        # Non-finite batches (e.g. a batch with no positive pair, where
+                        # FPR@recall is undefined) are skipped rather than averaged in.
+                        if torch.isfinite(loss).all():
+                            cumulative_loss += loss.item() * batch_items
+                            n_items += batch_items
+                        for n, (l, _, r) in losses.items():
+                            if r and torch.isfinite(l).all():
+                                key = report_key(label, n)
+                                if key not in cumulative_losses:
+                                    cumulative_losses[key] = 0.0
+                                    cumulative_items[key] = 0
+                                cumulative_losses[key] += l.item() * batch_items
+                                cumulative_items[key] += batch_items
+                        loop.set_postfix(**{report_key(label, n): l.item() for n, (l, _, r) in losses.items() if r})
+                # `cumulative_losses` may have grown past `val_keys` above: the
+                # process_batch function can report metrics of its own (see
+                # `append_curves`), so average over what was actually accumulated.
+                avg_val = {k: cumulative_losses[k] / cumulative_items[k]
+                           for k in cumulative_losses if cumulative_items[k] > 0}
+                x_val.append(x_pos)
+                append_curves(y_val, avg_val, len(x_val))
+                logging.info("validation at epoch %.3f [%d/%d]%s, avg val losses: %s",
+                             x_pos, epoch, cfg.training.num_epochs, tag,
+                             ", ".join(f"{k}: {v[-1]}" for k, v in y_val.items()))
+
+                _, ax = plt.subplots()
+                # Mark each series' best (lowest) value with a dashed rule in its
+                # own colour, plus a small label of that value pinned to the right
+                # edge. Labels are collected first, then nudged apart in log space
+                # so that near-equal bests don't overprint each other.
+                best_marks = []
+                series_max = 0.0
+                for n, v in y_val.items():
+                    (line,) = ax.semilogy(x_val, v, label=n)
+                    finite = [val for val in v if math.isfinite(val)]
+                    if finite:
+                        best = min(finite)
+                        ax.axhline(best, color=line.get_color(), linestyle="--", linewidth=0.8, alpha=0.7)
+                        best_marks.append((best, line.get_color()))
+                        series_max = max(series_max, max(finite))
+                # Minimum vertical gap between labels, in decades (log10 units);
+                # walking bottom-to-top, push each label up if it crowds the one
+                # below it.
+                min_gap = 0.16
+                prev = None
+                for best, color in sorted(best_marks, key=lambda m: m[0]):
+                    log_best = math.log10(best) if best > 0 else math.log10(1e-5)
+                    if prev is not None and log_best - prev < min_gap:
+                        log_best = prev + min_gap
+                    prev = log_best
+                    ax.annotate(f"{best:.4g}", xy=(1, 10 ** log_best), xycoords=("axes fraction", "data"),
+                                xytext=(2, 0), textcoords="offset points", va="center", ha="left",
+                                fontsize=7, color=color, clip_on=False)
+                ax.set_title(plot_title)
+                ax.set_xlabel("Epoch")
+                ax.set_ylabel("Average Validation Loss")
+                ax.set_xlim(0, cfg.training.num_epochs)
+                # Lower bound defaults to 1e-3, but expands downward (with a little
+                # headroom) whenever a series dips below it so the curve stays visible.
+                # The top defaults to 1 — the FPR metrics live in [0, 1] — and likewise
+                # expands whenever a series exceeds it, which an unbounded loss such as
+                # `mask_bce` can do early on.
+                data_min = min((b for b, _ in best_marks), default=1e-3)
+                lower = 1e-3 if data_min >= 1e-3 else data_min * 0.8
+                upper = 1.0 if series_max <= 1.0 else series_max * 1.2
+                ax.set_ylim(lower, upper)
+                ax.legend()
+                plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
+                plt.close()
+
+            if was_training:
+                model.train()
+            return cumulative_loss / n_items if n_items > 0 else None
 
         for epoch in range(start_epoch, cfg.training.num_epochs):
-            loop = tqdm(train_loader, leave=True)
+            loop = tqdm(chain(*train_loader), leave=True)
             loop.set_description(f"Training [{epoch}/{cfg.training.num_epochs}]")
             model.train()
             cumulative_loss = 0.0
             cumulative_losses = {n: 0.0 for n in criterion.keys() if criterion[n][2]}
+            n_items = 0
             for i, data in enumerate(loop):
                 for opt in optimizer.values():
                     opt.zero_grad()
                 # try:
-                losses = process_batch(model, data, criterion, augmentation, device, cfg)
+                losses = process_batch(model, data, criterion, augmentation, device, cfg, optimizer=optimizer)
                 # except Exception as e:
                 #     logging.error(f"Error processing batch {i} in epoch {epoch}: {e}")
                 #     continue
                 loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
                 loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-                cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
-                cumulative_loss += loss.item()
-                loss.backward()
-                for opt in optimizer.values():
-                    opt.step()
+                
+                # Check for NaN/Inf in loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    logging.warning("Loss is NaN or Inf at batch %d, skipping this batch", i)
+                    continue
+                    
+                cumulative_losses = {n: (cumulative_losses[n] if n in cumulative_losses else 0) + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
+                cumulative_loss += loss.item() * data["keypoints"].size(0)
+                n_items += data["keypoints"].size(0)
+                if loss.requires_grad:
+                    try:
+                        loss.backward()
+                        # Check for NaN in gradients after backward
+                        has_nan_grad = False
+                        for param in model.parameters():
+                            if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                                has_nan_grad = True
+                                break
+                        if has_nan_grad:
+                            logging.warning("NaN detected in gradients at batch %d, skipping update", i)
+                            model.zero_grad()
+                            continue
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                        for opt in optimizer.values():
+                            opt.step()
+                    except RuntimeError as e:
+                        logging.warning("Error during backward at batch %d: %s", i, str(e))
+                        model.zero_grad()
+                        continue
                 if hasattr(cfg, "logging") and hasattr(cfg.logging, "interval") and i % cfg.logging.interval == 0 and i > 0:
-                    logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, len(train_loader), ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
-            avg_losses = {n: v / len(train_dataset) for n, v in cumulative_losses.items()}
+                    logging.info("epoch [%d/%d] batch [%d/%d] losses: %s", epoch, cfg.training.num_epochs, i, total_batches, ", ".join(f"{n}: {v.item():.6f}" for n, (v, _, _) in losses.items()))
+                # Sub-epoch validation. The last batch is skipped so the point does
+                # not collide with the end-of-epoch run that follows immediately.
+                if val_interval > 0 and (i + 1) % val_interval == 0 and (i + 1) < total_batches:
+                    run_validation(val_position(epoch, i + 1), epoch,
+                                   tag=f" batch [{i + 1}/{total_batches}]")
+            avg_losses = {n: v / n_items for n, v in cumulative_losses.items()}
             logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v:.6f}" for n, v in avg_losses.items()))
             x += [epoch]
-            for n, v in y_train.items():
-                v += [avg_losses[n]]
+            append_curves(y_train, avg_losses, len(x))
+            # Figure heading: model type + the key scale hyperparameter (the single
+            # ``scale`` config key when present, else the patch/log-polar scale param).
+            model_name = getattr(getattr(cfg, "model", None), "name", type(model).__name__)
+            scale_desc = getattr(cfg, "scale", None)
+            if scale_desc is None:
+                _p = cfg.training.dataset.params
+                scale_desc = _p.get("patch_scale_factors", _p.get("logpolar_outer_factor", "n/a"))
+            # getattr with defaults: only the log-polar heads carry `head_type` /
+            # `learned_mask`; a plain descriptor (e.g. `HardNet`) has neither and used to
+            # crash here *after* a full epoch, at plotting time.
+            head_desc = getattr(model, "head_type", None)
+            mask_desc = "& mask " if getattr(model, "learned_mask", False) else ""
+            plot_title = f"{model_name} {head_desc} {mask_desc}(scale={scale_desc})"
             _, ax = plt.subplots()
             for n, v in y_train.items():
                 ax.plot(x, v, label=n)
+            ax.set_title(plot_title)
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Average Training Loss")
             ax.set_xlim(0, cfg.training.num_epochs)
@@ -225,61 +540,57 @@ def train_func(process_batch: ProcessBatchType):
             plt.savefig(os.path.join(checkpoint_dir, "..", "train_losses.svg"))
             plt.close()
 
-            loop = tqdm(validation_loader, leave=True)
-            loop.set_description(f"Validating [{epoch}/{cfg.training.num_epochs}]")
+            # End-of-epoch validation. Checkpoint selection stays here (once per
+            # epoch) even when sub-epoch validation is on, so `best.pth` keeps
+            # meaning "best epoch" rather than "best batch".
+            average_loss = run_validation(val_position(epoch, total_batches), epoch)
 
-            with torch.no_grad():
-                model.eval()
-                cumulative_loss = 0.0
-                cumulative_losses = {n: 0.0 for n in validation_criterion.keys() if validation_criterion[n][2]}
-                for data in loop:
-                    # try:
-                    losses = process_batch(model, data, validation_criterion, lambda x: x, device, cfg)
-                    # except Exception as e:
-                    #     logging.error(f"Error processing validation batch in epoch {epoch}: {e}")
-                    #     continue
-                    loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
-
-                    cumulative_losses = {n: cumulative_losses[n] + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
-                    cumulative_loss += loss.item() * data["keypoints"].size(0)
-                    loop.set_postfix(**{n: l.item() for n, (l, _, r) in losses.items() if r})
-                y_val = {n: y_val[n] + [v / len(validation_dataset)] for n, v in cumulative_losses.items()}
-                logging.info("finished epoch [%d/%d], avg losses: %s", epoch, cfg.training.num_epochs, ", ".join(f"{n}: {v / len(validation_dataset)}" for n, v in cumulative_losses.items()))
-
-                _, ax = plt.subplots()
-                for n, v in y_val.items():
-                    ax.plot(x, v, label=n)
-                ax.set_xlabel("Epoch")
-                ax.set_ylabel("Average Validation Loss")
-                ax.set_xlim(0, cfg.training.num_epochs)
-                ax.set_ylim(bottom=0)
-                ax.legend()
-                plt.savefig(os.path.join(checkpoint_dir, "..", "validation_losses.svg"))
-                plt.close()
-
-                if checkpoint_dir is not None:
-                    average_loss = cumulative_loss / len(validation_dataset)
-                    checkpoint = {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": {n: o.state_dict() for n, o in optimizer.items()},
-                        "scheduler_state_dict": {n: s.state_dict() for n, s in scheduler.items()},
-                        "loss": average_loss,
-                        "best_loss": best_loss,
-                        "plots": {
-                            "y_train": y_train,
-                            "y_val": y_val,
-                            "x": x
-                        }
+            if cfg.logging.model_checkpoints and checkpoint_dir is not None and average_loss is not None:
+                checkpoint = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": {n: o.state_dict() for n, o in optimizer.items()},
+                    "scheduler_state_dict": {n: s.state_dict() for n, s in scheduler.items()},
+                    "loss": average_loss,
+                    "best_loss": best_loss,
+                    "plots": {
+                        "y_train": y_train,
+                        "y_val": y_val,
+                        "x": x,
+                        "x_val": x_val
                     }
+                }
+                # `latest.pth` is always refreshed (resume point); per-epoch
+                # snapshots are opt-in via `logging.checkpoint_every_epoch`.
+                if getattr(cfg.logging, "checkpoint_every_epoch", False):
                     torch.save(checkpoint, os.path.join(checkpoint_dir, f"epoch_{epoch:03d}.pth"))
-                    if average_loss < best_loss:
-                        best_loss = average_loss
-                        torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
-                        msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
-                        print("\033[1m" + msg + "\033[0m")
-                        logging.info("\033[1m" + msg + "\033[0m")
-                for sch in scheduler.values():
-                    sch.step()
+                torch.save(checkpoint, os.path.join(checkpoint_dir, "latest.pth"))
+                if average_loss < best_loss:
+                    best_loss = average_loss
+                    torch.save(checkpoint, os.path.join(checkpoint_dir, f"best.pth"))
+                    msg = f"New best model with loss {best_loss:.6f} at epoch {epoch} saved to {os.path.join(checkpoint_dir, f"best.pth")}"
+                    print("\033[1m" + msg + "\033[0m")
+                    logging.info("\033[1m" + msg + "\033[0m")
+
+            for sch in scheduler.values():
+                # get_last_lr() works for composite schedulers (e.g.
+                # ChainedScheduler), whose get_lr() raises NotImplementedError.
+                lr[sch.__class__.__name__] += sch.get_last_lr()
+                sch.step()
+
+        _, ax = plt.subplots()
+        for n, v in lr.items():
+            ax.plot(x, v, label=n)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Learning Rate")
+        ax.legend()
+        plt.savefig(os.path.join(checkpoint_dir, "..", "learning_rate.svg"))
+        plt.close()
+
+        # Deployable artefact for the run, opt-in via `logging.export_onnx`. Rebuilds the
+        # model from the config and loads `best.pth` (not the last-epoch weights still in
+        # `model`), so this is exactly what `to_onnx.py --run` would produce. Failures are
+        # logged, never raised — a finished run must not be lost to a bad export.
+        export.export_after_training(cfg, checkpoint_dir)
 
     return train

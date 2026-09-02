@@ -1,0 +1,141 @@
+# Viewing-angle band validation for track data.
+#
+# Overlay in the spirit of `homography_validation.yaml`: instead of one validation
+# set it builds SEVERAL BlobTrackData instances that differ only in which viewing
+# obliquity they keep, so FPR95 is reported as a function of viewpoint
+# (`FPR95@deg20_30`, ...) rather than averaged over every pose in the file.
+#
+# `.tracks` files store one viewing angle per detected frame (`view_angles`, radians,
+# 0 = fronto-parallel, -> 90 deg edge-on, derived intrinsics-free from the local affine
+# tilt of the world->image homography at the board centroid); `BlobTrackData`'s
+# `view_angle_range: [lo_deg, hi_deg)` joins each observation to its frame's angle and
+# keeps the in-band ones. See BlobBoards' docs/src/guide/board-tracks.md.
+#
+# Anchors are kept in every band (they have no pose — they are rendered fronto-parallel
+# off the board image). That is deliberate: a band's positives are pdf<->tracked
+# pairs, so dropping them would leave narrow bands with almost no matchable track.
+#
+# Compose it into any track leaf, e.g.
+#     defaults:
+#       - track_descriptor_logpolar
+#       - track_angle_validation
+#       - _self_
+# (see `track_descriptor_logpolar_angles.yaml`), then run with `track_path=<file>`.
+#
+# BAND WIDTH: 10 deg is the starting point. Real footage is heavily fronto-parallel-
+# biased, so the high bands may hold too few matchable tracks to give a stable FPR95 —
+# `BlobTrackData` prints the matchable-track count per band on load and warns below 50.
+# `dataset.params.log_stats=true` prints the full 10-deg histogram of the file, which is
+# what to size the bands from. A pre-widened 20 deg alternative is at the bottom.
+#
+# `max_keypoints` is the other half of that comparability: the same fronto-parallel bias
+# makes the low bands an order of magnitude larger than the high ones, and FPR95 is not
+# invariant to how many negatives a split holds. Every band therefore caps to the same
+# size. `BlobTrackData` spends the cap PER KIND, after the angle filter: at most
+# `max_keypoints` patches from positive track groups (whole groups, never split — a group
+# trimmed to one member would quietly become a confuser) and at most `max_keypoints`
+# confusers (tracked singletons + untracked patches share that budget, still bounded by
+# `max_untracked_to_tracked_ratio`). The subsample is seeded (`subsample_seed`), so a
+# band's members are stable across runs. Set it at or below the smallest band's
+# population — a band with less than the cap just stays smaller (it prints a note).
+# The unfiltered `all` reference is deliberately left uncapped: it is not compared
+# against the bands, it only selects `best.pth`.
+
+validation:
+  batch_size: 1024
+  num_workers: 4
+
+  # The bands differ ONLY in the angle filter, so the template is the leaf's own
+  # validation dataset (h5_path, sequences, patch_type, mask flags, ...). Interpolating
+  # it keeps this overlay network- and file-agnostic: `validation.dataset` stays the one
+  # place those settings are configured, and `get_validation_specs` deep-merges each
+  # band's `params` on top of the resolved template.
+  shared_params:
+    name: ${validation.dataset.name}
+    params: ${validation.dataset.params}
+
+  datasets:
+    # Unfiltered reference. Keeps its default weight, so this is the metric that
+    # selects best.pth — the bands below are monitor-only (weight 0) diagnostics.
+    - name: all
+      params:
+        view_angle_range: null
+      loss:
+        - name: FPR95
+    - name: deg00_10
+      params:
+        view_angle_range: [0, 10]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg10_20
+      params:
+        view_angle_range: [10, 20]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg20_30
+      params:
+        view_angle_range: [20, 30]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg30_40
+      params:
+        view_angle_range: [30, 40]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg40_50
+      params:
+        view_angle_range: [40, 50]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg50_60
+      params:
+        view_angle_range: [50, 60]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg60_70
+      params:
+        view_angle_range: [60, 70]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg70_80
+      params:
+        view_angle_range: [70, 80]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+    - name: deg80_90
+      params:
+        view_angle_range: [80, 90]
+        max_keypoints: 6000
+      loss:
+        - name: FPR95
+          weight: 0
+
+    # ---------------------------------------------------------------- widened bands --
+    # Swap these in (and comment the 10 deg ones out) if the narrow bands turn out too
+    # small — same structure, 20 deg wide:
+    #
+    # - name: deg00_20
+    #   params: {view_angle_range: [0, 20]}
+    #   loss: [{name: FPR95, weight: 0}]
+    # - name: deg20_40
+    #   params: {view_angle_range: [20, 40]}
+    #   loss: [{name: FPR95, weight: 0}]
+    # - name: deg40_90
+    #   params: {view_angle_range: [40, 90]}
+    #   loss: [{name: FPR95, weight: 0}]

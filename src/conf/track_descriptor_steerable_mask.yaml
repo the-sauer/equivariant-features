@@ -1,0 +1,30 @@
+# Steerable (NoStride) descriptor with learned board-validity masking, on track data.
+# Model block mirrors blob_descriptor_steerable_mask so a run warm-started from that
+# checkpoint matches; the mask predictor is the only tensor a plain steerable
+# checkpoint does not carry (the load reports it and leaves it freshly initialized).
+defaults:
+  - track_descriptor_base
+  - _self_
+  - track_angle_validation
+
+scale: 64.0
+
+model:
+  name: BlobDescriptorNoStride
+  params:
+    scale_factors: ["${scale}"]
+    in_channels: 1
+    learned_mask: true
+
+training:
+  ignore_mask: false
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      patch_type: cartesian
+      with_mask: true
+validation:
+  dataset:
+    params:
+      patch_type: cartesian
+      with_mask: true

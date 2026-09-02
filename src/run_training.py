@@ -24,7 +24,7 @@ import hydra
 import omegaconf
 
 from aef.configuration import Config
-from aef.data import get_dataset
+from aef.data import blobboards, get_dataset, get_validation_specs
 from aef.train import train_func
 from aef.models import *
 from aef.train import *
@@ -40,26 +40,25 @@ def experiment_name_from_cfg(cfg: Config) -> str:
         loss_name: str = "_".join(loss_cfg if isinstance(loss_cfg, str) else loss_cfg.name for loss_cfg in cfg.training.loss)
     else:   # isinstance(cfg.training.loss, omegaconf.DictConfig):
         loss_name = cfg.training.loss.name
-    return f"{cfg.model.name}_{loss_name}_{date}"
+    return f"{date}_{cfg.model.name}_{loss_name}"
 
 
 def train(cfg) -> None:
     # TODO: Move all this to prepare training if possible
     train_dataset = get_dataset(dataset_cfg=cfg.training.dataset)
-    validation_dataset = get_dataset(dataset_cfg=cfg.validation.dataset)
+    # List of (label, [dataset], [loss_cfg]); each validation dataset carries its
+    # own criterion and is reported separately (metrics keyed <loss>@<label>).
+    validation_dataset = get_validation_specs(cfg)
     model_kwargs: dict[str, Any] = omegaconf.OmegaConf.to_container(cfg.model.params, resolve=True) if "params" in cfg.model else {}
-    model_kwargs["in_channels"] = train_dataset.c
+    # model_kwargs["in_channels"] = 1
     Model = eval(cfg.model.name)
     model = Model(**model_kwargs)
     train_func(eval(cfg.training.process_batch))(model=model, train_dataset=train_dataset, validation_dataset=validation_dataset, cfg=cfg, experiment_name=cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg))
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="scale")
+@hydra.main(version_base=None, config_path="conf")
 def main(cfg: Config):
     dotenv.load_dotenv()
-
-    experiment_name = cfg.experiment_name if hasattr(cfg, "experiment_name") else experiment_name_from_cfg(cfg)
-    print(f"Running experiment \033[1m{experiment_name}\033[0m")
     train(cfg)
 
 

@@ -1,0 +1,27 @@
+defaults:
+  - blob_descriptor_steerable
+  - dgx
+  - _self_
+
+# Steerable (NoStride) descriptor with learned board-validity masking. Same opt-in
+# switches as `blob_descriptor_efficient_mask` (see there); here the validity weight
+# is applied to the 24x24 feature field just before the dense readout conv.
+#
+# The mask predictor is the ONLY new parameter tensor — the trunk keeps the unmasked
+# model's `state_dict` keys, so this can also be warm-started from a plain steerable run.
+
+model:
+  params:
+    learned_mask: true
+
+training:
+  ignore_mask: false
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      precompute_masks: true
+
+validation:
+  shared_params:
+    params:
+      precompute_masks: true

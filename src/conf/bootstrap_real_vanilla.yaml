@@ -1,0 +1,41 @@
+# Log-polar descriptor on track data. Model block mirrors blob_descriptor_logpolar;
+# the launcher can override model.name=HardNetLogPolar (+ head=fft) for the log-polar
+# ablation variants (circ/fft), matching launch_training_matrix.sh's NET_EXTRA.
+defaults:
+  - track_descriptor_base
+  - _self_
+
+iteration: ???
+scale: 96
+track_path: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla2/tracks/iteration_${iteration}_logpolar_s${scale}.tracks
+
+model:
+  name: HardNetLogPolar
+  params:
+    in_channels: 1
+    patch_size: 64
+    head: maxpool
+    antialias: true
+    circular_pad: true
+
+training:
+  dataset:
+    params:
+      patch_type: logpolar
+      balance_view_angles: false
+  loss:
+    - name: SupCon
+validation:
+  dataset:
+    params:
+      patch_type: logpolar
+  loss:
+    - name: FPR95
+experiment_name: bootstrap_real_iteration_${iteration}
+
+logging:
+  model_checkpoints: true
+  export_onnx: true
+  checkpoint_every_epoch: false
+  checkpoint_dir: null
+  dir: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final_vanilla2/networks

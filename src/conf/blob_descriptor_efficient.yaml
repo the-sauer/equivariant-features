@@ -1,0 +1,35 @@
+defaults:
+  - blob_descriptor_base
+  - homography_validation
+  - dgx
+  - _self_
+
+# Efficient steerable descriptor: same cartesian patch pipeline as the steerable
+# (NoStride) config, only the model differs — so a sweep isolates the model's effect
+# on FPR95. `n_rotations` (C8 vs C4) is overridden per sweep entry by the launcher.
+scale: 64.0
+
+model:
+  name: BlobDescriptorEfficient
+  params:
+    n_rotations: 8
+    head: attention          # equivariance-robust, keeps spatial info via learned weighting
+    scale_factors: ["${scale}"]   # sets the centre (donut) mask radius
+    in_channels: 1
+
+training:
+  num_epochs: 50
+  # (inherits base num_workers: 8 — the light model is more data-bound than steerable)
+  batch_size: 2048
+  dataset:
+    params:
+      patch_type: cartesian
+      patch_scale_factors: ["${scale}"]
+  optimizer:
+    name: AdamW
+
+validation:
+  shared_params:
+    params:
+      patch_type: cartesian
+      patch_scale_factors: ["${scale}"]

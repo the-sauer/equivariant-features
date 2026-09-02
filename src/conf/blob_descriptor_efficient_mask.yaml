@@ -1,0 +1,35 @@
+defaults:
+  - blob_descriptor_efficient
+  - dgx
+  - _self_
+
+# Efficient steerable descriptor with learned board-validity masking — the cartesian
+# counterpart of `blob_descriptor_logpolar_fftmask`, and the synthetic pretraining
+# whose checkpoint the track run (`track_descriptor_efficient_mask`) warm-starts from.
+#
+# Every toggle defaults to OFF in code, so `blob_descriptor_efficient` is unchanged
+# unless a config opts in:
+#   model.params.learned_mask=true    -> GT board-validity mask on the `is_pdf` (identity)
+#                                        view, predicted mask on the warped target views;
+#                                        the weight is folded into the attention pooling
+#   dataset.params.precompute_masks   -> co-extract + cache the GT validity mask
+#                                        (cartesian masks are single-channel, hence the
+#                                        single `patch_scale_factors` entry inherited here)
+#   training.mask_loss_weight         -> weight of the target mask-supervision BCE
+#   training.ignore_mask=true         -> force the mask path off again (ablation)
+
+model:
+  params:
+    learned_mask: true
+
+training:
+  ignore_mask: false
+  mask_loss_weight: 1.0
+  dataset:
+    params:
+      precompute_masks: true
+
+validation:
+  shared_params:
+    params:
+      precompute_masks: true

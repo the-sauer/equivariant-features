@@ -1,10 +1,10 @@
 training:
   dataset:
     params:
-      data_dir: /data/datasets
+      data_dir: /raid/data/hsa/datasets
 validation:
   dataset:
     params:
-      data_dir: /data/datasets
+      data_dir: /raid/data/hsa/datasets
 logging:
-  dir: /data/logs
+  dir: /raid/data/hsa/logs

@@ -1,0 +1,66 @@
+# Log-polar descriptor, DFT-magnitude head, trained with a PERFECT mask on every view
+# (`oracle_mask`). Not a deployable model — the target's mask does not exist at test
+# time — this is the ceiling arm of the masking ablation.
+#
+# Why it exists: on `iteration_4` track data a masked run does not beat its unmasked
+# twin (FPR95@all best 0.036 vs 0.035 for fft, 0.034 vs 0.030 for bispectrum), and two
+# very different explanations fit that. Either the mask buys nothing on this data, or it
+# buys something the predictor is too coarse to collect. Evaluated on a *trained*
+# late-weight checkpoint the split is already visible — a perfect late weight halves
+# FPR95 (0.051 -> 0.027) and a perfect input gate cuts it 6.5x (-> 0.008), while the
+# model's own prediction only reaches 0.038 — but that measures a trunk trained under an
+# imperfect mask. This arm trains under the perfect one, which is the number the
+# predictor's error has to be judged against.
+#
+# Read it together with its CONTROL, `logpolar_fftmask` (same head, same n_harmonics,
+# same batch size, predicted mask) and with `logpolar_fft` (no mask at all). Three arms
+# or the comparison means nothing.
+#
+# NOTE this arm masks at BOTH entry points: with `oracle_mask` the non-cascade forward
+# also runs `input_norm(patches, mask=mask)`, so it is `mask_ablation.py`'s `both_gt`, not
+# `late_gt`. `logpolar_oracle_gate` in launch_track_matrix.sh adds `cascade: true` — the
+# input gate alone, where the frozen-trunk headroom was largest.
+#
+# RESULT (2026_08_19_MaskCeiling, 50 epochs): both oracle arms peak in their first two
+# epochs (best FPR95@all 0.0247 / 0.0128 vs 0.0349 for `fft`) and then degrade for the
+# remaining 48 while their training loss keeps falling. Strip the mask off the trained
+# weights and they score 0.83 / 0.53 — they are functions of (patch, mask), not
+# descriptors. Training under the oracle buys only 1.35x over giving the ordinarily
+# trained `fftmask` trunk a perfect gate at test time (0.0129 vs 0.0174), so it is a
+# diagnostic and not a recipe. Full write-up: docs/mask_ceiling_experiment.md.
+#
+# `mask_loss_weight: 0` — the BCE is kept as a DIAGNOSTIC (it still gets its curve) but
+# does not train: with the oracle in place the descriptor never consumes `m_pred`, so
+# letting the BCE pull on the shared trunk would make this arm differ from the control
+# by two things at once instead of one.
+defaults:
+  - track_descriptor_base
+  - _self_
+  - track_angle_validation
+
+scale: 96
+
+model:
+  name: HardNetLogPolar
+  params:
+    in_channels: 1
+    patch_size: 64
+    head: fft
+    # Must match the control arm (`logpolar_fftmask` forces 4 in the launcher) and any
+    # checkpoint this warm-starts from: the head conv is (n_harmonics, patch/4)-shaped.
+    n_harmonics: 4
+    learned_mask: true
+    oracle_mask: true
+
+training:
+  ignore_mask: false
+  mask_loss_weight: 0.0
+  dataset:
+    params:
+      patch_type: logpolar
+      with_mask: true
+validation:
+  dataset:
+    params:
+      patch_type: logpolar
+      with_mask: true

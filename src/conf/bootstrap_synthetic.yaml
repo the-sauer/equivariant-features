@@ -1,0 +1,132 @@
+scale: 96
+
+training:
+  dataset:
+    params:
+      data_dir: /raid/data/hsa/datasets
+      suffix: train
+      image_size:
+      - 150
+      - 150
+      num_boards: 32
+      transforms_per_image: 1
+      in_memory: true
+      extraction_batch_size: 1024
+      supersample: 3
+      transform_params:
+        fit_to_frame: true
+        perspective_amplitude_x: 0.3
+        perspective_amplitude_y: 0.3
+      blobboard_params:
+        board_size:
+        - 142
+        - 142
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      background: /raid/data/hsa/datasets/backgrounds
+      board_scale_range:
+      - 0.4
+      - 0.7
+      garbage_fraction: 0.3
+      background_seed: 0
+      cache_dir: /raid/data/hsa/datasets/homography_cache
+      augmentation:
+        color_jitter: {}
+        gaussian_blur:
+          kernel_size:
+          - 5
+          - 5
+        gaussian_noise: {}
+      patch_type: logpolar
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: ${scale}
+      precompute_masks: true
+    name: BlobBoardHomographyData
+  patch_size: 64
+  process_batch: process_batch_blobs
+  m_per_class: 4
+  num_workers: 8
+  batch_size: 4096
+  optimizer:
+    name: SGD
+    params:
+      lr: 4.0e-05
+      weight_decay: 0.0001
+    scheduler:
+    - name: LinearLR
+    - name: CosineAnnealingLR
+  loss:
+  - name: ProxyAnchoredSupCon
+  num_epochs: 1000
+  ignore_mask: false
+  continue: ''
+logging:
+  model_checkpoints: true
+  export_onnx: true
+  checkpoint_every_epoch: false
+  checkpoint_dir: null
+  dir: /raid/data/hsa/datasets/BlobBoardTrainingFootage/final/networks
+validation:
+  batch_size: 1024
+  num_workers: 4
+  shared_params:
+    name: BlobBoardHomographyData
+    params:
+      in_memory: true
+      num_boards: 8
+      seeds:
+      - 40
+      - 60
+      - 80
+      - 100
+      - 120
+      - 140
+      - 160
+      - 180
+      image_size:
+      - 150
+      - 150
+      transforms_per_image: 1
+      extraction_batch_size: 1024
+      supersample: 3
+      transform_params:
+        fit_to_frame: true
+      blobboard_params:
+        board_size:
+        - 142
+        - 142
+        cutoff: 2
+        alpha: 1.6
+        max_diameter_fraction: 0.4
+        min_scale: 0.2
+        frame_width: 10
+      homography_seed: 40
+      background: /raid/data/hsa/datasets/backgrounds
+      board_scale_range:
+      - 0.1
+      - 0.7
+      garbage_fraction: 0.3
+      background_seed: 40
+      cache_dir: /raid/data/hsa/datasets/homography_cache
+      patch_type: logpolar
+      logpolar_inner_factor: 2.0
+      logpolar_outer_factor: ${scale}
+      precompute_masks: true
+      ignore_mask: false
+  datasets:
+  - name: overall
+    loss:
+    - name: ProxyAnchoredFPR95
+model:
+  name: HardNetLogPolar
+  params:
+    in_channels: 1
+    patch_size: 64
+    head: fft
+    n_harmonics: 5
+    antialias: true
+    circular_pad: true
+experiment_name: bootstrap_synthetic

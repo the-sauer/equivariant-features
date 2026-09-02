@@ -38,10 +38,15 @@ def sample_homography(
         scaling_amplitude: float = 0.1,
         perspective_amplitude_x: float = 0.1,
         perspective_amplitude_y: float = 0.1,
+        min_perspective_amplitude_x: float = 0.0,
+        min_perspective_amplitude_y: float = 0.0,
         patch_ratio: float = 0.5,
-        max_angle: float | str = np.pi / 2,
+        max_angle: float | str = np.pi,
         allow_artifacts: bool = False,
         translation_overflow: float = 0.0,
+        fit_to_frame: bool = False,
+        min_fit_scale: float = 0.0,
+        rng=None,
 ) -> torch.Tensor:
     """Sample a random valid homography.
 
@@ -69,14 +74,28 @@ def sample_homography(
         max_angle: Maximum angle used in rotations.
         allow_artifacts: A boolean that enables artifacts when applying the homography.
         translation_overflow: Amount of border artifacts caused by translation.
+        fit_to_frame: If True, post-compose a uniform scale+translation so the entire original
+            image maps inside the output frame (letterboxed), guaranteeing nothing is cut off.
+        min_fit_scale: Lower bound on the fit_to_frame shrink factor, disabled (0.0) by default
+            since even the worst-case fit still covers ~24% of the frame. Set >0 to floor the
+            shrink at the cost of re-introducing minor clipping for extreme transforms. Only
+            used when ``fit_to_frame`` is True.
+        rng: A numpy ``Generator`` to draw from, or None for numpy's global RNG (the
+            historical behaviour — a different draw on every call, unreproducible).
+            Thread *one* generator across calls rather than passing a fresh
+            ``default_rng(seed)`` each time: the stream must advance, or every view of
+            every board gets the identical homography.
 
     Returns:
         An `array` of shape `(3,3)` corresponding to the homography.
     """
+    # Both the module and a Generator expose .normal/.uniform with these signatures.
+    rng = np.random if rng is None else rng
+
     def _truncated_normal(loc, scale, shape):
-        result = np.random.normal(loc, scale, shape)
+        result = rng.normal(loc, scale, shape)
         while any(result < loc - 2 * scale) or any(result > loc + 2 * scale):
-            result = np.random.normal(loc, scale, shape)
+            result = rng.normal(loc, scale, shape)
             logging.debug("Recalculated truncated normal")
         return result
     
@@ -98,9 +117,9 @@ def sample_homography(
         if not allow_artifacts:
             perspective_amplitude_x = min(perspective_amplitude_x, margin)
             perspective_amplitude_y = min(perspective_amplitude_y, margin)
-        perspective_displacement = _truncated_normal(0.0, perspective_amplitude_y / 2, (1,))
-        h_displacement_left = _truncated_normal(0.0, perspective_amplitude_x / 2, (1,))
-        h_displacement_right = _truncated_normal(0.0, perspective_amplitude_x / 2, (1,))
+        perspective_displacement = _truncated_normal(0.0, (perspective_amplitude_y - min_perspective_amplitude_y) / 2, (1,)) + min_perspective_amplitude_y
+        h_displacement_left = _truncated_normal(0.0, (perspective_amplitude_x - min_perspective_amplitude_x) / 2, (1,)) + min_perspective_amplitude_x
+        h_displacement_right = _truncated_normal(0.0, (perspective_amplitude_x - min_perspective_amplitude_x) / 2, (1,)) + min_perspective_amplitude_x
         pts2 += np.stack([
             np.concatenate([h_displacement_left, perspective_displacement], axis=0),
             np.concatenate([h_displacement_left, -perspective_displacement], axis=0),
@@ -118,7 +137,7 @@ def sample_homography(
             valid = np.arange(start=1, stop=n_scales + 1)  # all scales are valid except scale=1
         else:
             valid = np.where(np.all((scaled >= 0.0) & (scaled <= 1.0), axis=(1, 2)))[0]
-        idx = valid[int(np.random.uniform(low=0, high=valid.shape[0]))]
+        idx = valid[int(rng.uniform(low=0, high=valid.shape[0]))]
         pts2 = scaled[idx]
 
     # Random translation
@@ -129,8 +148,8 @@ def sample_homography(
             t_max += translation_overflow
         pts2 += np.expand_dims(
             np.stack([
-                np.random.uniform(low=-t_min[0], high=t_max[0]),
-                np.random.uniform(low=-t_min[1], high=t_max[1])
+                rng.uniform(low=-t_min[0], high=t_max[0]),
+                rng.uniform(low=-t_min[1], high=t_max[1])
             ]),
             axis=0,
         )
@@ -139,7 +158,7 @@ def sample_homography(
     # sample several rotations, check collision with borders, randomly pick a valid one
     if rotation:
         angles = np.linspace(-max_angle, max_angle, n_angles)
-        angles = np.concat([[0.0], angles], axis=0)  # in case no rotation is valid
+        angles = np.concatenate([[0.0], angles], axis=0)  # in case no rotation is valid
         center = np.mean(pts2, axis=0, keepdims=True)
         rot_mat = np.reshape(
             np.stack([np.cos(angles), -np.sin(angles), np.sin(angles), np.cos(angles)], axis=1),
@@ -150,7 +169,7 @@ def sample_homography(
             valid = np.arange(1, n_angles + 1)  # all angles are valid, except angle=0
         else:
             valid = np.where(np.all((rotated >= 0.0) & (rotated <= 1.0), axis=(1, 2)))[0]
-        idx = valid[int(np.random.uniform(low=0, high=valid.shape[0]))]
+        idx = valid[int(rng.uniform(low=0, high=valid.shape[0]))]
         pts2 = rotated[idx]
 
     # Rescale to actual size
@@ -171,4 +190,23 @@ def sample_homography(
     homography[0, :] = flat_homography[0][:3]
     homography[1, :] = flat_homography[0][3:6]
     homography[2, :2] = flat_homography[0][6:]
+
+    if fit_to_frame:
+        # Post-compose a uniform scale + translation so the *entire* original
+        # image maps inside the output frame (letterbox), guaranteeing nothing
+        # is cut off. `shape` is (W, H) here; the homography maps original -> warped.
+        w, h = shape
+        corners = np.array(
+            [[0.0, 0.0, 1.0], [0.0, h, 1.0], [w, h, 1.0], [w, 0.0, 1.0]]
+        ).T  # (3, 4): homogeneous (x, y, 1) corners of the full original image
+        warped = homography @ corners
+        warped = warped[:2] / warped[2]  # (2, 4): (x, y) of the warped corners
+        (xmin, ymin), (xmax, ymax) = warped.min(axis=1), warped.max(axis=1)
+        s = min(w / (xmax - xmin), h / (ymax - ymin))  # shrink to fit, keep aspect
+        s = max(s, min_fit_scale)  # cap the shrink; extreme warps overflow slightly instead
+        tx = (w - s * (xmax - xmin)) / 2 - s * xmin  # center the letterboxed content
+        ty = (h - s * (ymax - ymin)) / 2 - s * ymin
+        fit = np.array([[s, 0.0, tx], [0.0, s, ty], [0.0, 0.0, 1.0]])
+        homography = fit @ homography
+
     return torch.tensor(homography, dtype=torch.float32)
