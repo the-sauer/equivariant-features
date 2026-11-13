@@ -18,5 +18,32 @@
 This module contains the implementations of the models used in this thesis.
 """
 
-from .steerable import *
+import torch
+import lightglue
+import gluefactory
+
 from .hardnet import *
+try:
+    from .steerable import *
+except ImportError:
+    pass
+
+
+class LightGlueDescWrapper(torch.nn.Module):
+    def __init__(self, lightglue_conf, descriptor_conf):
+        super().__init__()
+        lightglue_conf["input_dim"] = descriptor_conf.get("descriptor_dim", 128)
+        self.graph = gluefactory.models.get_model("lightglue")(lightglue_conf)
+        self.descriptor = HardNetLogPolar(**descriptor_conf)
+
+    def forward(self, data):
+        desc0 = self.descriptor(data["patches0"])
+        desc1 = self.descriptor(data["patches1"])
+        return self.graph({
+            "descriptors0": desc0,
+            "descriptors1": desc1,
+            # normalized keypoint coordinates
+            "view0": {"image_size": (1, 1)},
+            "view1": {"image_size": (1, 1)},
+            **data
+        })

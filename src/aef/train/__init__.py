@@ -28,6 +28,13 @@ from tqdm import tqdm
 from .. import export
 from . import losses
 from .descriptor import *
+from .graph import *
+
+
+def _batch_items(data):
+    """Batch size used to weight running loss averages. Patch batches carry "keypoints";
+    the paired-view (graph matcher) batches carry "keypoints0"/"keypoints1" instead."""
+    return (data["keypoints"] if "keypoints" in data else data["keypoints0"]).size(0)
 
 
 class chain:
@@ -207,7 +214,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 batch_size=cfg.training.batch_size,
                 shuffle=sampler is None,
                 sampler=sampler,
-                collate_fn=d.get_collate_func(),
+                collate_fn=d.get_collate_func() if hasattr(d, "get_collate_func") else None,
                 **_loader_kwargs(train_workers, persistent=True),
             ))
     def build_criterion(loss_cfgs):
@@ -245,7 +252,7 @@ def prepare_training(model, train_dataset, validation_dataset, cfg, experiment_n
                 **_loader_kwargs(val_workers, persistent=False))
         return torch.utils.data.DataLoader(
             d, batch_size=cfg.validation.batch_size, shuffle=False,
-            collate_fn=d.get_collate_func(),
+            collate_fn=d.get_collate_func() if hasattr(d, "get_collate_func") else None,
             **_loader_kwargs(val_workers, persistent=False))
 
     validation_entries = [
@@ -380,7 +387,7 @@ def train_func(process_batch):
                         f"Validating {label or ''} [{epoch}/{cfg.training.num_epochs}]{tag}")
                     for data in loop:
                         losses = process_batch(model, data, val_crit, lambda x: x, device, cfg, validation=True)
-                        batch_items = data["keypoints"].size(0)
+                        batch_items = _batch_items(data)
                         loss = torch.sum(torch.stack([l.view(1) * w for (l, w, _) in losses.values()]))
                         # Weighted total drives best.pth selection; with the
                         # small/large FPRs at weight 0 this tracks the overall FPR.
@@ -481,9 +488,9 @@ def train_func(process_batch):
                     logging.warning("Loss is NaN or Inf at batch %d, skipping this batch", i)
                     continue
                     
-                cumulative_losses = {n: (cumulative_losses[n] if n in cumulative_losses else 0) + l.item() * data["keypoints"].size(0) for n, (l, _, r) in losses.items() if r}
-                cumulative_loss += loss.item() * data["keypoints"].size(0)
-                n_items += data["keypoints"].size(0)
+                cumulative_losses = {n: (cumulative_losses[n] if n in cumulative_losses else 0) + l.item() * _batch_items(data) for n, (l, _, r) in losses.items() if r}
+                cumulative_loss += loss.item() * _batch_items(data)
+                n_items += _batch_items(data)
                 if loss.requires_grad:
                     try:
                         loss.backward()

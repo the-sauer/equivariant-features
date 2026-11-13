@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import collections
+import logging
 import math
 import random
 import re
@@ -88,7 +89,7 @@ _BLOB_BITS = 16
 def _uid_of(name):
     # Sequence names are either `<media>_<uid>` (tracked) or `<uid>` (PDF render); return
     # the trailing hex board uid (works for both forms), or None if it doesn't match.
-    m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]+)", name)
+    m = re.fullmatch(r"(?:.*_)?([A-Fa-f0-9]{3})", name)
     return m[1] if m else None
 
 
@@ -231,6 +232,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     all_patches, all_masks = [], []
     all_track_ids, all_track_lengths = [], []
     all_affine_shapes, all_is_pdf, all_view_angles = [], [], []
+    all_coords = []
 
     for name in seq_names:
         sg = seqs[name]
@@ -263,6 +265,7 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
         patches = _read_rows(g["patches"], sel)
         n = patches.shape[0]
         all_patches.append(patches)
+        all_coords.append(_read_rows(g["coords"], sel))
         if angles is None:
             all_view_angles.append(np.full(n, np.nan))
         else:
@@ -288,8 +291,9 @@ def _load_all_sequences(f, sequences=None, with_mask=False, with_affine=True,
     affine_shapes = cat(all_affine_shapes, np.zeros((0, 2, 2), dtype=np.float32)) if with_affine else None
     is_pdf = cat(all_is_pdf, np.zeros(0, dtype=np.uint8))
     view_angles = cat(all_view_angles, np.zeros(0, dtype=np.float64))
+    coords = cat(all_coords, np.zeros((0, 64, 64), dtype=np.float32))
 
-    return patches, masks, track_ids, track_lengths, affine_shapes, is_pdf, view_angles
+    return patches, masks, track_ids, track_lengths, affine_shapes, is_pdf, view_angles, coords
 
 
 def load_untracked_patches(f, sequences=None, with_mask=False):
@@ -1220,6 +1224,42 @@ class BlobTrackData(torch.utils.data.Dataset):
               f"matchable tracks + {len(confusers)} confusers "
               f"(~{batch_size - n_conf} pos / {n_conf} conf per batch)")
         return _ListBatchSampler(batches)
+
+
+class BlobTrackDataSequenced(torch.utils.data.Dataset):
+    def __init__(self, h5_path, sequences: list[str] | None = None, load_into_memory=True, include_untracked=True, **_):
+        super().__init__()
+
+        with h5py.File(h5_path, "r") as f:
+            if sequences is not None:
+                pdf_sequence_names = sequences
+            else:
+                pdf_sequence_names = set(map(_uid_of, _select_sequences(f["sequences"], sequences)))
+
+            all_sequence_names = set(_select_sequences(f["sequences"], sequences)).difference(pdf_sequence_names)
+
+            self.pdf_sequences = {n: _load_all_sequences(f, n, with_affine=False) for n in pdf_sequence_names}
+            self.all_sequences = [(n, *_load_all_sequences(f, n, with_affine=False)) for n in all_sequence_names]
+
+    def __len__(self):
+        return len(self.all_sequences)
+
+    def __getitem__(self, idx):
+        seq_name, patches, _, track_ids, *_, coords = self.all_sequences[idx]
+        pdf_patches, _, pdf_track_ids, *_, pdf_coords = self.pdf_sequences[_uid_of(seq_name)]
+
+        retval = {
+            "patches0": patches,
+            "ids0": track_ids,
+            "keypoints0": coords,
+            "patches1": pdf_patches,
+            "ids1": pdf_track_ids,
+            "keypoints1": pdf_coords,
+        }
+        for k, v in retval.items():
+            assert v is not None, f"{k} should not be None"
+
+        return retval
 
 
 if __name__ == "__main__":

@@ -1,0 +1,43 @@
+defaults:
+  - track_descriptor_base
+  - _self_
+
+scale: 96
+track_path: ???
+
+model:
+  name: LightGlueDescWrapper
+  params:
+    descriptor_conf:
+      in_channels: 1
+      patch_size: 64
+      head: maxpool
+      antialias: true
+      circular_pad: true
+    lightglue_conf: {}
+
+training:
+  batch_size: 1
+  dataset:
+    name: BlobTrackDataSequenced
+    params:
+      patch_type: logpolar
+      balance_view_angles: false
+  loss: []
+  process_batch: process_batch_blobs_graph
+validation:
+  batch_size: 1
+  dataset:
+    name: BlobTrackDataSequenced
+    params:
+      patch_type: logpolar
+  loss: []
+  process_batch: process_batch_blobs_graph
+experiment_name: test
+
+logging:
+  model_checkpoints: true
+  export_onnx: true
+  checkpoint_every_epoch: false
+  checkpoint_dir: null
+  dir: ./logs

@@ -33,8 +33,10 @@ import torch
 from torch.export import Dim
 
 from . import models
-from .models import escnn_export
-
+try:
+    from .models import escnn_export
+except ImportError:
+    pass
 
 # Ops onnxruntime implements on the CPU EP only: hitting one in a GPU session forces a
 # device->host->device round trip around it. `DFT` is the one this repo kept walking

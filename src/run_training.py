@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import juliacall    # Must be imported before pytorch  # noqa: F401
+# import juliacall    # Must be imported before pytorch  # noqa: F401
 
 from datetime import datetime
 from typing import Any
@@ -24,7 +24,7 @@ import hydra
 import omegaconf
 
 from aef.configuration import Config
-from aef.data import blobboards, get_dataset, get_validation_specs
+from aef.data import get_dataset, get_validation_specs
 from aef.train import train_func
 from aef.models import *
 from aef.train import *

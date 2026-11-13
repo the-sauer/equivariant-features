@@ -26,7 +26,7 @@ except ImportError as e:
 try:
     # Track dataset (real-image track patches from a `.tracks` HDF5 file); needs only
     # h5py, no Julia bridge. Exported so `dataset.name: BlobTrackData` resolves here.
-    from .track import BlobTrackData
+    from .track import BlobTrackData, BlobTrackDataSequenced
 except ImportError as e:
     print("Could not import track dataset:", e)
 
